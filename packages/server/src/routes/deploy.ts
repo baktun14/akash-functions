@@ -91,7 +91,7 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
   // Build SDL with a long-lived runner token. The runner uses it both for the
   // first code fetch and for the poll loop that picks up new versions.
   const runnerToken = signRunner({ fnId: fn.id });
-  const sdl = buildSdl({
+  const sdl = await buildSdl({
     functionId: fn.id,
     initialVersionId: version.id,
     runnerToken,

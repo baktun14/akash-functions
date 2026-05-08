@@ -352,7 +352,7 @@ functionsRouter.post('/:id/clone', async (c) => {
 
   // Build SDL + fire pipeline (same shape as POST /:id/deploy).
   const runnerToken = signRunner({ fnId: fn.id });
-  const sdl = buildSdl({
+  const sdl = await buildSdl({
     functionId: fn.id,
     initialVersionId: version.id,
     runnerToken,
