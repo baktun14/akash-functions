@@ -2,7 +2,7 @@
 // Returns immediately with the deployment row; the pipeline runs in the
 // background and updates the row's state.
 
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, notInArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -58,6 +58,25 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
 
   if (!version) throw new HTTPException(400, { message: 'No code version to deploy' });
 
+  // 1 function = 1 deployment. If a non-closed deployment already exists,
+  // refuse — the user must close it via settings (or clone the function) before
+  // attempting another deploy.
+  const [existing] = await db
+    .select({ id: deployments.id, state: deployments.state })
+    .from(deployments)
+    .where(
+      and(
+        eq(deployments.functionId, fn.id),
+        notInArray(deployments.state, ['closed', 'failed'])
+      )
+    )
+    .limit(1);
+  if (existing) {
+    throw new HTTPException(409, {
+      message: `Function already has an active deployment (state=${existing.state}). Close it from settings, or clone the function to deploy a new copy.`,
+    });
+  }
+
   // Persist deployment row first so the frontend has something to poll.
   const [dep] = await db
     .insert(deployments)
@@ -80,7 +99,8 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
   });
 
   // Fire-and-forget the pipeline. The frontend polls /:id/deployments/:depId.
-  startDeployPipeline({ bearerToken: akashKey, deploymentId: dep.id, sdl });
+  // serviceName must match the SDL's `services.<name>` key — we use 'fn'.
+  startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn' });
 
   return c.json(toRecord(dep), 202);
 });

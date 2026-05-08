@@ -1,38 +1,43 @@
 // Deploy pipeline — fire-and-forget background worker.
 //
-// 1. Validate SDL (best effort).
-// 2. Create deployment, store dseq.
-// 3. Poll bids until at least one shows up.
-// 4. Accept the cheapest.
-// 5. Poll lease status until the service URIs land.
-// 6. Mark live.
+// 1. Create deployment, capture dseq + manifest from Console API.
+// 2. Poll bids until at least one shows up.
+// 3. Submit the cheapest bid as a lease (the manifest goes to the provider here).
+// 4. Poll the deployment until lease.status.services[serviceName].uris is set.
+// 5. Mark live.
 
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments } from '../db/schema';
 import { env } from '../env';
 import { log } from '../lib/log';
-import { ConsoleApiError, consoleApi } from './console-client';
+import { ConsoleApiError, consoleApi, type Lease } from './console-client';
 
 export type StartDeployArgs = {
-  bearerToken: string;
+  apiKey: string;
   deploymentId: string;
   sdl: string;
+  /** Service name in the SDL; used to extract URIs from lease status. */
+  serviceName: string;
 };
 
 const BID_POLL_INTERVAL_MS = 2000;
 const BID_POLL_TIMEOUT_MS = 60_000;
-const STATUS_POLL_INTERVAL_MS = 2000;
-const STATUS_POLL_TIMEOUT_MS = 120_000;
+const STATUS_POLL_INTERVAL_MS = 3000;
+const STATUS_POLL_TIMEOUT_MS = 180_000;
 
 export function startDeployPipeline(args: StartDeployArgs): void {
-  // Run async, swallow rejections — state is persisted to deployments row.
   void runPipeline(args).catch((err) => {
     log.error('pipeline crashed', { err: String(err), deploymentId: args.deploymentId });
   });
 }
 
-async function runPipeline({ bearerToken, deploymentId, sdl }: StartDeployArgs): Promise<void> {
+async function runPipeline({
+  apiKey,
+  deploymentId,
+  sdl,
+  serviceName,
+}: StartDeployArgs): Promise<void> {
   const setState = async (
     state: string,
     extra: Partial<typeof deployments.$inferInsert> = {}
@@ -41,60 +46,63 @@ async function runPipeline({ bearerToken, deploymentId, sdl }: StartDeployArgs):
   };
 
   try {
-    // 1. Optional pre-flight validate. We swallow validation errors and let
-    //    createDeployment fail authoritatively, but log them.
-    try {
-      const validation = await consoleApi.validateSdl(bearerToken, sdl);
-      if (!validation.valid) {
-        log.warn('sdl validation reported invalid', { deploymentId });
-      }
-    } catch (err) {
-      log.warn('sdl validation failed', { deploymentId, err: String(err) });
-    }
-
-    // 2. Create deployment.
-    const created = await consoleApi.createDeployment(bearerToken, {
+    // 1. Create deployment.
+    const created = await consoleApi.createDeployment(apiKey, {
       sdl,
       deposit: env.DEPLOY_DEPOSIT,
     });
-    const dseq = created.dseq;
+    const { dseq, manifest } = created;
     await setState('bidding', { dseq });
-    log.info('deployment created', { deploymentId, dseq });
+    log.info('deployment created', { deploymentId, dseq, txHash: created.signTx.transactionHash });
 
-    // 3. Poll bids.
+    // 2. Poll bids.
     const bid = await pollUntil({
       label: 'bids',
       intervalMs: BID_POLL_INTERVAL_MS,
       timeoutMs: BID_POLL_TIMEOUT_MS,
       fn: async () => {
-        const bids = await consoleApi.getBids(bearerToken, dseq);
-        if (!bids.length) return undefined;
-        // Lowest price first.
-        return bids
+        const bids = await consoleApi.getBids(apiKey, dseq);
+        const open = bids.filter((b) => b.state === 'open' || b.state === 'active');
+        if (!open.length) return undefined;
+        return open
           .slice()
           .sort((a, b) => Number(a.price.amount) - Number(b.price.amount))[0];
       },
     });
+    log.info('bid selected', { deploymentId, provider: bid.id.provider, price: bid.price });
 
-    // 4. Accept lease.
-    const lease = await consoleApi.acceptLease(bearerToken, {
-      dseq,
-      gseq: 1,
-      oseq: 1,
-      provider: bid.provider,
+    // 3. Accept lease — this is the step that pushes the manifest to the
+    //    provider, who then schedules our pod.
+    const leaseResp = await consoleApi.acceptLeases(apiKey, {
+      manifest,
+      leases: [
+        {
+          dseq,
+          gseq: bid.id.gseq,
+          oseq: bid.id.oseq,
+          provider: bid.id.provider,
+        },
+      ],
     });
-    await setState('leased', { provider: lease.provider, gseq: lease.gseq, oseq: lease.oseq });
-    log.info('lease accepted', { deploymentId, provider: lease.provider });
+    const ourLease = leaseResp.leases[0];
+    if (!ourLease) throw new Error('lease accept returned no leases');
+    await setState('leased', {
+      provider: ourLease.id.provider,
+      gseq: ourLease.id.gseq,
+      oseq: ourLease.id.oseq,
+    });
+    log.info('lease accepted', { deploymentId, provider: ourLease.id.provider });
 
-    // 5. Poll status for URIs.
+    // 4. Poll deployment status for service URIs.
     const uris = await pollUntil({
-      label: 'lease-status',
+      label: 'service-uris',
       intervalMs: STATUS_POLL_INTERVAL_MS,
       timeoutMs: STATUS_POLL_TIMEOUT_MS,
       fn: async () => {
-        const status = await consoleApi.getLeaseStatus(bearerToken, dseq, 1, 1);
-        const fn = status.services?.fn;
-        if (fn?.uris && fn.uris.length > 0) return fn.uris;
+        const detail = await consoleApi.getDeployment(apiKey, dseq);
+        const lease = pickLease(detail.leases, ourLease);
+        const svc = lease?.status?.services?.[serviceName];
+        if (svc?.uris && svc.uris.length > 0) return svc.uris;
         return undefined;
       },
     });
@@ -107,6 +115,15 @@ async function runPipeline({ bearerToken, deploymentId, sdl }: StartDeployArgs):
     log.error('pipeline failed', { deploymentId, err: message });
     await setState('failed', { errorMessage: message }).catch(() => undefined);
   }
+}
+
+function pickLease(leases: Lease[], target: Lease): Lease | undefined {
+  return leases.find(
+    (l) =>
+      l.id.gseq === target.id.gseq &&
+      l.id.oseq === target.id.oseq &&
+      l.id.provider === target.id.provider
+  );
 }
 
 async function pollUntil<T>({
