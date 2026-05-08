@@ -14,9 +14,11 @@ const LANG_TABS: { id: Lang; label: string }[] = [
   { id: 'sdk',    label: 'SDK' },
 ];
 
-export function UseThisFunction({ svc }: { svc: FunctionRecord }) {
+export function UseThisFunction({ svc, url: urlOverride }: { svc: FunctionRecord; url?: string }) {
   const [tab, setTab] = useState<Lang>('curl');
-  const url = `https://${svc.subdomain}`;
+  // Prefer the live ingress URL passed in by the parent. The function record's
+  // subdomain may still be the placeholder while the list query catches up.
+  const url = urlOverride ?? `https://${svc.subdomain}`;
 
   const samples: Record<Lang, string[][]> = {
     curl: [
