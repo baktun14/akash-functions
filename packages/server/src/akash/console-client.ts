@@ -122,10 +122,14 @@ async function call<T>(
       (payload as { error?: { code?: string }; code?: string })?.error?.code ??
       (payload as { code?: string })?.code ??
       `HTTP_${res.status}`;
-    const message =
+    // When the upstream returned non-JSON (Cloudflare/nginx error pages on
+    // 5xx, etc.), there's no useful structured message. Falling back to the
+    // raw body would dump HTML into the deployment's errorMessage, so we
+    // synthesise a short status-line message instead.
+    const jsonMessage =
       (payload as { error?: { message?: string }; message?: string })?.error?.message ??
-      (payload as { message?: string })?.message ??
-      (text || res.statusText);
+      (payload as { message?: string })?.message;
+    const message = jsonMessage ?? `${res.status} ${res.statusText || 'upstream error'}`.trim();
     throw new ConsoleApiError(res.status, code, message, payload, path);
   }
 
