@@ -6,11 +6,12 @@ import { api } from '../../lib/api';
 import { FnLogo, Icon } from '../icons';
 import { DeploymentsTab } from './tabs/DeploymentsTab';
 import { SourceCodeTab } from './tabs/SourceCodeTab';
+import { HistoryTab } from './tabs/HistoryTab';
 import { VariablesTab } from './tabs/VariablesTab';
 import { MetricsTab } from './tabs/MetricsTab';
 import { SettingsTab } from './tabs/SettingsTab';
 
-const TABS = ['Deployments', 'Source Code', 'Variables', 'Metrics', 'Settings'] as const;
+const TABS = ['Deployments', 'Source Code', 'History', 'Variables', 'Metrics', 'Settings'] as const;
 type TabName = (typeof TABS)[number];
 
 const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
@@ -185,7 +186,8 @@ export function ServicePanel({ svc, session, onClose, onRedeploy, onDelete }: Pr
       <div className="scroll" style={{ flex: 1, overflowY: 'auto', padding: '32px 36px 80px' }}>
         <div key={tab} className="fade-up" style={{ maxWidth: 1100, margin: '0 auto' }}>
           {tab === 'Deployments' && <DeploymentsTab svc={svc} />}
-          {tab === 'Source Code' && <SourceCodeTab />}
+          {tab === 'Source Code' && <SourceCodeTab svc={svc} />}
+          {tab === 'History' && <HistoryTab svc={svc} />}
           {tab === 'Variables' && <VariablesTab svc={svc} />}
           {tab === 'Metrics' && <MetricsTab />}
           {tab === 'Settings' && (

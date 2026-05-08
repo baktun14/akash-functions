@@ -1,0 +1,2 @@
+ALTER TABLE "function_versions" ADD COLUMN "message" text;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "fn_versions_function_created_idx" ON "function_versions" USING btree ("function_id","created_at" desc);

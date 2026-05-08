@@ -9,15 +9,25 @@ import type {
   UsageInfo,
   DeploymentRecord,
   TokenLine,
+  FunctionVersionSummary,
+  FunctionVersionDetail,
+  UpdateCodeRequest,
 } from '@shared/types';
 import {
   AKASHML_KEY,
   SERVICES_KEY,
   SESSION_KEY,
+  VERSIONS_KEY_PREFIX,
   readJSON,
   removeKey,
   writeJSON,
 } from './storage';
+
+export type UpdateCodeResult = {
+  id: string;
+  createdAt: string;
+  message: string | null;
+};
 
 export interface ApiClient {
   getSession(): Session | null;
@@ -27,9 +37,24 @@ export interface ApiClient {
 
   listServices(): Promise<FunctionRecord[]>;
   deploy(sample: CodeSample): Promise<FunctionRecord>;
+  // Creates a new function from an existing one's source and fires deploy.
+  // Returns the NEW function record (not the source). 1 function = 1 deployment.
+  cloneAndDeploy(fnId: string): Promise<FunctionRecord>;
   remove(id: string): Promise<void>;
 
   getDeployment(fnId: string, depId: string): Promise<DeploymentRecord>;
+
+  // Version history & code editing.
+  listVersions(fnId: string): Promise<FunctionVersionSummary[]>;
+  getVersion(fnId: string, versionId: string): Promise<FunctionVersionDetail>;
+  getLatestVersion(fnId: string): Promise<FunctionVersionDetail>;
+  updateCode(fnId: string, body: UpdateCodeRequest): Promise<UpdateCodeResult>;
+  restoreVersion(
+    fnId: string,
+    versionId: string,
+    opts?: { message?: string }
+  ): Promise<UpdateCodeResult>;
+  deployVersion(fnId: string, versionId?: string): Promise<DeploymentRecord>;
 
   getAkashMLConnection(): AkashMLConnection | null;
   saveAkashMLConnection(key: string): AkashMLConnection;
@@ -55,8 +80,54 @@ const DEFAULT_SERVICES: FunctionRecord[] = [
   },
 ];
 
+// Default Hono sample for seeding mock-mode functions that have no recorded
+// versions yet (e.g. the static demo function in DEFAULT_SERVICES).
+const DEFAULT_MOCK_SOURCE = `// index.tsx (Bun v1.3 runtime)
+import { Hono } from "hono@4";
+import { cors } from "hono/cors";
+
+const app = new Hono();
+
+app.use("/*", cors());
+app.get("/", (c) => c.text("Hello world!"));
+app.get("/api/health", (c) => c.json({ status: "ok" }));
+
+Bun.serve({
+  port: import.meta.env.PORT ?? 3000,
+  fetch: app.fetch,
+});
+`;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readMockVersions(fnId: string): FunctionVersionDetail[] {
+  return readJSON<FunctionVersionDetail[]>(VERSIONS_KEY_PREFIX + fnId) ?? [];
+}
+
+function writeMockVersions(fnId: string, list: FunctionVersionDetail[]): void {
+  // Recompute isLatest so only the topmost row is flagged.
+  const tagged = list.map((v, i) => ({ ...v, isLatest: i === 0 }));
+  writeJSON(VERSIONS_KEY_PREFIX + fnId, tagged);
+}
+
+function seedMockVersionsIfEmpty(fnId: string): FunctionVersionDetail[] {
+  const existing = readMockVersions(fnId);
+  if (existing.length > 0) return existing;
+  const seed: FunctionVersionDetail = {
+    id: 'v-' + Math.random().toString(36).slice(2, 9),
+    createdAt: new Date(Date.now() - 86_400_000).toISOString(),
+    message: 'Initial version',
+    preset: 'rest',
+    isLatest: true,
+    deploymentCount: 1,
+    source: { 'src/index.ts': DEFAULT_MOCK_SOURCE },
+    resources: { cpu: '0.5', memory: '512Mi', storage: '1Gi' },
+    envVars: {},
+  };
+  writeMockVersions(fnId, [seed]);
+  return [seed];
 }
 
 class MockApi implements ApiClient {
@@ -112,12 +183,65 @@ class MockApi implements ApiClient {
     };
     services.push(svc);
     writeJSON(SERVICES_KEY, services);
+
+    // Seed an initial version so the History/SourceCode tabs have content.
+    const initial: FunctionVersionDetail = {
+      id: 'v-' + Math.random().toString(36).slice(2, 9),
+      createdAt: new Date().toISOString(),
+      message: 'Initial version',
+      preset: 'rest',
+      isLatest: true,
+      deploymentCount: 1,
+      source: { 'src/index.ts': tokensToSource(sample.code) },
+      resources: { cpu: sample.res.cpu, memory: sample.res.mem, storage: '1Gi' },
+      envVars: {},
+    };
+    writeMockVersions(id, [initial]);
+
     return svc;
   }
 
   async remove(id: string): Promise<void> {
     const services = (await this.listServices()).filter((s) => s.id !== id);
     writeJSON(SERVICES_KEY, services);
+    removeKey(VERSIONS_KEY_PREFIX + id);
+  }
+
+  async cloneAndDeploy(fnId: string): Promise<FunctionRecord> {
+    await delay(600);
+    const services = (await this.listServices()).slice();
+    const source = services.find((s) => s.id === fnId);
+    const baseName = source?.name ?? 'function-clone';
+    const id = 'fn-' + Math.random().toString(36).slice(2, 7);
+    const svc: FunctionRecord = {
+      id,
+      name: baseName,
+      kind: 'function',
+      subdomain: `${baseName}-prod-${Math.random().toString(36).slice(2, 6)}.akash-functions.io`,
+      image: `ghcr.io/akash-network/${baseName}:1.0.0`,
+      status: 'pending',
+      deploymentId: 'dep-' + Math.random().toString(36).slice(2, 8),
+    };
+    services.push(svc);
+    writeJSON(SERVICES_KEY, services);
+
+    // Carry over latest version from source so the cloned fn has code to show.
+    const sourceVersions = readMockVersions(fnId);
+    const sourceLatest = sourceVersions[0];
+    const cloneVersion: FunctionVersionDetail = {
+      id: 'v-' + Math.random().toString(36).slice(2, 9),
+      createdAt: new Date().toISOString(),
+      message: `Cloned from ${sourceLatest?.id.slice(0, 7) ?? 'unknown'}`,
+      preset: sourceLatest?.preset ?? 'rest',
+      isLatest: true,
+      deploymentCount: 1,
+      source: sourceLatest?.source ?? { 'src/index.ts': DEFAULT_MOCK_SOURCE },
+      resources: sourceLatest?.resources ?? { cpu: '0.5', memory: '512Mi', storage: '1Gi' },
+      envVars: sourceLatest?.envVars ?? {},
+    };
+    writeMockVersions(id, [cloneVersion]);
+
+    return svc;
   }
 
   async getDeployment(_fnId: string, depId: string): Promise<DeploymentRecord> {
@@ -133,6 +257,83 @@ class MockApi implements ApiClient {
       uris: ['mock.akash-functions.io'],
       createdAt: new Date().toISOString(),
       liveAt: new Date().toISOString(),
+    };
+  }
+
+  async listVersions(fnId: string): Promise<FunctionVersionSummary[]> {
+    await delay(120);
+    const versions = seedMockVersionsIfEmpty(fnId);
+    return versions.map(({ source: _s, resources: _r, envVars: _e, ...summary }) => summary);
+  }
+
+  async getVersion(fnId: string, versionId: string): Promise<FunctionVersionDetail> {
+    await delay(120);
+    const versions = seedMockVersionsIfEmpty(fnId);
+    const v = versions.find((x) => x.id === versionId);
+    if (!v) throw new Error('Version not found');
+    return v;
+  }
+
+  async getLatestVersion(fnId: string): Promise<FunctionVersionDetail> {
+    await delay(120);
+    const versions = seedMockVersionsIfEmpty(fnId);
+    const latest = versions[0];
+    if (!latest) throw new Error('No versions for function');
+    return latest;
+  }
+
+  async updateCode(fnId: string, body: UpdateCodeRequest): Promise<UpdateCodeResult> {
+    await delay(400);
+    const versions = seedMockVersionsIfEmpty(fnId);
+    const prev = versions[0];
+    const created: FunctionVersionDetail = {
+      id: 'v-' + Math.random().toString(36).slice(2, 9),
+      createdAt: new Date().toISOString(),
+      message: body.message ?? null,
+      preset: prev?.preset ?? 'rest',
+      isLatest: true,
+      deploymentCount: 0,
+      source: body.source,
+      resources: body.resources ?? prev?.resources ?? { cpu: '0.5', memory: '512Mi', storage: '1Gi' },
+      envVars: body.envVars ?? prev?.envVars ?? {},
+    };
+    writeMockVersions(fnId, [created, ...versions]);
+    return { id: created.id, createdAt: created.createdAt, message: created.message };
+  }
+
+  async restoreVersion(
+    fnId: string,
+    versionId: string,
+    opts?: { message?: string }
+  ): Promise<UpdateCodeResult> {
+    await delay(400);
+    const versions = seedMockVersionsIfEmpty(fnId);
+    const target = versions.find((v) => v.id === versionId);
+    if (!target) throw new Error('Version not found');
+    const defaultMessage = `Restored from ${target.id.slice(0, 7)} @ ${target.createdAt}`;
+    const created: FunctionVersionDetail = {
+      id: 'v-' + Math.random().toString(36).slice(2, 9),
+      createdAt: new Date().toISOString(),
+      message: opts?.message ?? defaultMessage,
+      preset: target.preset,
+      isLatest: true,
+      deploymentCount: 0,
+      source: target.source,
+      resources: target.resources,
+      envVars: target.envVars,
+    };
+    writeMockVersions(fnId, [created, ...versions]);
+    return { id: created.id, createdAt: created.createdAt, message: created.message };
+  }
+
+  async deployVersion(_fnId: string, _versionId?: string): Promise<DeploymentRecord> {
+    await delay(500);
+    return {
+      id: 'dep-' + Math.random().toString(36).slice(2, 8),
+      functionId: 'mock',
+      versionId: 'mock',
+      state: 'pending',
+      createdAt: new Date().toISOString(),
     };
   }
 
@@ -227,6 +428,8 @@ class LiveApi implements ApiClient {
 
   async deploy(sample: CodeSample): Promise<FunctionRecord> {
     // Two-phase: create the function record, then trigger the deploy pipeline.
+    // If the second call fails, tombstone the function so it doesn't show up
+    // in the list as an "idle" zombie the user has to clean up by hand.
     const fn = await this.req<FunctionRecord>('/api/functions', {
       method: 'POST',
       body: JSON.stringify({
@@ -241,19 +444,74 @@ class LiveApi implements ApiClient {
         },
       }),
     });
-    const dep = await this.req<DeploymentRecord>(
-      `/api/functions/${fn.id}/deploy`,
-      { method: 'POST', body: JSON.stringify({}) }
-    );
-    return { ...fn, deploymentId: dep.id };
+    try {
+      const dep = await this.req<DeploymentRecord>(
+        `/api/functions/${fn.id}/deploy`,
+        { method: 'POST', body: JSON.stringify({}) }
+      );
+      return { ...fn, deploymentId: dep.id };
+    } catch (err) {
+      await this.req(`/api/functions/${fn.id}`, { method: 'DELETE' }).catch(() => undefined);
+      throw err;
+    }
   }
 
   async remove(id: string): Promise<void> {
     await this.req(`/api/functions/${id}`, { method: 'DELETE' });
   }
 
+  async cloneAndDeploy(fnId: string): Promise<FunctionRecord> {
+    return this.req<FunctionRecord>(`/api/functions/${fnId}/clone`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
   async getDeployment(fnId: string, depId: string): Promise<DeploymentRecord> {
     return this.req<DeploymentRecord>(`/api/functions/${fnId}/deployments/${depId}`);
+  }
+
+  async listVersions(fnId: string): Promise<FunctionVersionSummary[]> {
+    return this.req<FunctionVersionSummary[]>(`/api/functions/${fnId}/versions`);
+  }
+
+  async getVersion(fnId: string, versionId: string): Promise<FunctionVersionDetail> {
+    return this.req<FunctionVersionDetail>(`/api/functions/${fnId}/versions/${versionId}`);
+  }
+
+  async getLatestVersion(fnId: string): Promise<FunctionVersionDetail> {
+    const list = await this.listVersions(fnId);
+    const latest = list[0];
+    if (!latest) throw new Error('No versions for function');
+    return this.getVersion(fnId, latest.id);
+  }
+
+  async updateCode(fnId: string, body: UpdateCodeRequest): Promise<UpdateCodeResult> {
+    return this.req<UpdateCodeResult>(`/api/functions/${fnId}/code`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async restoreVersion(
+    fnId: string,
+    versionId: string,
+    opts?: { message?: string }
+  ): Promise<UpdateCodeResult> {
+    return this.req<UpdateCodeResult>(
+      `/api/functions/${fnId}/versions/${versionId}/restore`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts ?? {}),
+      }
+    );
+  }
+
+  async deployVersion(fnId: string, versionId?: string): Promise<DeploymentRecord> {
+    return this.req<DeploymentRecord>(`/api/functions/${fnId}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify(versionId ? { versionId } : {}),
+    });
   }
 
   getAkashMLConnection(): AkashMLConnection | null {

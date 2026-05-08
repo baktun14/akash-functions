@@ -1,5 +1,6 @@
-import { sql } from 'drizzle-orm';
+import { sql, desc } from 'drizzle-orm';
 import {
+  index,
   integer,
   jsonb,
   pgTable,
@@ -22,22 +23,32 @@ export const functions = pgTable('functions', {
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
 });
 
-export const functionVersions = pgTable('function_versions', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  functionId: uuid('function_id')
-    .notNull()
-    .references(() => functions.id, { onDelete: 'cascade' }),
-  preset: text('preset').notNull(),
-  prompt: text('prompt'),
-  source: jsonb('source').notNull().$type<Record<string, string>>(),
-  resources: jsonb('resources').notNull().$type<{
-    cpu: string;
-    memory: string;
-    storage: string;
-  }>(),
-  envVars: jsonb('env_vars').notNull().default(sql`'{}'::jsonb`).$type<Record<string, string>>(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const functionVersions = pgTable(
+  'function_versions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    functionId: uuid('function_id')
+      .notNull()
+      .references(() => functions.id, { onDelete: 'cascade' }),
+    preset: text('preset').notNull(),
+    prompt: text('prompt'),
+    message: text('message'),
+    source: jsonb('source').notNull().$type<Record<string, string>>(),
+    resources: jsonb('resources').notNull().$type<{
+      cpu: string;
+      memory: string;
+      storage: string;
+    }>(),
+    envVars: jsonb('env_vars').notNull().default(sql`'{}'::jsonb`).$type<Record<string, string>>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    funcCreatedIdx: index('fn_versions_function_created_idx').on(
+      table.functionId,
+      desc(table.createdAt)
+    ),
+  })
+);
 
 export const deployments = pgTable('deployments', {
   id: uuid('id').primaryKey().defaultRandom(),

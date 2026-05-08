@@ -8,7 +8,12 @@ export type Session = {
   connectedAt: number;
 };
 
-export type ServiceStatus = 'online' | 'degraded' | 'offline' | 'pending';
+// idle  — function exists but has no deployment (never attempted or orphaned)
+// pending — deployment row in pending/bidding/leased
+// online — deployment is live
+// degraded — deployment alive but unhealthy (reserved; not used yet)
+// offline — deployment failed or closed
+export type ServiceStatus = 'online' | 'degraded' | 'offline' | 'pending' | 'idle';
 
 export type FunctionRecord = {
   id: string;
@@ -117,12 +122,39 @@ export type CreateFunctionRequest = {
 
 export type UpdateCodeRequest = {
   source: Record<string, string>;
+  message?: string;
   resources?: { cpu: string; memory: string; storage: string };
   envVars?: Record<string, string>;
 };
 
 export type DeployRequest = {
   versionId?: string;
+  akashmlKey?: string;
+};
+
+export type FunctionVersionSummary = {
+  id: string;
+  createdAt: string;
+  message: string | null;
+  preset: PresetId;
+  isLatest: boolean;
+  deploymentCount: number;
+};
+
+export type FunctionVersionDetail = FunctionVersionSummary & {
+  source: Record<string, string>;
+  resources: { cpu: string; memory: string; storage: string };
+  envVars: Record<string, string>;
+};
+
+export type RestoreVersionRequest = {
+  message?: string;
+};
+
+export type UpdateCodeResponse = {
+  id: string;
+  createdAt: string;
+  message: string | null;
 };
 
 export type ApiError = {

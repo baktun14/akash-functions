@@ -3,6 +3,7 @@
 export const SESSION_KEY = 'akash_functions_session_v1';
 export const SERVICES_KEY = 'akash_functions_services_v2';
 export const AKASHML_KEY = 'akashml_connection_v1';
+export const VERSIONS_KEY_PREFIX = 'akash_functions_versions_v1__';
 
 export function readJSON<T>(key: string): T | null {
   try {

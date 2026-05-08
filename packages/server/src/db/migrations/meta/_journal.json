@@ -8,6 +8,13 @@
       "when": 1778256861398,
       "tag": "0000_pink_king_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1778267655941,
+      "tag": "0001_clever_tigra",
+      "breakpoints": true
     }
   ]
 }

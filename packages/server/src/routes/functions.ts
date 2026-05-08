@@ -1,15 +1,23 @@
 // /api/functions — CRUD for function records and their version history.
 
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import type { FunctionRecord } from '@shared/types';
+import type {
+  FunctionRecord,
+  FunctionVersionDetail,
+  FunctionVersionSummary,
+  PresetId,
+} from '@shared/types';
 import { consoleApi } from '../akash/console-client';
+import { startDeployPipeline } from '../akash/pipeline';
+import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
+import { signCode } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { log } from '../lib/log';
 
@@ -19,11 +27,21 @@ const ResourceSchema = z.object({
   storage: z.string(),
 });
 
+// Per-file 1MB cap, plus total-size cap of 5MB to keep JSONB rows reasonable.
+const MAX_FILE_BYTES = 1_000_000;
+const MAX_TOTAL_BYTES = 5_000_000;
+const SourceMapSchema = z
+  .record(z.string(), z.string().max(MAX_FILE_BYTES, 'file too large (max 1MB)'))
+  .refine(
+    (m) => Object.values(m).reduce((n, s) => n + s.length, 0) <= MAX_TOTAL_BYTES,
+    { message: 'source map too large (max 5MB total)' }
+  );
+
 const CreateBody = z.object({
   name: z.string().min(1).max(60),
   preset: z.enum(['rest', 'jsx', 'cron', 'gpu']),
   prompt: z.string().optional(),
-  source: z.record(z.string(), z.string()),
+  source: SourceMapSchema,
   resources: ResourceSchema,
   envVars: z.record(z.string(), z.string()).optional(),
 });
@@ -31,9 +49,14 @@ const CreateBody = z.object({
 const UpdateNameBody = z.object({ name: z.string().min(1).max(60) });
 
 const UpdateCodeBody = z.object({
-  source: z.record(z.string(), z.string()),
+  source: SourceMapSchema,
+  message: z.string().max(200).optional(),
   resources: ResourceSchema.optional(),
   envVars: z.record(z.string(), z.string()).optional(),
+});
+
+const RestoreBody = z.object({
+  message: z.string().max(200).optional(),
 });
 
 export const functionsRouter = new Hono<{ Variables: AuthVars }>();
@@ -59,7 +82,7 @@ functionsRouter.get('/', async (c) => {
         kind: 'function' as const,
         subdomain: dep?.uris?.[0] ?? `${fn.subdomain}.akash-functions.io`,
         image: env.RUNNER_IMAGE,
-        status: stateToStatus(dep?.state ?? fn.status),
+        status: dep ? stateToStatus(dep.state) : 'idle',
         latestDeploymentId: dep?.id,
       };
     })
@@ -139,13 +162,209 @@ functionsRouter.put('/:id/code', zValidator('json', UpdateCodeBody), async (c) =
       functionId: id,
       preset: latest?.preset ?? 'rest',
       prompt: latest?.prompt ?? null,
+      message: body.message ?? null,
       source: body.source,
       resources: body.resources ?? latest?.resources ?? { cpu: '0.5', memory: '512Mi', storage: '1Gi' },
       envVars: body.envVars ?? latest?.envVars ?? {},
     })
     .returning();
   if (!version) throw new HTTPException(500, { message: 'Insert failed' });
-  return c.json({ id: version.id, createdAt: version.createdAt }, 201);
+  return c.json(
+    { id: version.id, createdAt: version.createdAt.toISOString(), message: version.message },
+    201
+  );
+});
+
+// GET /:id/versions — list every version of a function (most recent first).
+// Returns lightweight summaries; use GET /:id/versions/:versionId for source.
+functionsRouter.get('/:id/versions', async (c) => {
+  const ownerHash = c.get('ownerHash');
+  const id = c.req.param('id');
+  await getFn(ownerHash, id);
+
+  const rows = await db
+    .select({
+      id: functionVersions.id,
+      createdAt: functionVersions.createdAt,
+      message: functionVersions.message,
+      preset: functionVersions.preset,
+      deploymentCount: sql<number>`(
+        SELECT COUNT(*)::int FROM ${deployments}
+        WHERE ${deployments.versionId} = ${functionVersions.id}
+      )`,
+    })
+    .from(functionVersions)
+    .where(eq(functionVersions.functionId, id))
+    .orderBy(desc(functionVersions.createdAt))
+    .limit(100);
+
+  const list: FunctionVersionSummary[] = rows.map((r, i) => ({
+    id: r.id,
+    createdAt: r.createdAt.toISOString(),
+    message: r.message,
+    preset: r.preset as PresetId,
+    isLatest: i === 0,
+    deploymentCount: r.deploymentCount,
+  }));
+
+  return c.json(list);
+});
+
+// GET /:id/versions/:versionId — full detail for a single version (source + config).
+functionsRouter.get('/:id/versions/:versionId', async (c) => {
+  const ownerHash = c.get('ownerHash');
+  const id = c.req.param('id');
+  const versionId = c.req.param('versionId');
+  await getFn(ownerHash, id);
+
+  const [v] = await db
+    .select()
+    .from(functionVersions)
+    .where(and(eq(functionVersions.id, versionId), eq(functionVersions.functionId, id)))
+    .limit(1);
+  if (!v) throw new HTTPException(404, { message: 'Version not found' });
+
+  const [latest] = await db
+    .select({ id: functionVersions.id })
+    .from(functionVersions)
+    .where(eq(functionVersions.functionId, id))
+    .orderBy(desc(functionVersions.createdAt))
+    .limit(1);
+
+  const countRows = await db
+    .select({ count: sql<number>`COUNT(*)::int` })
+    .from(deployments)
+    .where(eq(deployments.versionId, v.id));
+  const count = countRows[0]?.count ?? 0;
+
+  const detail: FunctionVersionDetail = {
+    id: v.id,
+    createdAt: v.createdAt.toISOString(),
+    message: v.message,
+    preset: v.preset as PresetId,
+    isLatest: latest?.id === v.id,
+    deploymentCount: count,
+    source: v.source,
+    resources: v.resources,
+    envVars: v.envVars,
+  };
+  return c.json(detail);
+});
+
+// POST /:id/versions/:versionId/restore — copy an old version forward as a new
+// version. Never destructive; the resulting version becomes the latest.
+// Does NOT trigger a deploy on its own.
+functionsRouter.post('/:id/versions/:versionId/restore', zValidator('json', RestoreBody), async (c) => {
+  const ownerHash = c.get('ownerHash');
+  const id = c.req.param('id');
+  const versionId = c.req.param('versionId');
+  await getFn(ownerHash, id);
+  const body = c.req.valid('json');
+
+  const [target] = await db
+    .select()
+    .from(functionVersions)
+    .where(and(eq(functionVersions.id, versionId), eq(functionVersions.functionId, id)))
+    .limit(1);
+  if (!target) throw new HTTPException(404, { message: 'Version not found' });
+
+  const defaultMessage = `Restored from ${target.id.slice(0, 7)} @ ${target.createdAt.toISOString()}`;
+
+  const [created] = await db
+    .insert(functionVersions)
+    .values({
+      functionId: id,
+      preset: target.preset,
+      prompt: target.prompt,
+      message: body.message ?? defaultMessage,
+      source: target.source,
+      resources: target.resources,
+      envVars: target.envVars,
+    })
+    .returning();
+  if (!created) throw new HTTPException(500, { message: 'Insert failed' });
+
+  return c.json(
+    { id: created.id, createdAt: created.createdAt.toISOString(), message: created.message },
+    201
+  );
+});
+
+// POST /:id/clone — create a new function from an existing one's latest version
+// and fire its deploy pipeline. Used by "Redeploy" since 1 function = 1
+// deployment; you can't reuse the original record once it's been deployed.
+functionsRouter.post('/:id/clone', async (c) => {
+  const ownerHash = c.get('ownerHash');
+  const akashKey = c.get('akashKey');
+  const id = c.req.param('id');
+  const source = await getFn(ownerHash, id);
+
+  // Latest version provides source/resources/envVars/preset.
+  const [latest] = await db
+    .select()
+    .from(functionVersions)
+    .where(eq(functionVersions.functionId, id))
+    .orderBy(desc(functionVersions.createdAt))
+    .limit(1);
+  if (!latest) throw new HTTPException(400, { message: 'Source function has no code version' });
+
+  // Insert function + version + pending deployment in one transaction.
+  const { fn, version, dep } = await db.transaction(async (tx) => {
+    const [fn] = await tx
+      .insert(functions)
+      .values({
+        ownerHash,
+        name: source.name,
+        subdomain: mintSubdomain(source.name),
+      })
+      .returning();
+    if (!fn) throw new HTTPException(500, { message: 'Failed to insert cloned function' });
+
+    const [version] = await tx
+      .insert(functionVersions)
+      .values({
+        functionId: fn.id,
+        preset: latest.preset,
+        prompt: latest.prompt,
+        source: latest.source,
+        resources: latest.resources,
+        envVars: latest.envVars,
+      })
+      .returning();
+    if (!version) throw new HTTPException(500, { message: 'Failed to insert cloned version' });
+
+    const [dep] = await tx
+      .insert(deployments)
+      .values({
+        functionId: fn.id,
+        versionId: version.id,
+        state: 'pending',
+      })
+      .returning();
+    if (!dep) throw new HTTPException(500, { message: 'Failed to insert deployment' });
+
+    return { fn, version, dep };
+  });
+
+  // Build SDL + fire pipeline (same shape as POST /:id/deploy).
+  const codeToken = signCode({ fnId: fn.id, versionId: version.id });
+  const sdl = buildSdl({
+    functionId: fn.id,
+    versionId: version.id,
+    codeToken,
+    resources: version.resources,
+    akashmlKey: version.envVars['AKASHML_API_KEY'],
+  });
+  startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn' });
+
+  return c.json(
+    {
+      ...toRecord(fn),
+      deploymentId: dep.id,
+      latestDeploymentId: dep.id,
+    },
+    201
+  );
 });
 
 functionsRouter.delete('/:id', async (c) => {
@@ -229,8 +448,10 @@ function stateToStatus(state: string): FunctionRecord['status'] {
     case 'leased':
       return 'pending';
     case 'failed':
+    case 'closed':
       return 'offline';
     default:
-      return 'pending';
+      // Unknown — treat as no deployment (orphan / draft).
+      return 'idle';
   }
 }

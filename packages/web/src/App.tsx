@@ -12,13 +12,22 @@ import {
   useNavigate,
   useOutletContext,
 } from 'react-router-dom';
-import type { CodeSample, FunctionRecord, PresetId, Session, ToastMsg } from '@shared/types';
+import type {
+  CodeSample,
+  DeploymentRecord,
+  FunctionRecord,
+  FunctionVersionDetail,
+  PresetId,
+  Session,
+  ToastMsg,
+} from '@shared/types';
 import { Sidebar } from './components/shell/Sidebar';
 import { TopBar } from './components/shell/TopBar';
 import { ExpiredBanner } from './components/shell/ExpiredBanner';
 import { Onboarding } from './components/onboarding/Onboarding';
 import { TemplatesPage } from './components/templates/TemplatesPage';
 import { FunctionBuilder } from './components/builder/FunctionBuilder';
+import { FunctionEditor } from './components/builder/FunctionEditor';
 import { Toast } from './components/ui/Toast';
 import { FunctionsPage } from './pages/FunctionsPage';
 import { FunctionDetailPage } from './pages/FunctionDetailPage';
@@ -32,6 +41,10 @@ type LayoutContext = {
   setLocal: (next: FunctionRecord[] | ((prev: FunctionRecord[]) => FunctionRecord[])) => void;
   refresh: () => Promise<void>;
   openBuilder: (preset?: PresetId | null) => void;
+  openEditor: (fnId: string) => void;
+  // Tick that bumps after a save/restore so subscribed tabs (Source Code,
+  // History) re-fetch their version data without prop-drilling.
+  versionRev: number;
 };
 
 export function useLayout(): LayoutContext {
@@ -83,6 +96,11 @@ function Layout({
   const { services, refresh, setLocal } = useFunctions();
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderPreset, setBuilderPreset] = useState<PresetId | null>(null);
+  const [editorTarget, setEditorTarget] = useState<
+    { fnId: string; detail: FunctionVersionDetail } | null
+  >(null);
+  const [editorLoading, setEditorLoading] = useState(false);
+  const [versionRev, setVersionRev] = useState(0);
   const [toast, setToast] = useState<ToastMsg | null>(null);
   const [expired, setExpired] = useState(false);
 
@@ -101,6 +119,48 @@ function Layout({
   const openBuilder = (preset: PresetId | null = null) => {
     setBuilderPreset(preset);
     setBuilderOpen(true);
+  };
+
+  // Pre-loads the latest version so the editor opens with the source already
+  // populated — avoids a flash of empty editor while fetching.
+  const openEditor = async (fnId: string) => {
+    if (editorLoading || editorTarget) return;
+    setEditorLoading(true);
+    try {
+      const detail = await api.getLatestVersion(fnId);
+      setEditorTarget({ fnId, detail });
+    } catch (err) {
+      setToast({ kind: 'error', text: `Failed to open editor: ${(err as Error).message}` });
+      setTimeout(() => setToast(null), 4000);
+    } finally {
+      setEditorLoading(false);
+    }
+  };
+
+  const handleEditorSaved = (_versionId: string) => {
+    setEditorTarget(null);
+    setVersionRev((r) => r + 1);
+    setToast({ kind: 'ok', text: 'Saved a new version' });
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  const handleEditorSavedAndDeployed = (_versionId: string, dep: DeploymentRecord) => {
+    setEditorTarget(null);
+    setVersionRev((r) => r + 1);
+    // Reflect the new deployment id on the function row so DeploymentsTab can
+    // poll right away.
+    if (editorTarget) {
+      setLocal((cur) =>
+        cur.map((s) =>
+          s.id === editorTarget.fnId
+            ? { ...s, deploymentId: dep.id, latestDeploymentId: dep.id, status: 'pending' }
+            : s
+        )
+      );
+    }
+    setToast({ kind: 'ok', text: 'Saved & deploying new version…' });
+    setTimeout(() => setToast(null), 3500);
+    refresh().catch(() => undefined);
   };
 
   const handleDeploy = async (sample: CodeSample) => {
@@ -123,7 +183,15 @@ function Layout({
 
   const sidebarActive = pathToSidebarId(location.pathname);
 
-  const ctx: LayoutContext = { session, services, setLocal, refresh, openBuilder };
+  const ctx: LayoutContext = {
+    session,
+    services,
+    setLocal,
+    refresh,
+    openBuilder,
+    openEditor,
+    versionRev,
+  };
 
   return (
     <div
@@ -170,6 +238,22 @@ function Layout({
               initialPreset={builderPreset}
               onClose={() => setBuilderOpen(false)}
               onDeploy={handleDeploy}
+            />
+          )}
+          {editorTarget && (
+            <FunctionEditor
+              functionId={editorTarget.fnId}
+              functionName={
+                services.find((s) => s.id === editorTarget.fnId)?.name ?? 'function'
+              }
+              initialDetail={editorTarget.detail}
+              hasActiveDeployment={
+                services.find((s) => s.id === editorTarget.fnId)?.status === 'online' ||
+                services.find((s) => s.id === editorTarget.fnId)?.status === 'pending'
+              }
+              onClose={() => setEditorTarget(null)}
+              onSaved={handleEditorSaved}
+              onSavedAndDeployed={handleEditorSavedAndDeployed}
             />
           )}
           {toast && <Toast toast={toast} />}
