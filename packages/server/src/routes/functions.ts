@@ -64,11 +64,11 @@ export const functionsRouter = new Hono<{ Variables: AuthVars }>();
 functionsRouter.use('*', requireAkashKey);
 
 functionsRouter.get('/', async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const rows = await db
     .select()
     .from(functions)
-    .where(and(eq(functions.ownerHash, ownerHash), isNull(functions.deletedAt)))
+    .where(and(eq(functions.walletAddress, walletAddress), isNull(functions.deletedAt)))
     .orderBy(desc(functions.createdAt));
 
   // Decorate with the latest deployment URI so the frontend can show it
@@ -93,6 +93,7 @@ functionsRouter.get('/', async (c) => {
 
 functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
   const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const body = c.req.valid('json');
   const subdomain = mintSubdomain(body.name);
 
@@ -101,6 +102,7 @@ functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
       .insert(functions)
       .values({
         ownerHash,
+        walletAddress,
         name: body.name,
         subdomain,
       })
@@ -123,16 +125,16 @@ functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
 });
 
 functionsRouter.get('/:id', async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
-  const fn = await getFn(ownerHash, id);
+  const fn = await getFn(walletAddress, id);
   return c.json(toRecord(fn));
 });
 
 functionsRouter.put('/:id', zValidator('json', UpdateNameBody), async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
-  await getFn(ownerHash, id);
+  await getFn(walletAddress, id);
   const [updated] = await db
     .update(functions)
     .set({ name: c.req.valid('json').name, updatedAt: new Date() })
@@ -143,9 +145,9 @@ functionsRouter.put('/:id', zValidator('json', UpdateNameBody), async (c) => {
 });
 
 functionsRouter.put('/:id/code', zValidator('json', UpdateCodeBody), async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
-  await getFn(ownerHash, id);
+  await getFn(walletAddress, id);
   const body = c.req.valid('json');
 
   // Need an existing version to copy unset fields from.
@@ -178,9 +180,9 @@ functionsRouter.put('/:id/code', zValidator('json', UpdateCodeBody), async (c) =
 // GET /:id/versions — list every version of a function (most recent first).
 // Returns lightweight summaries; use GET /:id/versions/:versionId for source.
 functionsRouter.get('/:id/versions', async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
-  await getFn(ownerHash, id);
+  await getFn(walletAddress, id);
 
   const rows = await db
     .select({
@@ -212,10 +214,10 @@ functionsRouter.get('/:id/versions', async (c) => {
 
 // GET /:id/versions/:versionId — full detail for a single version (source + config).
 functionsRouter.get('/:id/versions/:versionId', async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
   const versionId = c.req.param('versionId');
-  await getFn(ownerHash, id);
+  await getFn(walletAddress, id);
 
   const [v] = await db
     .select()
@@ -255,10 +257,10 @@ functionsRouter.get('/:id/versions/:versionId', async (c) => {
 // version. Never destructive; the resulting version becomes the latest.
 // Does NOT trigger a deploy on its own.
 functionsRouter.post('/:id/versions/:versionId/restore', zValidator('json', RestoreBody), async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
   const versionId = c.req.param('versionId');
-  await getFn(ownerHash, id);
+  await getFn(walletAddress, id);
   const body = c.req.valid('json');
 
   const [target] = await db
@@ -295,9 +297,10 @@ functionsRouter.post('/:id/versions/:versionId/restore', zValidator('json', Rest
 // deployment; you can't reuse the original record once it's been deployed.
 functionsRouter.post('/:id/clone', async (c) => {
   const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const akashKey = c.get('akashKey');
   const id = c.req.param('id');
-  const source = await getFn(ownerHash, id);
+  const source = await getFn(walletAddress, id);
 
   // Latest version provides source/resources/envVars/preset.
   const [latest] = await db
@@ -314,6 +317,7 @@ functionsRouter.post('/:id/clone', async (c) => {
       .insert(functions)
       .values({
         ownerHash,
+        walletAddress,
         name: source.name,
         subdomain: mintSubdomain(source.name),
       })
@@ -368,9 +372,9 @@ functionsRouter.post('/:id/clone', async (c) => {
 });
 
 functionsRouter.delete('/:id', async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');
-  const fn = await getFn(ownerHash, id);
+  const fn = await getFn(walletAddress, id);
 
   // Best-effort: close any live deployment on Akash before tombstoning.
   const dep = await latestDeployment(fn.id);
@@ -400,11 +404,11 @@ functionsRouter.delete('/:id', async (c) => {
 
 // ─── helpers ───────────────────────────────────────────────────────────
 
-async function getFn(ownerHash: string, id: string) {
+async function getFn(walletAddress: string, id: string) {
   const [fn] = await db
     .select()
     .from(functions)
-    .where(and(eq(functions.id, id), eq(functions.ownerHash, ownerHash), isNull(functions.deletedAt)))
+    .where(and(eq(functions.id, id), eq(functions.walletAddress, walletAddress), isNull(functions.deletedAt)))
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
   return fn;

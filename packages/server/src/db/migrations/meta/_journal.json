@@ -15,6 +15,13 @@
       "when": 1778267655941,
       "tag": "0001_clever_tigra",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778269296713,
+      "tag": "0002_chief_human_torch",
+      "breakpoints": true
     }
   ]
 }

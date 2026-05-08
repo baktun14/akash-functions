@@ -10,7 +10,8 @@
     "typecheck": "tsc -b --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "claim-orphans": "tsx scripts/claim-orphans.ts"
   },
   "dependencies": {
     "@akash-functions/shared": "*",

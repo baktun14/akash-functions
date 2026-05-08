@@ -25,7 +25,7 @@ export const deployRouter = new Hono<{ Variables: AuthVars }>();
 deployRouter.use('*', requireAkashKey);
 
 deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const akashKey = c.get('akashKey');
   const fnId = c.req.param('id');
   const body = c.req.valid('json');
@@ -34,7 +34,7 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
   const [fn] = await db
     .select()
     .from(functions)
-    .where(and(eq(functions.id, fnId), eq(functions.ownerHash, ownerHash), isNull(functions.deletedAt)))
+    .where(and(eq(functions.id, fnId), eq(functions.walletAddress, walletAddress), isNull(functions.deletedAt)))
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
 
@@ -106,14 +106,14 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
 });
 
 deployRouter.get('/:id/deployments/:depId', async (c) => {
-  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
   const fnId = c.req.param('id');
   const depId = c.req.param('depId');
 
   const [fn] = await db
     .select()
     .from(functions)
-    .where(and(eq(functions.id, fnId), eq(functions.ownerHash, ownerHash)))
+    .where(and(eq(functions.id, fnId), eq(functions.walletAddress, walletAddress)))
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
 

@@ -81,12 +81,14 @@ export type LeaseAcceptResp = {
 export class ConsoleApiError extends Error {
   status: number;
   code: string;
+  path?: string;
   details?: unknown;
-  constructor(status: number, code: string, message: string, details?: unknown) {
-    super(message);
+  constructor(status: number, code: string, message: string, details?: unknown, path?: string) {
+    super(path ? `[${path}] ${message}` : message);
     this.status = status;
     this.code = code;
     this.details = details;
+    this.path = path;
   }
 }
 
@@ -124,7 +126,7 @@ async function call<T>(
       (payload as { error?: { message?: string }; message?: string })?.error?.message ??
       (payload as { message?: string })?.message ??
       (text || res.statusText);
-    throw new ConsoleApiError(res.status, code, message, payload);
+    throw new ConsoleApiError(res.status, code, message, payload, path);
   }
 
   // Most endpoints return { data: T }. Some (legacy) return T directly.
@@ -182,4 +184,44 @@ export const consoleApi = {
       'GET',
       '/balances'
     ),
+
+  // GET /v1/user/me — returns the authenticated user. We need `userId` (the
+  // external auth-provider sub) to query /wallets.
+  getCurrentUser: (apiKey: string) =>
+    call<{ id: string; userId: string; email?: string; username?: string }>(
+      apiKey,
+      'GET',
+      '/user/me'
+    ),
+
+  // GET /v1/wallets?userId=… — returns the wallet rows owned by the user. The
+  // `address` (akash1…) is the stable identity we scope functions by.
+  getWallets: (apiKey: string, userId: string) =>
+    call<Array<{ id: number | null; userId: string | null; address: string | null; denom: string; isTrialing: boolean }>>(
+      apiKey,
+      'GET',
+      `/wallets?userId=${encodeURIComponent(userId)}`
+    ),
 };
+
+// Resolve the wallet address for an API key. Two Console hits, but the caller
+// caches the result so this is a once-per-fresh-key cost.
+//
+// /user/me returns two IDs: `id` (internal UUID) and `userId` (auth-provider
+// sub, e.g. "google-oauth2|123…"). /wallets?userId= expects the UUID `id`,
+// not the provider sub — Console reuses the param name confusingly.
+export async function resolveWalletAddress(apiKey: string): Promise<string> {
+  const user = await consoleApi.getCurrentUser(apiKey);
+  if (!user?.id) {
+    throw new ConsoleApiError(500, 'NO_USER_ID', 'Console /user/me did not return a user id');
+  }
+  const wallets = await consoleApi.getWallets(apiKey, user.id);
+  const withAddress = (wallets ?? []).filter((w) => typeof w.address === 'string' && w.address.length > 0);
+  if (withAddress.length === 0) {
+    throw new ConsoleApiError(404, 'NO_WALLET', 'No wallet with an address is associated with this API key');
+  }
+  // If multiple wallets exist, prefer a non-trialing one (production), then the first.
+  // withAddress is non-empty (checked above), and every entry has a string address.
+  const active = withAddress.find((w) => !w.isTrialing) ?? withAddress[0]!;
+  return active.address!;
+}
