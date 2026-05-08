@@ -7,6 +7,7 @@ import { UseThisFunction } from '../UseThisFunction';
 const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
 const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
+const REACHABILITY_POLL_MS = 2000;
 
 function useDeployment(fnId: string, depId: string | undefined): DeploymentRecord | null {
   const [dep, setDep] = useState<DeploymentRecord | null>(null);
@@ -40,6 +41,38 @@ function useDeployment(fnId: string, depId: string | undefined): DeploymentRecor
   }, [fnId, depId]);
 
   return dep;
+}
+
+// Akash reports `live` as soon as the lease's manifest is accepted, but the
+// ingress can take another 10–30s to actually serve traffic. Probe the URL
+// from the browser until it stops erroring (any HTTP response counts — even
+// 404 means the ingress resolved).
+function useReachable(url: string | null): boolean {
+  const [reachable, setReachable] = useState(false);
+
+  useEffect(() => {
+    setReachable(false);
+    if (!url) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const probe = async () => {
+      try {
+        await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+        if (!cancelled) setReachable(true);
+      } catch {
+        if (!cancelled) timer = setTimeout(probe, REACHABILITY_POLL_MS);
+      }
+    };
+    void probe();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [url]);
+
+  return reachable;
 }
 
 type StateMeta = {
@@ -99,13 +132,14 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   const meta = describe(dep);
 
   const liveUri = dep?.uris?.[0];
-  const displayUrl = liveUri ?? svc.subdomain;
-  const showProtocolHttps = !!liveUri && !liveUri.startsWith('http');
-  const externalHref = liveUri
+  const publicUrl = liveUri
     ? liveUri.startsWith('http')
       ? liveUri
       : `https://${liveUri}`
-    : `https://${svc.subdomain}`;
+    : null;
+  // Only probe once Akash says the lease is live — otherwise we'd just be
+  // burning cycles on a URL that doesn't exist yet.
+  const reachable = useReachable(dep?.state === 'live' ? publicUrl : null);
 
   const toneColor =
     meta.tone === 'ok'
@@ -135,41 +169,43 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
 
   return (
     <div>
-      {/* URL bar */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '12px 14px',
-          marginBottom: 14,
-          background: 'var(--bg-elev-2)',
-          border: '1px solid var(--line)',
-          borderRadius: 10,
-        }}
-      >
-        <Icon name="globe" size={14} color="var(--fg-muted)" />
-        <span className="mono" style={{ fontSize: 13, color: 'var(--fg)' }}>
-          {showProtocolHttps ? `https://${displayUrl}` : displayUrl.startsWith('http') ? displayUrl : `https://${displayUrl}`}
-        </span>
-        <div style={{ flex: 1 }} />
-        <button
-          style={{ background: 'transparent', border: 'none', color: 'var(--fg-muted)', padding: 4 }}
-          title="Copy"
-          onClick={() => navigator.clipboard?.writeText(externalHref).catch(() => undefined)}
+      {/* URL bar — only shown once Akash assigns a real public URL. */}
+      {publicUrl && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '12px 14px',
+            marginBottom: 14,
+            background: 'var(--bg-elev-2)',
+            border: '1px solid var(--line)',
+            borderRadius: 10,
+          }}
         >
-          <Icon name="copy" size={13} />
-        </button>
-        <a
-          href={externalHref}
-          target="_blank"
-          rel="noreferrer"
-          style={{ color: 'var(--fg-muted)', padding: 4, display: 'inline-flex' }}
-          title="Open"
-        >
-          <Icon name="external" size={13} />
-        </a>
-      </div>
+          <Icon name="globe" size={14} color="var(--fg-muted)" />
+          <span className="mono" style={{ fontSize: 13, color: 'var(--fg)' }}>
+            {publicUrl}
+          </span>
+          <div style={{ flex: 1 }} />
+          <button
+            style={{ background: 'transparent', border: 'none', color: 'var(--fg-muted)', padding: 4 }}
+            title="Copy"
+            onClick={() => navigator.clipboard?.writeText(publicUrl).catch(() => undefined)}
+          >
+            <Icon name="copy" size={13} />
+          </button>
+          <a
+            href={publicUrl}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: 'var(--fg-muted)', padding: 4, display: 'inline-flex' }}
+            title="Open"
+          >
+            <Icon name="external" size={13} />
+          </a>
+        </div>
+      )}
 
       {/* Active deployment */}
       <div
@@ -249,7 +285,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           <span style={{ color: 'var(--fg)' }}>{meta.body}</span>
         </div>
 
-        {meta.tone === 'ok' && (
+        {meta.tone === 'ok' && reachable && (
           <div
             style={{
               marginTop: 12,
@@ -268,6 +304,30 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
             </span>
             <span style={{ color: 'var(--fg-subtle)' }}>·</span>
             <span style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>ready to receive traffic</span>
+          </div>
+        )}
+
+        {meta.tone === 'ok' && !reachable && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              background: 'rgba(245,165,36,0.06)',
+              border: '1px solid rgba(245,165,36,0.25)',
+              borderRadius: 8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <Icon name="refresh" size={14} color="var(--warn, #f5a524)" className="spin" />
+            <span style={{ fontSize: 13, color: 'var(--warn, #f5a524)', fontWeight: 500 }}>
+              Waiting for ingress
+            </span>
+            <span style={{ color: 'var(--fg-subtle)' }}>·</span>
+            <span style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>
+              {publicUrl ? 'probing URL until it serves traffic…' : 'lease is live, URL pending…'}
+            </span>
           </div>
         )}
 
@@ -292,7 +352,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
         )}
       </div>
 
-      {meta.tone === 'ok' && <UseThisFunction svc={svc} />}
+      {meta.tone === 'ok' && reachable && publicUrl && <UseThisFunction svc={svc} url={publicUrl} />}
     </div>
   );
 }
