@@ -9,6 +9,7 @@
 
 import yaml from 'js-yaml';
 import { env } from '../env';
+import { resolveRunnerImage } from './runner-image';
 
 export type ResourceSpec = {
   cpu: string;     // "0.5" or "0.5 vCPU"
@@ -47,9 +48,10 @@ function normalizeSize(input: string): string {
   return cleaned;
 }
 
-export function buildSdl(args: BuildSdlArgs): string {
+export async function buildSdl(args: BuildSdlArgs): Promise<string> {
   const backendBaseUrl = (args.backendBaseUrl ?? env.CODE_HOST_BASE).replace(/\/$/, '');
   const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const runnerImage = await resolveRunnerImage();
 
   const envVars: string[] = [
     `FUNCTION_ID=${args.functionId}`,
@@ -67,7 +69,7 @@ export function buildSdl(args: BuildSdlArgs): string {
     version: '2.0',
     services: {
       fn: {
-        image: env.RUNNER_IMAGE,
+        image: runnerImage,
         expose: [
           {
             port: 3000,
