@@ -1,84 +1,129 @@
-// Top-level App: routes between Onboarding ↔ shell; manages session, services,
-// modals, banner, toasts.
+// Top-level App: auth gate + routed shell.
+// Onboarding takes over when there's no session; otherwise the Layout renders
+// the sidebar/topbar around routed page content.
 
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
+import {
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useOutletContext,
+} from 'react-router-dom';
 import type { CodeSample, FunctionRecord, PresetId, Session, ToastMsg } from '@shared/types';
 import { Sidebar } from './components/shell/Sidebar';
 import { TopBar } from './components/shell/TopBar';
 import { ExpiredBanner } from './components/shell/ExpiredBanner';
 import { Onboarding } from './components/onboarding/Onboarding';
-import { Canvas } from './components/canvas/Canvas';
-import { ServicePanel } from './components/service-panel/ServicePanel';
 import { TemplatesPage } from './components/templates/TemplatesPage';
 import { FunctionBuilder } from './components/builder/FunctionBuilder';
 import { Toast } from './components/ui/Toast';
-import { Icon } from './components/icons';
+import { FunctionsPage } from './pages/FunctionsPage';
+import { FunctionDetailPage } from './pages/FunctionDetailPage';
+import { PlaceholderPage } from './pages/PlaceholderPage';
+import { useFunctions } from './lib/useFunctions';
 import { api } from './lib/api';
 
-type View = 'deployments' | 'templates' | 'logs' | 'keys' | 'usage' | 'docs' | 'support';
+type LayoutContext = {
+  session: Session;
+  services: FunctionRecord[];
+  setLocal: (next: FunctionRecord[] | ((prev: FunctionRecord[]) => FunctionRecord[])) => void;
+  refresh: () => Promise<void>;
+  openBuilder: (preset?: PresetId | null) => void;
+};
+
+export function useLayout(): LayoutContext {
+  return useOutletContext<LayoutContext>();
+}
 
 export default function App(): ReactElement {
   const [session, setSession] = useState<Session | null>(() => api.getSession());
-  const [services, setServices] = useState<FunctionRecord[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [view, setView] = useState<View>('deployments');
-  const [builderOpen, setBuilderOpen] = useState(false);
-  const [builderPreset, setBuilderPreset] = useState<PresetId | null>(null);
-  const [toast, setToast] = useState<ToastMsg | null>(null);
-  const [expired, setExpired] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
-
-  // Load services whenever session changes.
-  useEffect(() => {
-    if (!session) {
-      setServices([]);
-      return;
-    }
-    let cancelled = false;
-    api.listServices().then((list) => {
-      if (!cancelled) setServices(list);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [session]);
-
-  // ?expired=1 banner on mount.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('expired') === '1' && session) setExpired(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const active = useMemo(
-    () => services.find((s) => s.id === activeId) ?? null,
-    [services, activeId]
-  );
 
   const handleConnect = (sess: Session) => {
     setSession(sess);
-    setExpired(false);
     setReconnecting(false);
-  };
-
-  const handleDisconnect = () => {
-    api.disconnect();
-    setSession(null);
-    setActiveId(null);
-    setBuilderOpen(false);
-  };
-
-  const handleDeploy = async (sample: CodeSample) => {
-    const svc = await api.deploy(sample);
-    setServices((cur) => [...cur, svc]);
-    setBuilderOpen(false);
-    setToast({ kind: 'ok', text: `Deployment successful · ${svc.name} is live` });
-    setTimeout(() => setToast(null), 4500);
   };
 
   if (!session || reconnecting) {
     return <Onboarding onConnect={handleConnect} />;
   }
+
+  return (
+    <Routes>
+      <Route element={<Layout session={session} setSession={setSession} setReconnecting={setReconnecting} />}>
+        <Route path="/" element={<Navigate to="/functions" replace />} />
+        <Route path="/functions" element={<FunctionsPage />} />
+        <Route path="/functions/:id" element={<FunctionDetailPage />} />
+        <Route path="/templates" element={<TemplatesPageRoute />} />
+        <Route path="/logs" element={<PlaceholderPage label="Logs" />} />
+        <Route path="/keys" element={<PlaceholderPage label="API keys" />} />
+        <Route path="/usage" element={<PlaceholderPage label="Usage" />} />
+        <Route path="/docs" element={<PlaceholderPage label="Documentation" />} />
+        <Route path="/support" element={<PlaceholderPage label="Support" />} />
+        <Route path="*" element={<Navigate to="/functions" replace />} />
+      </Route>
+    </Routes>
+  );
+}
+
+function Layout({
+  session,
+  setSession,
+  setReconnecting,
+}: {
+  session: Session;
+  setSession: (s: Session | null) => void;
+  setReconnecting: (b: boolean) => void;
+}): ReactElement {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { services, refresh, setLocal } = useFunctions();
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [builderPreset, setBuilderPreset] = useState<PresetId | null>(null);
+  const [toast, setToast] = useState<ToastMsg | null>(null);
+  const [expired, setExpired] = useState(false);
+
+  // ?expired=1 banner on mount.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('expired') === '1') setExpired(true);
+  }, []);
+
+  const handleDisconnect = () => {
+    api.disconnect();
+    setSession(null);
+    setBuilderOpen(false);
+  };
+
+  const openBuilder = (preset: PresetId | null = null) => {
+    setBuilderPreset(preset);
+    setBuilderOpen(true);
+  };
+
+  const handleDeploy = async (sample: CodeSample) => {
+    try {
+      const svc = await api.deploy(sample);
+      setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
+      setBuilderOpen(false);
+      setToast({ kind: 'ok', text: `Deploying ${svc.name}…` });
+      setTimeout(() => setToast(null), 3500);
+      // Jump to the detail page so the user sees the live deployment progress.
+      navigate(`/functions/${svc.id}`);
+      // Kick off a refresh in the background to pull latestDeploymentId.
+      refresh().catch(() => undefined);
+    } catch (err) {
+      setBuilderOpen(false);
+      setToast({ kind: 'error', text: `Deploy failed: ${(err as Error).message}` });
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
+  const sidebarActive = pathToSidebarId(location.pathname);
+
+  const ctx: LayoutContext = { session, services, setLocal, refresh, openBuilder };
 
   return (
     <div
@@ -91,19 +136,9 @@ export default function App(): ReactElement {
       }}
     >
       <Sidebar
-        active={view}
-        onSelect={(id) => {
-          if (id === 'deployments' || id === 'templates') {
-            setView(id);
-            setActiveId(null);
-          } else {
-            setView(id);
-          }
-        }}
-        onDeploy={() => {
-          setBuilderPreset(null);
-          setBuilderOpen(true);
-        }}
+        active={sidebarActive}
+        onSelect={(id) => navigate(sidebarIdToPath(id))}
+        onDeploy={() => openBuilder(null)}
       />
 
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
@@ -112,62 +147,13 @@ export default function App(): ReactElement {
           expired={expired}
           onDisconnect={handleDisconnect}
           onReconnect={() => setReconnecting(true)}
-          onOpenAgent={() => {
-            setBuilderPreset(null);
-            setBuilderOpen(true);
-          }}
+          onOpenAgent={() => openBuilder(null)}
         />
 
         <div style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative' }}>
           <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-            {view === 'deployments' && (
-              <>
-                <Canvas
-                  services={services}
-                  selectedId={activeId}
-                  onSelect={(id) => setActiveId(id)}
-                />
-                <button
-                  onClick={() => {
-                    setBuilderPreset(null);
-                    setBuilderOpen(true);
-                  }}
-                  className="btn btn-subtle btn-sm"
-                  style={{
-                    position: 'absolute',
-                    top: 18,
-                    right: 24,
-                    zIndex: 5,
-                    gap: 6,
-                  }}
-                >
-                  <Icon name="plus" size={13} /> New function
-                </button>
-              </>
-            )}
-
-            {view === 'templates' && (
-              <TemplatesPage
-                onUseTemplate={(t) => {
-                  setBuilderPreset(t.preset);
-                  setBuilderOpen(true);
-                }}
-              />
-            )}
-
-            {(view === 'logs' || view === 'keys' || view === 'usage' ||
-              view === 'docs' || view === 'support') && (
-              <PlaceholderView label={labelFor(view)} />
-            )}
+            <Outlet context={ctx} />
           </div>
-
-          {view === 'deployments' && active && (
-            <ServicePanel
-              svc={active}
-              session={session}
-              onClose={() => setActiveId(null)}
-            />
-          )}
 
           {expired && (
             <ExpiredBanner
@@ -193,39 +179,23 @@ export default function App(): ReactElement {
   );
 }
 
-function labelFor(view: View): string {
-  switch (view) {
-    case 'logs':    return 'Logs';
-    case 'keys':    return 'API keys';
-    case 'usage':   return 'Usage';
-    case 'docs':    return 'Documentation';
-    case 'support': return 'Support';
-    default:        return '';
-  }
+function TemplatesPageRoute(): ReactElement {
+  const { openBuilder } = useLayout();
+  return <TemplatesPage onUseTemplate={(t) => openBuilder(t.preset)} />;
 }
 
-function PlaceholderView({ label }: { label: string }) {
-  return (
-    <div
-      className="page-in"
-      style={{
-        position: 'absolute',
-        inset: 0,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexDirection: 'column',
-        gap: 8,
-        color: 'var(--fg-muted)',
-      }}
-    >
-      <div className="eyebrow">Coming soon</div>
-      <div style={{ fontSize: 24, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.015em' }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 13, maxWidth: 360, textAlign: 'center' }}>
-        This view is on the roadmap. For now, manage everything from the Functions list.
-      </div>
-    </div>
-  );
+type SidebarId = 'deployments' | 'templates' | 'logs' | 'keys' | 'usage' | 'docs' | 'support';
+
+function pathToSidebarId(pathname: string): SidebarId {
+  if (pathname.startsWith('/templates')) return 'templates';
+  if (pathname.startsWith('/logs')) return 'logs';
+  if (pathname.startsWith('/keys')) return 'keys';
+  if (pathname.startsWith('/usage')) return 'usage';
+  if (pathname.startsWith('/docs')) return 'docs';
+  if (pathname.startsWith('/support')) return 'support';
+  return 'deployments';
+}
+
+function sidebarIdToPath(id: SidebarId): string {
+  return id === 'deployments' ? '/functions' : `/${id}`;
 }

@@ -1,15 +1,15 @@
-// Functions list view — grid of DeploymentCard.
+// Functions list view — grid of DeploymentCard. Cards are <Link> to detail.
 
 import type { FunctionRecord } from '@shared/types';
 import { DeploymentCard } from './DeploymentCard';
 
 type Props = {
   services: FunctionRecord[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
 };
 
-export function Canvas({ services, selectedId, onSelect }: Props) {
+export function Canvas({ services }: Props) {
+  const activeCount = services.filter((s) => s.status === 'online' || s.status === 'pending').length;
+
   return (
     <div
       style={{
@@ -32,7 +32,7 @@ export function Canvas({ services, selectedId, onSelect }: Props) {
         <div>
           <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.015em' }}>Functions</div>
           <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 2 }}>
-            {services.length} active · production
+            {activeCount} active · production
           </div>
         </div>
       </div>
@@ -47,12 +47,7 @@ export function Canvas({ services, selectedId, onSelect }: Props) {
         }}
       >
         {services.map((s) => (
-          <DeploymentCard
-            key={s.id}
-            svc={s}
-            selected={s.id === selectedId}
-            onClick={() => onSelect(s.id)}
-          />
+          <DeploymentCard key={s.id} svc={s} />
         ))}
       </div>
     </div>

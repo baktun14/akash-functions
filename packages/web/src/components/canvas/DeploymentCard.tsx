@@ -1,18 +1,26 @@
-import type { FunctionRecord } from '@shared/types';
+import { Link } from 'react-router-dom';
+import type { FunctionRecord, ServiceStatus } from '@shared/types';
 import { FnLogo, StatusDot } from '../icons';
 
 type Props = {
   svc: FunctionRecord;
-  selected: boolean;
-  onClick: () => void;
 };
 
-export function DeploymentCard({ svc, selected, onClick }: Props) {
-  const online = svc.status === 'online';
+const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
+  online:   { color: 'var(--ok)',                label: 'Online' },
+  pending:  { color: 'var(--warn, #f5a524)',     label: 'Deploying' },
+  degraded: { color: 'var(--warn, #f5a524)',     label: 'Degraded' },
+  offline:  { color: 'var(--err, #e5484d)',      label: 'Failed' },
+  idle:     { color: 'var(--fg-subtle, #777)',   label: 'Not deployed' },
+};
+
+export function DeploymentCard({ svc }: Props) {
+  const tone = STATUS_TONE[svc.status];
+
   return (
-    <button
-      onClick={onClick}
-      className={`svc-node ${selected ? 'selected' : ''}`}
+    <Link
+      to={`/functions/${svc.id}`}
+      className="svc-node"
       style={{
         position: 'relative',
         textAlign: 'left',
@@ -24,6 +32,8 @@ export function DeploymentCard({ svc, selected, onClick }: Props) {
         display: 'flex',
         flexDirection: 'column',
         gap: 14,
+        textDecoration: 'none',
+        color: 'inherit',
         transition: 'border-color 120ms var(--ease-out), background 120ms',
       }}
     >
@@ -35,7 +45,6 @@ export function DeploymentCard({ svc, selected, onClick }: Props) {
               fontSize: 15,
               fontWeight: 600,
               letterSpacing: '-0.01em',
-              textDecoration: 'none',
             }}
           >
             {svc.name}
@@ -66,22 +75,21 @@ export function DeploymentCard({ svc, selected, onClick }: Props) {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <StatusDot color={online ? 'var(--ok)' : 'var(--warn)'} />
+          <StatusDot color={tone.color} />
           <span
             style={{
               fontSize: 12,
-              color: online ? 'var(--ok)' : 'var(--warn)',
-              textTransform: 'capitalize',
+              color: tone.color,
               fontWeight: 500,
             }}
           >
-            {svc.status}
+            {tone.label}
           </span>
         </div>
         <span className="mono" style={{ fontSize: 11, color: 'var(--fg-subtle)' }}>
           1 replica
         </span>
       </div>
-    </button>
+    </Link>
   );
 }

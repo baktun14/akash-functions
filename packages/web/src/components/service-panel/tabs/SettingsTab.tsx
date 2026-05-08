@@ -1,8 +1,26 @@
+import { useState } from 'react';
 import type { FunctionRecord, Session } from '@shared/types';
 import { Icon } from '../../icons';
 import { Toggle } from '../../ui/Toggle';
 
-export function SettingsTab({ svc, session }: { svc: FunctionRecord; session: Session }) {
+type Props = {
+  svc: FunctionRecord;
+  session: Session;
+  onDelete?: () => void | Promise<void>;
+};
+
+export function SettingsTab({ svc, session, onDelete }: Props) {
+  const [closing, setClosing] = useState(false);
+
+  const handleClose = async () => {
+    if (closing || !onDelete) return;
+    setClosing(true);
+    try {
+      await onDelete();
+    } finally {
+      setClosing(false);
+    }
+  };
   return (
     <div>
       <input className="input" placeholder="Filter settings..." style={{ marginBottom: 24 }} />
@@ -177,17 +195,23 @@ export function SettingsTab({ svc, session }: { svc: FunctionRecord; session: Se
           <Icon name="trash" size={13} />
         </span>
         <div>
-          <div className="section-title" style={{ marginBottom: 14, color: 'var(--accent-soft)' }}>
+          <div className="section-title" style={{ marginBottom: 6, color: 'var(--accent-soft)' }}>
             Danger
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginBottom: 14, maxWidth: 540 }}>
+            Closing the deployment tears down the lease on Akash and removes the
+            function. This is the way to recover from a failed deploy or stop
+            paying for an active one.
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button
-              className="btn btn-ghost btn-sm"
-              style={{ borderColor: 'rgba(255,41,3,0.3)', color: 'var(--accent-soft)' }}
+              onClick={handleClose}
+              disabled={closing || !onDelete}
+              className="btn btn-danger btn-sm"
+              style={{ opacity: closing ? 0.6 : 1 }}
             >
-              Restart service
+              {closing ? 'Closing…' : 'Close deployment'}
             </button>
-            <button className="btn btn-danger btn-sm">Delete service</button>
           </div>
         </div>
       </div>

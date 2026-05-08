@@ -1,7 +1,8 @@
 // Service detail — full-page view with breadcrumb, animated tab underline, 5 tabs.
 
 import { useLayoutEffect, useRef, useState, type ReactElement } from 'react';
-import type { FunctionRecord, Session } from '@shared/types';
+import type { FunctionRecord, ServiceStatus, Session } from '@shared/types';
+import { api } from '../../lib/api';
 import { FnLogo, Icon } from '../icons';
 import { DeploymentsTab } from './tabs/DeploymentsTab';
 import { SourceCodeTab } from './tabs/SourceCodeTab';
@@ -12,16 +13,47 @@ import { SettingsTab } from './tabs/SettingsTab';
 const TABS = ['Deployments', 'Source Code', 'Variables', 'Metrics', 'Settings'] as const;
 type TabName = (typeof TABS)[number];
 
+const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
+  online:   { color: 'var(--ok)',              label: 'Online' },
+  pending:  { color: 'var(--warn, #f5a524)',   label: 'Deploying' },
+  degraded: { color: 'var(--warn, #f5a524)',   label: 'Degraded' },
+  offline:  { color: 'var(--err, #e5484d)',    label: 'Failed' },
+  idle:     { color: 'var(--fg-subtle, #777)', label: 'Not deployed' },
+};
+
 type Props = {
   svc: FunctionRecord;
   session: Session;
   onClose: () => void;
+  onRedeploy?: (next: FunctionRecord) => void;
+  onDelete?: () => void;
 };
 
-export function ServicePanel({ svc, session, onClose }: Props): ReactElement {
+export function ServicePanel({ svc, session, onClose, onRedeploy, onDelete }: Props): ReactElement {
   const [tab, setTab] = useState<TabName>('Deployments');
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [underline, setUnderline] = useState({ left: 0, width: 0 });
+  const [redeploying, setRedeploying] = useState(false);
+  const tone = STATUS_TONE[svc.status] ?? STATUS_TONE.pending;
+
+  const externalUrl = svc.subdomain.startsWith('http')
+    ? svc.subdomain
+    : `https://${svc.subdomain}`;
+
+  const redeploy = async () => {
+    if (redeploying) return;
+    setRedeploying(true);
+    try {
+      // Clone-and-deploy: 1 function = 1 deployment, so this creates a new
+      // function from the same source. Parent navigates to the new fn.
+      const next = await api.cloneAndDeploy(svc.id);
+      onRedeploy?.(next);
+    } catch (err) {
+      console.error('redeploy failed', err);
+    } finally {
+      setRedeploying(false);
+    }
+  };
 
   useLayoutEffect(() => {
     const el = tabRefs.current[tab];
@@ -88,23 +120,38 @@ export function ServicePanel({ svc, session, onClose }: Props): ReactElement {
                   alignItems: 'center',
                   gap: 6,
                   fontSize: 12,
-                  color: 'var(--ok)',
+                  color: tone.color,
                   fontWeight: 500,
                 }}
               >
-                <span className="status-dot status-dot-online" />
-                Online
+                <span
+                  className="status-dot status-dot-online"
+                  style={{ background: tone.color }}
+                />
+                {tone.label}
               </span>
             </h1>
             <div className="mono" style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginTop: 4 }}>
               {svc.subdomain}
             </div>
           </div>
-          <button className="btn btn-subtle btn-sm" style={{ gap: 6 }}>
+          <a
+            href={externalUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-subtle btn-sm"
+            style={{ gap: 6, textDecoration: 'none' }}
+          >
             <Icon name="external" size={12} /> Open URL
-          </button>
-          <button className="btn btn-subtle btn-sm" style={{ gap: 6 }}>
-            <Icon name="play" size={11} /> Redeploy
+          </a>
+          <button
+            onClick={redeploy}
+            disabled={redeploying}
+            className="btn btn-subtle btn-sm"
+            style={{ gap: 6, opacity: redeploying ? 0.6 : 1 }}
+          >
+            <Icon name={redeploying ? 'box' : 'play'} size={11} />
+            {redeploying ? 'Redeploying…' : 'Redeploy'}
           </button>
         </div>
 
@@ -141,7 +188,9 @@ export function ServicePanel({ svc, session, onClose }: Props): ReactElement {
           {tab === 'Source Code' && <SourceCodeTab />}
           {tab === 'Variables' && <VariablesTab svc={svc} />}
           {tab === 'Metrics' && <MetricsTab />}
-          {tab === 'Settings' && <SettingsTab svc={svc} session={session} />}
+          {tab === 'Settings' && (
+            <SettingsTab svc={svc} session={session} onDelete={onDelete} />
+          )}
         </div>
       </div>
     </div>
