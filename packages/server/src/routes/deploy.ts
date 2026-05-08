@@ -13,7 +13,7 @@ import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
-import { signCode } from '../lib/signing';
+import { signRunner } from '../lib/signing';
 
 const Body = z.object({
   versionId: z.string().uuid().optional(),
@@ -88,12 +88,13 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
     .returning();
   if (!dep) throw new HTTPException(500, { message: 'Failed to record deployment' });
 
-  // Build SDL with a short-lived HMAC token for the runner's code-fetch.
-  const codeToken = signCode({ fnId: fn.id, versionId: version.id });
+  // Build SDL with a long-lived runner token. The runner uses it both for the
+  // first code fetch and for the poll loop that picks up new versions.
+  const runnerToken = signRunner({ fnId: fn.id });
   const sdl = buildSdl({
     functionId: fn.id,
-    versionId: version.id,
-    codeToken,
+    initialVersionId: version.id,
+    runnerToken,
     resources: version.resources,
     akashmlKey: body.akashmlKey ?? version.envVars['AKASHML_API_KEY'],
   });

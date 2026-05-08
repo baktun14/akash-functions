@@ -1,16 +1,22 @@
 name: Publish runner image
 
+# On main: conventional-commits-driven release. Reads commits since the last
+# `runner-v*` tag scoped to packages/runner; if there's a releasable change,
+# computes the next semver, creates a GitHub release (which creates the tag),
+# and publishes the runner image with that version + :latest. On PRs: builds
+# only, tagged :sha-<short> for verification.
+
 on:
   push:
     branches: [main]
     paths:
       - 'packages/runner/**'
+      - 'packages/releaser/**'
       - '.github/workflows/runner-publish.yml'
-    tags:
-      - 'runner-v*.*.*'
   pull_request:
     paths:
       - 'packages/runner/**'
+      - 'packages/releaser/**'
       - '.github/workflows/runner-publish.yml'
   workflow_dispatch:
 
@@ -19,8 +25,81 @@ env:
   IMAGE: ghcr.io/baktun14/akash-functions-runner
 
 jobs:
-  build:
+  release:
+    name: Compute next version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed for `gh release create` + tag push
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install releaser deps
+        run: npm install --workspace packages/releaser --no-audit --no-fund
+
+      - name: Compute next version from conventional commits
+        id: bump
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          analysis=$(node ./packages/releaser/recommended-bump.js \
+            --tag-prefix=runner-v \
+            --path packages/runner \
+            --repo-url "https://github.com/$GITHUB_REPOSITORY" \
+            --target-sha "$TARGET_SHA")
+          echo "$analysis" | jq
+
+          err=$(echo "$analysis" | jq -r '.error // empty')
+          if [ -n "$err" ]; then
+            echo "No releasable change: $err"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(echo "$analysis" | jq -r '.nextVersion')
+          tag=$(echo "$analysis" | jq -r '.nextTag')
+          changelog=$(echo "$analysis" | jq -r '.changelog')
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            echo "$changelog"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release (also creates the git tag)
+        if: steps.bump.outputs.tag != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.bump.outputs.tag }}
+          RELEASE_CHANGELOG: ${{ steps.bump.outputs.changelog }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            --notes "$RELEASE_CHANGELOG"
+
+  build:
+    name: Build runner image
+    runs-on: ubuntu-latest
+    # On PRs the release job is skipped; on main we need the resolved version.
+    needs: [release]
+    if: |
+      always() &&
+      (needs.release.result == 'skipped' ||
+       needs.release.result == 'success')
     permissions:
       contents: read
       packages: write
@@ -46,8 +125,8 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=sha-,format=short
-            type=match,pattern=runner-v(\d+\.\d+\.\d+),group=1
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/runner-v') }}
+            type=raw,value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ needs.release.outputs.version != '' }}
 
       - name: Build & push
         uses: docker/build-push-action@v5

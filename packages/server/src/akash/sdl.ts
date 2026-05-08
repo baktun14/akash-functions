@@ -1,6 +1,7 @@
 // SDL builder — emits a single-service deployment that runs the Akash Functions
-// runner image. The runner fetches user code from CODE_URL at boot, installs
-// deps, then spawns `bun src/index.ts`.
+// runner image. The runner fetches user code from BACKEND_BASE_URL at boot,
+// then polls /api/runner/current/:fnId every POLL_INTERVAL_MS to hot-reload
+// new versions without re-leasing the deployment.
 //
 // CPU/memory/storage come from function_versions.resources. Pricing amount
 // (uakt) and the runner image come from env. AkashML key, if present, becomes
@@ -17,13 +18,20 @@ export type ResourceSpec = {
 
 export type BuildSdlArgs = {
   functionId: string;
-  versionId: string;
-  codeToken: string;
+  /** Version the runner fetches at first boot. Subsequent versions are picked
+   *  up by the runner's poll loop. */
+  initialVersionId: string;
+  /** Long-lived runner-kind HMAC, scoped to functionId. */
+  runnerToken: string;
   resources: ResourceSpec;
   akashmlKey?: string | undefined;
-  /** Override the public host for CODE_URL. Defaults to env.CODE_HOST_BASE. */
-  codeHostBase?: string;
+  /** Override the public host for backend callbacks. Defaults to env.CODE_HOST_BASE. */
+  backendBaseUrl?: string;
+  /** Override the runner's poll cadence. Defaults to 10s. */
+  pollIntervalMs?: number;
 };
+
+const DEFAULT_POLL_INTERVAL_MS = 10_000;
 
 function normalizeCpu(input: string): number {
   const num = parseFloat(input.replace(/[^0-9.]/g, ''));
@@ -33,7 +41,6 @@ function normalizeCpu(input: string): number {
 function normalizeSize(input: string): string {
   // Strip whitespace and uppercase, allow "512Mi", "512 Mi", "1Gi", "1 GiB" → "512Mi" / "1Gi"
   const cleaned = input.replace(/\s+/g, '').replace(/iB$/i, 'i');
-  // SDL accepts e.g. "512Mi", "1Gi" — keep as-is when it matches; else fall back.
   if (/^\d+(\.\d+)?(Ki|Mi|Gi|Ti)$/i.test(cleaned)) {
     return cleaned.replace(/i$/, (m) => m.toLowerCase()).replace(/(?<=\d)([kmgt])i$/i, (m) => m.toUpperCase());
   }
@@ -41,14 +48,15 @@ function normalizeSize(input: string): string {
 }
 
 export function buildSdl(args: BuildSdlArgs): string {
-  const codeHost = args.codeHostBase ?? env.CODE_HOST_BASE;
-  const codeUrl = `${codeHost.replace(/\/$/, '')}/api/runner/code/${args.functionId}/${args.versionId}`;
+  const backendBaseUrl = (args.backendBaseUrl ?? env.CODE_HOST_BASE).replace(/\/$/, '');
+  const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   const envVars: string[] = [
     `FUNCTION_ID=${args.functionId}`,
-    `VERSION_ID=${args.versionId}`,
-    `CODE_URL=${codeUrl}`,
-    `CODE_TOKEN=${args.codeToken}`,
+    `INITIAL_VERSION_ID=${args.initialVersionId}`,
+    `BACKEND_BASE_URL=${backendBaseUrl}`,
+    `RUNNER_TOKEN=${args.runnerToken}`,
+    `POLL_INTERVAL_MS=${pollIntervalMs}`,
     'PORT=3000',
   ];
   if (args.akashmlKey) {

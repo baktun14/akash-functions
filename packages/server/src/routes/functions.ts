@@ -17,7 +17,7 @@ import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
-import { signCode } from '../lib/signing';
+import { signRunner } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { log } from '../lib/log';
 
@@ -351,11 +351,11 @@ functionsRouter.post('/:id/clone', async (c) => {
   });
 
   // Build SDL + fire pipeline (same shape as POST /:id/deploy).
-  const codeToken = signCode({ fnId: fn.id, versionId: version.id });
+  const runnerToken = signRunner({ fnId: fn.id });
   const sdl = buildSdl({
     functionId: fn.id,
-    versionId: version.id,
-    codeToken,
+    initialVersionId: version.id,
+    runnerToken,
     resources: version.resources,
     akashmlKey: version.envVars['AKASHML_API_KEY'],
   });

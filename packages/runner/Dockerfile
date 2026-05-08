@@ -1,7 +1,9 @@
 # Akash Functions runner — single image deployed for every function.
-# At container boot, fetches user source from CODE_URL using CODE_TOKEN, then
-# spawns `bun src/index.ts`. SDL injects FUNCTION_ID, VERSION_ID, CODE_URL,
-# CODE_TOKEN, PORT, and (optionally) AKASHML_API_KEY.
+# At container boot, fetches user source from BACKEND_BASE_URL using
+# RUNNER_TOKEN, then spawns `bun src/index.ts`. A poll loop watches for new
+# function versions and hot-swaps /app without re-leasing the deployment.
+# SDL injects FUNCTION_ID, INITIAL_VERSION_ID, BACKEND_BASE_URL, RUNNER_TOKEN,
+# POLL_INTERVAL_MS, PORT, and (optionally) AKASHML_API_KEY.
 
 FROM oven/bun:1.3-alpine
 

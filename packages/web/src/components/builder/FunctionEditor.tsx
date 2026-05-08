@@ -1,7 +1,12 @@
 // Edit-existing-function flow. Sibling of FunctionBuilder, but stripped of the
 // create-only chrome (preset list, prompt regen, AkashML, ResChips). Saving
-// always creates a new function_versions row server-side; the user can also
-// "Save & Deploy" to push the new version to Akash in one click.
+// always creates a new function_versions row server-side.
+//
+// When there's no active deployment, the user sees two buttons: "Save" (draft)
+// and "Save & Deploy" (spin up the first pod). When a deployment is already
+// live, the runner hot-reloads new versions automatically, so we collapse to a
+// single "Save & deploy" button and surface a "pushing to live…" indicator
+// during the propagation window.
 
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
@@ -21,11 +26,13 @@ type Props = {
 
 const PRIMARY_PATH_CANDIDATES = ['src/index.ts', 'src/index.tsx', 'index.ts', 'index.tsx'];
 
+// Matches the runner's default poll cadence + small buffer for the swap.
+const PUSH_LIVE_WINDOW_MS = 12_000;
+
 function pickPrimaryPath(source: Record<string, string>): string {
   for (const candidate of PRIMARY_PATH_CANDIDATES) {
     if (candidate in source) return candidate;
   }
-  // Fallback: first key in insertion order.
   return Object.keys(source)[0] ?? 'src/index.ts';
 }
 
@@ -44,6 +51,11 @@ export function FunctionEditor({
   const [message, setMessage] = useState<string>('');
   const [inflight, setInflight] = useState<'save' | 'deploy' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [liveStatus, setLiveStatus] = useState<
+    | { kind: 'pushing'; versionShort: string }
+    | { kind: 'live'; versionShort: string }
+    | null
+  >(null);
   const dirty = source !== initialPrimaryValue || message.length > 0;
 
   // Confirm-on-close if the user has unsaved edits.
@@ -78,6 +90,16 @@ export function FunctionEditor({
         message: message.trim() || undefined,
       });
       onSaved(result.id);
+      // When a pod is already running, the runner will pick this version up on
+      // its next poll. Surface that as a transient indicator so the user knows
+      // the URL is updating without having to refresh.
+      if (hasActiveDeployment) {
+        const versionShort = result.id.slice(0, 7);
+        setLiveStatus({ kind: 'pushing', versionShort });
+        window.setTimeout(() => {
+          setLiveStatus({ kind: 'live', versionShort });
+        }, PUSH_LIVE_WINDOW_MS);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -87,12 +109,6 @@ export function FunctionEditor({
 
   const handleSaveAndDeploy = async () => {
     if (inflight) return;
-    if (hasActiveDeployment) {
-      setError(
-        'This function already has an active deployment. Close it from Settings before deploying a new version.'
-      );
-      return;
-    }
     setInflight('deploy');
     setError(null);
     try {
@@ -244,6 +260,30 @@ export function FunctionEditor({
             </div>
           )}
 
+          {liveStatus && (
+            <div
+              style={{
+                marginTop: 14,
+                padding: '10px 12px',
+                background: 'rgba(80,200,120,0.06)',
+                border: '1px solid rgba(80,200,120,0.4)',
+                borderRadius: 10,
+                fontSize: 12.5,
+                color: 'var(--fg)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}
+            >
+              <Icon name={liveStatus.kind === 'pushing' ? 'info' : 'check'} size={13} />
+              <span>
+                {liveStatus.kind === 'pushing'
+                  ? `Pushing v${liveStatus.versionShort} to live…`
+                  : `Live on v${liveStatus.versionShort}`}
+              </span>
+            </div>
+          )}
+
           <div style={{ flex: 1, minHeight: 18 }} />
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 18 }}>
@@ -255,33 +295,43 @@ export function FunctionEditor({
             >
               Cancel
             </button>
-            <button
-              className="btn btn-subtle"
-              onClick={handleSave}
-              disabled={!!inflight || !dirty}
-              style={{ width: '100%', justifyContent: 'center', opacity: !dirty ? 0.5 : 1 }}
-            >
-              <Icon name="check" size={12} />
-              {inflight === 'save' ? 'Saving…' : 'Save'}
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={handleSaveAndDeploy}
-              disabled={!!inflight || hasActiveDeployment}
-              title={
-                hasActiveDeployment
-                  ? 'Close the active deployment from Settings before deploying a new version'
-                  : undefined
-              }
-              style={{
-                width: '100%',
-                justifyContent: 'center',
-                opacity: hasActiveDeployment ? 0.5 : 1,
-              }}
-            >
-              <Icon name="play" size={12} color="#0A0A0F" />
-              {inflight === 'deploy' ? 'Deploying…' : 'Save & Deploy'}
-            </button>
+            {hasActiveDeployment ? (
+              <button
+                className="btn btn-primary"
+                onClick={handleSave}
+                disabled={!!inflight || !dirty}
+                style={{
+                  width: '100%',
+                  justifyContent: 'center',
+                  opacity: !dirty ? 0.5 : 1,
+                }}
+                title="Save a new version. The running pod will hot-reload it within ~10s."
+              >
+                <Icon name="play" size={12} color="#0A0A0F" />
+                {inflight === 'save' ? 'Saving…' : 'Save & deploy'}
+              </button>
+            ) : (
+              <>
+                <button
+                  className="btn btn-subtle"
+                  onClick={handleSave}
+                  disabled={!!inflight || !dirty}
+                  style={{ width: '100%', justifyContent: 'center', opacity: !dirty ? 0.5 : 1 }}
+                >
+                  <Icon name="check" size={12} />
+                  {inflight === 'save' ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleSaveAndDeploy}
+                  disabled={!!inflight}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  <Icon name="play" size={12} color="#0A0A0F" />
+                  {inflight === 'deploy' ? 'Deploying…' : 'Save & Deploy'}
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
