@@ -27,10 +27,18 @@ type Props = {
   session: Session;
   onClose: () => void;
   onRedeploy?: (next: FunctionRecord) => void;
+  onCloseDeployment?: () => void;
   onDelete?: () => void;
 };
 
-export function ServicePanel({ svc, session, onClose, onRedeploy, onDelete }: Props): ReactElement {
+export function ServicePanel({
+  svc,
+  session,
+  onClose,
+  onRedeploy,
+  onCloseDeployment,
+  onDelete,
+}: Props): ReactElement {
   const [tab, setTab] = useState<TabName>('Deployments');
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [underline, setUnderline] = useState({ left: 0, width: 0 });
@@ -191,7 +199,12 @@ export function ServicePanel({ svc, session, onClose, onRedeploy, onDelete }: Pr
           {tab === 'Variables' && <VariablesTab svc={svc} />}
           {tab === 'Metrics' && <MetricsTab />}
           {tab === 'Settings' && (
-            <SettingsTab svc={svc} session={session} onDelete={onDelete} />
+            <SettingsTab
+              svc={svc}
+              session={session}
+              onCloseDeployment={onCloseDeployment}
+              onDelete={onDelete}
+            />
           )}
         </div>
       </div>

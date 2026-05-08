@@ -371,6 +371,47 @@ functionsRouter.post('/:id/clone', async (c) => {
   );
 });
 
+// POST /:id/close-deployment — close the active Akash lease without
+// tombstoning the function. Used by the migration flow (close 1.x pod →
+// Save & Deploy boots a 2.x pod with hot-reload). The function record and
+// version history stay; the user can redeploy whenever.
+functionsRouter.post('/:id/close-deployment', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const id = c.req.param('id');
+  const fn = await getFn(walletAddress, id);
+
+  const dep = await latestDeployment(fn.id);
+  if (!dep || dep.state === 'closed' || dep.state === 'failed') {
+    throw new HTTPException(409, {
+      message: 'No active deployment to close',
+    });
+  }
+  if (!dep.dseq) {
+    // Pre-bid state — nothing on Akash yet, just mark the row closed.
+    await db
+      .update(deployments)
+      .set({ state: 'closed', closedAt: new Date() })
+      .where(eq(deployments.id, dep.id));
+    return c.body(null, 204);
+  }
+
+  try {
+    await consoleApi.closeDeployment(c.get('akashKey'), dep.dseq);
+  } catch (err) {
+    log.warn('console-api closeDeployment failed; marking row closed anyway', {
+      err: String(err),
+      functionId: id,
+      dseq: dep.dseq,
+    });
+  }
+  await db
+    .update(deployments)
+    .set({ state: 'closed', closedAt: new Date() })
+    .where(eq(deployments.id, dep.id));
+
+  return c.body(null, 204);
+});
+
 functionsRouter.delete('/:id', async (c) => {
   const walletAddress = c.get('walletAddress');
   const id = c.req.param('id');

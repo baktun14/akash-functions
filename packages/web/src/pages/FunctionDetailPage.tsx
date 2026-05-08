@@ -20,10 +20,31 @@ export function FunctionDetailPage(): ReactElement {
     navigate(`/functions/${next.id}`);
   };
 
-  // Delete = close lease (if any) + tombstone function.
+  // Close deployment = tear down the Akash lease but keep the function record
+  // and its version history. After this the user can Save & Deploy onto the
+  // current runner image (e.g. to migrate off a 1.x pod onto 2.x hot-reload).
+  const handleCloseDeployment = async () => {
+    if (!id) return;
+    if (!confirm('Close this deployment on Akash? The function and its code stay; only the running pod is torn down.')) {
+      return;
+    }
+    try {
+      await api.closeDeployment(id);
+      setLocal((cur) =>
+        cur.map((s) =>
+          s.id === id ? { ...s, status: 'idle', latestDeploymentId: undefined } : s
+        )
+      );
+      refresh().catch(() => undefined);
+    } catch (err) {
+      alert(`Failed to close deployment: ${(err as Error).message}`);
+    }
+  };
+
+  // Delete = close lease (if any) + tombstone function. Removes it from the list.
   const handleDelete = async () => {
     if (!id) return;
-    if (!confirm('Close this deployment? This will tear it down on Akash and remove the function.')) {
+    if (!confirm('Delete this function? This closes the deployment on Akash and removes the function from your list. Code history is retained server-side.')) {
       return;
     }
     try {
@@ -31,7 +52,7 @@ export function FunctionDetailPage(): ReactElement {
       setLocal((cur) => cur.filter((s) => s.id !== id));
       navigate('/functions');
     } catch (err) {
-      alert(`Failed to close deployment: ${(err as Error).message}`);
+      alert(`Failed to delete function: ${(err as Error).message}`);
     }
   };
 
@@ -70,6 +91,7 @@ export function FunctionDetailPage(): ReactElement {
       session={session}
       onClose={() => navigate('/functions')}
       onRedeploy={handleRedeploy}
+      onCloseDeployment={handleCloseDeployment}
       onDelete={handleDelete}
     />
   );

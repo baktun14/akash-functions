@@ -40,6 +40,10 @@ export interface ApiClient {
   // Creates a new function from an existing one's source and fires deploy.
   // Returns the NEW function record (not the source). 1 function = 1 deployment.
   cloneAndDeploy(fnId: string): Promise<FunctionRecord>;
+  // Closes the active Akash lease but keeps the function record + version
+  // history. After this, the function shows up as `idle` and Save & Deploy
+  // will spin up a fresh deployment with the current runner image.
+  closeDeployment(id: string): Promise<void>;
   remove(id: string): Promise<void>;
 
   getDeployment(fnId: string, depId: string): Promise<DeploymentRecord>;
@@ -199,6 +203,14 @@ class MockApi implements ApiClient {
     writeMockVersions(id, [initial]);
 
     return svc;
+  }
+
+  async closeDeployment(id: string): Promise<void> {
+    // Mock: flip the service to idle but keep the record.
+    const services = (await this.listServices()).map((s) =>
+      s.id === id ? { ...s, status: 'idle' as const, latestDeploymentId: undefined } : s
+    );
+    writeJSON(SERVICES_KEY, services);
   }
 
   async remove(id: string): Promise<void> {
@@ -385,6 +397,12 @@ class LiveApi implements ApiClient {
       const text = await res.text();
       throw new Error(`${res.status}: ${text || res.statusText}`);
     }
+    // 204 (and any other empty body) — return undefined cast as T. Callers that
+    // type the response as `void` get nothing; callers that expect JSON on a
+    // 200 still get parsed JSON below.
+    if (res.status === 204 || res.headers.get('content-length') === '0') {
+      return undefined as T;
+    }
     return res.json() as Promise<T>;
   }
 
@@ -454,6 +472,13 @@ class LiveApi implements ApiClient {
       await this.req(`/api/functions/${fn.id}`, { method: 'DELETE' }).catch(() => undefined);
       throw err;
     }
+  }
+
+  async closeDeployment(id: string): Promise<void> {
+    await this.req(`/api/functions/${id}/close-deployment`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   }
 
   async remove(id: string): Promise<void> {
