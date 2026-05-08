@@ -28,6 +28,11 @@ const POLL_DEFAULT_MS = 10_000;
 const KILL_GRACE_MS = 5_000;
 const HEALTH_CHECK_MS = 5_000;
 
+// Must be declared before the top-level `await` below, otherwise spawnChild
+// (called at boot) reaches it through the TDZ and crashes the runner with
+// "Cannot access 'ENTRY_CANDIDATES' before initialization".
+const ENTRY_CANDIDATES = ['/src/index.ts', '/index.ts', '/src/index.tsx', '/index.tsx'];
+
 const env = process.env;
 const FUNCTION_ID = env.FUNCTION_ID;
 const INITIAL_VERSION_ID = env.INITIAL_VERSION_ID;
@@ -234,8 +239,6 @@ async function packageJsonChanged(oldDir: string, newDir: string): Promise<boole
     return true;
   }
 }
-
-const ENTRY_CANDIDATES = ['/src/index.ts', '/index.ts', '/src/index.tsx', '/index.tsx'];
 
 function pickEntry(dir: string): string | undefined {
   for (const rel of ENTRY_CANDIDATES) {
