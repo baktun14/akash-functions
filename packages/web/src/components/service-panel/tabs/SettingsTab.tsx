@@ -6,21 +6,26 @@ import { Toggle } from '../../ui/Toggle';
 type Props = {
   svc: FunctionRecord;
   session: Session;
+  onCloseDeployment?: () => void | Promise<void>;
   onDelete?: () => void | Promise<void>;
 };
 
-export function SettingsTab({ svc, session, onDelete }: Props) {
-  const [closing, setClosing] = useState(false);
+export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props) {
+  const [pending, setPending] = useState<'close' | 'delete' | null>(null);
+  const hasActiveDeployment = svc.status === 'online' || svc.status === 'pending';
 
-  const handleClose = async () => {
-    if (closing || !onDelete) return;
-    setClosing(true);
+  const runWithLock = (kind: 'close' | 'delete', fn: () => void | Promise<void>) => async () => {
+    if (pending) return;
+    setPending(kind);
     try {
-      await onDelete();
+      await fn();
     } finally {
-      setClosing(false);
+      setPending(null);
     }
   };
+
+  const handleCloseDeployment = onCloseDeployment ? runWithLock('close', onCloseDeployment) : undefined;
+  const handleDelete = onDelete ? runWithLock('delete', onDelete) : undefined;
   return (
     <div>
       <input className="input" placeholder="Filter settings..." style={{ marginBottom: 24 }} />
@@ -199,18 +204,33 @@ export function SettingsTab({ svc, session, onDelete }: Props) {
             Danger
           </div>
           <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginBottom: 14, maxWidth: 540 }}>
-            Closing the deployment tears down the lease on Akash and removes the
-            function. This is the way to recover from a failed deploy or stop
-            paying for an active one.
+            <strong>Close deployment</strong> tears down the lease on Akash but keeps the
+            function record and version history — use this to stop paying for an
+            active pod, or to redeploy onto the latest runner image. <strong>Delete
+            function</strong> removes the function from your list (the lease is closed
+            too).
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button
-              onClick={handleClose}
-              disabled={closing || !onDelete}
-              className="btn btn-danger btn-sm"
-              style={{ opacity: closing ? 0.6 : 1 }}
+              onClick={handleCloseDeployment}
+              disabled={!!pending || !handleCloseDeployment || !hasActiveDeployment}
+              className="btn btn-subtle btn-sm"
+              style={{ opacity: pending === 'close' ? 0.6 : 1 }}
+              title={
+                hasActiveDeployment
+                  ? 'Close the Akash lease but keep the function'
+                  : 'No active deployment to close'
+              }
             >
-              {closing ? 'Closing…' : 'Close deployment'}
+              {pending === 'close' ? 'Closing…' : 'Close deployment'}
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={!!pending || !handleDelete}
+              className="btn btn-danger btn-sm"
+              style={{ opacity: pending === 'delete' ? 0.6 : 1 }}
+            >
+              {pending === 'delete' ? 'Deleting…' : 'Delete function'}
             </button>
           </div>
         </div>

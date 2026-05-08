@@ -1,6 +1,6 @@
 // /api/functions — CRUD for function records and their version history.
 
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, notInArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -371,28 +371,31 @@ functionsRouter.post('/:id/clone', async (c) => {
   );
 });
 
-functionsRouter.delete('/:id', async (c) => {
+// POST /:id/close-deployment — close the active Akash lease without
+// tombstoning the function. Used by the migration flow (close 1.x pod →
+// Save & Deploy boots a 2.x pod with hot-reload). The function record and
+// version history stay; the user can redeploy whenever.
+functionsRouter.post('/:id/close-deployment', async (c) => {
   const walletAddress = c.get('walletAddress');
+  const akashKey = c.get('akashKey');
   const id = c.req.param('id');
   const fn = await getFn(walletAddress, id);
 
-  // Best-effort: close any live deployment on Akash before tombstoning.
-  const dep = await latestDeployment(fn.id);
-  if (dep?.dseq && dep.state !== 'closed' && dep.state !== 'failed') {
-    try {
-      await consoleApi.closeDeployment(c.get('akashKey'), dep.dseq);
-      await db
-        .update(deployments)
-        .set({ state: 'closed', closedAt: new Date() })
-        .where(eq(deployments.id, dep.id));
-    } catch (err) {
-      log.warn('failed to close deployment on Akash, tombstoning anyway', {
-        err: String(err),
-        functionId: id,
-        dseq: dep.dseq,
-      });
-    }
+  const closed = await closeAllActiveDeployments(fn.id, akashKey);
+  if (closed === 0) {
+    throw new HTTPException(409, { message: 'No active deployment to close' });
   }
+  return c.body(null, 204);
+});
+
+functionsRouter.delete('/:id', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const akashKey = c.get('akashKey');
+  const id = c.req.param('id');
+  const fn = await getFn(walletAddress, id);
+
+  // Best-effort: close any live deployments on Akash before tombstoning.
+  await closeAllActiveDeployments(fn.id, akashKey);
 
   await db
     .update(functions)
@@ -412,6 +415,47 @@ async function getFn(walletAddress: string, id: string) {
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
   return fn;
+}
+
+// Closes every non-closed/non-failed deployment row for a function, and tries
+// the matching close on Akash for any row that has a dseq. Returns the count
+// of rows actually closed. Used by both the close-deployment and delete paths
+// so we never leave an orphan lease alive (which would silently keep draining
+// AKT after the user thought the function was torn down).
+async function closeAllActiveDeployments(
+  functionId: string,
+  akashKey: string
+): Promise<number> {
+  const active = await db
+    .select()
+    .from(deployments)
+    .where(
+      and(
+        eq(deployments.functionId, functionId),
+        notInArray(deployments.state, ['closed', 'failed'])
+      )
+    );
+
+  let closed = 0;
+  for (const dep of active) {
+    if (dep.dseq) {
+      try {
+        await consoleApi.closeDeployment(akashKey, dep.dseq);
+      } catch (err) {
+        log.warn('console-api closeDeployment failed; marking row closed anyway', {
+          err: String(err),
+          functionId,
+          dseq: dep.dseq,
+        });
+      }
+    }
+    await db
+      .update(deployments)
+      .set({ state: 'closed', closedAt: new Date() })
+      .where(eq(deployments.id, dep.id));
+    closed += 1;
+  }
+  return closed;
 }
 
 async function latestDeployment(functionId: string) {
