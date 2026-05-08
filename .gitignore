@@ -4,6 +4,7 @@ build
 .next
 .turbo
 .cache
+*.tsbuildinfo
 .env
 .env.local
 .env.*.local
