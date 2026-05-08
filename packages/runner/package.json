@@ -1,0 +1,10 @@
+{
+  "name": "runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:image": "docker build -t akash-fns/runner:dev .",
+    "smoke": "docker run --rm -p 3000:3000 -e CODE_URL -e CODE_TOKEN -e FUNCTION_ID -e VERSION_ID akash-fns/runner:dev"
+  }
+}

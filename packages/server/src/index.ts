@@ -1,0 +1,39 @@
+// Akash Functions backend — Hono on Node, Drizzle on Postgres, talks to
+// console-api.akash.network on the user's behalf.
+
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { env } from './env';
+import { errorHandler } from './middleware/error';
+import { deployRouter } from './routes/deploy';
+import { functionsRouter } from './routes/functions';
+import { runnerRouter } from './routes/runner';
+import { usageRouter } from './routes/usage';
+import { log } from './lib/log';
+
+const app = new Hono();
+
+app.use('*', logger());
+app.use(
+  '*',
+  cors({
+    origin: (origin) => origin ?? '*',
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Authorization', 'Content-Type'],
+    credentials: false,
+  })
+);
+
+app.get('/api/health', (c) => c.json({ ok: true, runner: env.RUNNER_IMAGE }));
+app.route('/api/functions', functionsRouter);
+app.route('/api/functions', deployRouter);
+app.route('/api/runner', runnerRouter);
+app.route('/api/usage', usageRouter);
+
+app.onError(errorHandler);
+
+serve({ fetch: app.fetch, port: env.PORT }, (info) => {
+  log.info(`server listening on http://localhost:${info.port}`, { runner: env.RUNNER_IMAGE });
+});

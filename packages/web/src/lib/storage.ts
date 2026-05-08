@@ -1,0 +1,30 @@
+// Typed localStorage helpers. Used by the mock api layer + AkashML connection card.
+
+export const SESSION_KEY = 'akash_functions_session_v1';
+export const SERVICES_KEY = 'akash_functions_services_v2';
+export const AKASHML_KEY = 'akashml_connection_v1';
+
+export function readJSON<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeJSON(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* quota exceeded — ignore */
+  }
+}
+
+export function removeKey(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}

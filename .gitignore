@@ -1,0 +1,21 @@
+node_modules
+dist
+build
+.next
+.turbo
+.cache
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log
+
+# Drizzle
+packages/server/drizzle/
+
+# Postgres data
+.pgdata/
+
+# Editor
+.vscode/
+.idea/
