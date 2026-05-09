@@ -67,9 +67,10 @@ export interface ApiClient {
   getUsage(): Promise<UsageInfo>;
 }
 
-// CodeSample.code is tokenized for the syntax-highlighted preview. Concatenating
-// the [_, text] tuples reconstitutes the original source the runner should boot.
-function tokensToSource(code: TokenLine[]): string {
+// CodeSample.code is tokenized for the template preview. Concatenating the
+// [_, text] tuples reconstitutes the original source string. Exposed so the
+// builder can seed its editor when the user picks an unedited template.
+export function tokensToSource(code: TokenLine[]): string {
   return code.map((line) => line.map((tok) => tok[1]).join('')).join('\n');
 }
 
@@ -196,7 +197,7 @@ class MockApi implements ApiClient {
       preset: 'rest',
       isLatest: true,
       deploymentCount: 1,
-      source: { 'src/index.ts': tokensToSource(sample.code) },
+      source: { 'src/index.ts': sample.source ?? tokensToSource(sample.code) },
       resources: { cpu: sample.res.cpu, memory: sample.res.mem, storage: '1Gi' },
       envVars: {},
     };
@@ -454,7 +455,7 @@ class LiveApi implements ApiClient {
         name: sample.name,
         preset: 'rest',
         prompt: sample.prompt,
-        source: { 'src/index.ts': tokensToSource(sample.code) },
+        source: { 'src/index.ts': sample.source ?? tokensToSource(sample.code) },
         resources: {
           cpu: sample.res.cpu,
           memory: sample.res.mem,

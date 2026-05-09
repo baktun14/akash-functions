@@ -1,12 +1,14 @@
 // Full-screen function builder: code editor + side panel (prompt, presets,
 // optional AkashMLConnect, inferred resources, Deploy).
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { CodeSample, PresetId } from '@shared/types';
 import { FnLogo, Icon } from '../icons';
 import { PRESETS, SAMPLES } from '../../data/presets';
 import { ResChip } from './ResChip';
 import { AkashMLConnect } from './AkashMLConnect';
+import { CodeEditor } from './CodeEditor';
+import { tokensToSource } from '../../lib/api';
 
 type Props = {
   initialPreset?: PresetId | null;
@@ -15,15 +17,35 @@ type Props = {
 };
 
 export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
-  const [preset, setPreset] = useState<PresetId>(
-    initialPreset && SAMPLES[initialPreset] ? initialPreset : 'rest'
+  const initial: PresetId =
+    initialPreset && SAMPLES[initialPreset] ? initialPreset : 'rest';
+  const [preset, setPreset] = useState<PresetId>(initial);
+  const [source, setSource] = useState<string>(() =>
+    tokensToSource(SAMPLES[initial].code)
   );
+  const [prompt, setPrompt] = useState<string>(SAMPLES[initial].prompt);
   const sample = SAMPLES[preset];
+  const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
+  const dirty = source !== templateSource || prompt !== sample.prompt;
+
+  const onSelectPreset = (next: PresetId) => {
+    if (next === preset) return;
+    if (dirty && !confirm('Discard unsaved changes?')) return;
+    const ns = SAMPLES[next];
+    setPreset(next);
+    setSource(tokensToSource(ns.code));
+    setPrompt(ns.prompt);
+  };
+
+  const requestClose = () => {
+    if (dirty && !confirm('Discard unsaved changes?')) return;
+    onClose();
+  };
 
   return (
     <div
       className="modal-shell"
-      onClick={onClose}
+      onClick={requestClose}
       style={{ alignItems: 'stretch', justifyContent: 'stretch', padding: 0 }}
     >
       <div className="builder" onClick={(e) => e.stopPropagation()}>
@@ -43,28 +65,17 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
             </div>
           </div>
           <div style={{ flex: 1 }} />
-          <button onClick={onClose} className="btn btn-ghost btn-sm" style={{ padding: 8 }}>
+          <button onClick={requestClose} className="btn btn-ghost btn-sm" style={{ padding: 8 }}>
             <Icon name="minimize" size={14} />
           </button>
-          <button onClick={onClose} className="btn btn-ghost btn-sm" style={{ padding: 8 }}>
+          <button onClick={requestClose} className="btn btn-ghost btn-sm" style={{ padding: 8 }}>
             <Icon name="x" size={14} />
           </button>
         </div>
 
-        <div className="builder-editor scroll" key={preset}>
-          <div className="code-block fade-up" style={{ padding: '24px 32px' }}>
-            {sample.code.map((toks, i) => (
-              <div key={i}>
-                <span className="ln">{i + 1}</span>
-                {toks.length === 0
-                  ? ' '
-                  : toks.map((t, j) => (
-                      <span key={j} className={`tok-${t[0]}`}>
-                        {t[1]}
-                      </span>
-                    ))}
-              </div>
-            ))}
+        <div className="builder-editor scroll" style={{ padding: 0 }}>
+          <div style={{ height: '100%', padding: '16px 24px' }}>
+            <CodeEditor value={source} onChange={setSource} minHeight={400} />
           </div>
         </div>
 
@@ -90,10 +101,8 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
             />
             <textarea
               className="prompt-area"
-              value={sample.prompt}
-              onChange={() => {
-                /* read-only in MVP */
-              }}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
               rows={4}
               placeholder="Describe your function. We'll write the code, pick a provider, and deploy it on Akash."
               style={{
@@ -128,7 +137,7 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
             {PRESETS.map((p) => (
               <button
                 key={p.id}
-                onClick={() => setPreset(p.id)}
+                onClick={() => onSelectPreset(p.id)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -215,7 +224,7 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
 
           <button
             className="btn btn-primary"
-            onClick={() => onDeploy(sample)}
+            onClick={() => onDeploy({ ...sample, source, prompt })}
             style={{ width: '100%', marginTop: 18, justifyContent: 'center' }}
           >
             <Icon name="play" size={12} color="#0A0A0F" />
