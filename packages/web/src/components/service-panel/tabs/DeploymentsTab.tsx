@@ -126,10 +126,30 @@ function truncate(addr: string): string {
   return `${addr.slice(0, 10)}…${addr.slice(-4)}`;
 }
 
+type UpdateState = 'idle' | 'submitting' | 'submitted' | 'error';
+
 export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   const depId = svc.deploymentId ?? svc.latestDeploymentId;
   const dep = useDeployment(svc.id, depId);
   const meta = describe(dep);
+  const [updateState, setUpdateState] = useState<UpdateState>('idle');
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const onUpdateRunner = async () => {
+    if (!dep || dep.state !== 'live') return;
+    if (!confirm('Update the runner image? Your function will briefly restart.')) return;
+    setUpdateState('submitting');
+    setUpdateError(null);
+    try {
+      await api.updateRunnerImage(svc.id, dep.id);
+      setUpdateState('submitted');
+      setTimeout(() => setUpdateState('idle'), 3000);
+    } catch (err) {
+      setUpdateError((err as Error).message);
+      setUpdateState('error');
+      setTimeout(() => setUpdateState('idle'), 6000);
+    }
+  };
 
   const liveUri = dep?.uris?.[0];
   const publicUrl = liveUri
@@ -204,6 +224,57 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           >
             <Icon name="external" size={13} />
           </a>
+          {dep?.state === 'live' && (
+            <button
+              onClick={onUpdateRunner}
+              disabled={updateState === 'submitting'}
+              title="Submit a fresh SDL on the same lease so the provider re-pulls the runner image"
+              style={{
+                marginLeft: 8,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 10px',
+                fontSize: 12,
+                background: 'var(--bg-elev-3)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--fg)',
+                cursor: updateState === 'submitting' ? 'progress' : 'pointer',
+                opacity: updateState === 'submitting' ? 0.7 : 1,
+              }}
+            >
+              <Icon
+                name="refresh"
+                size={11}
+                color="var(--fg-muted)"
+                className={updateState === 'submitting' ? 'spin' : undefined}
+              />
+              {updateState === 'submitting'
+                ? 'Updating…'
+                : updateState === 'submitted'
+                  ? 'Update submitted'
+                  : updateState === 'error'
+                    ? 'Update failed'
+                    : 'Update runner'}
+            </button>
+          )}
+        </div>
+      )}
+      {updateState === 'error' && updateError && (
+        <div
+          style={{
+            marginBottom: 14,
+            padding: '8px 12px',
+            background: 'rgba(229,72,77,0.06)',
+            border: '1px solid rgba(229,72,77,0.25)',
+            borderRadius: 8,
+            fontSize: 12,
+            color: 'var(--fg-muted)',
+            wordBreak: 'break-word',
+          }}
+        >
+          Couldn't submit update: {updateError}
         </div>
       )}
 

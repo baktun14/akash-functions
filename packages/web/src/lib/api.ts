@@ -47,6 +47,9 @@ export interface ApiClient {
   remove(id: string): Promise<void>;
 
   getDeployment(fnId: string, depId: string): Promise<DeploymentRecord>;
+  // Submits a fresh SDL on the same dseq so the provider re-pulls the runner
+  // image and restarts the container. Lease, dseq, gseq, oseq, uris stay put.
+  updateRunnerImage(fnId: string, depId: string): Promise<DeploymentRecord>;
 
   // Version history & code editing.
   listVersions(fnId: string): Promise<FunctionVersionSummary[]>;
@@ -273,6 +276,12 @@ class MockApi implements ApiClient {
     };
   }
 
+  async updateRunnerImage(fnId: string, depId: string): Promise<DeploymentRecord> {
+    await delay(150);
+    const dep = await this.getDeployment(fnId, depId);
+    return { ...dep, errorMessage: undefined };
+  }
+
   async listVersions(fnId: string): Promise<FunctionVersionSummary[]> {
     await delay(120);
     const versions = seedMockVersionsIfEmpty(fnId);
@@ -495,6 +504,13 @@ class LiveApi implements ApiClient {
 
   async getDeployment(fnId: string, depId: string): Promise<DeploymentRecord> {
     return this.req<DeploymentRecord>(`/api/functions/${fnId}/deployments/${depId}`);
+  }
+
+  async updateRunnerImage(fnId: string, depId: string): Promise<DeploymentRecord> {
+    return this.req<DeploymentRecord>(
+      `/api/functions/${fnId}/deployments/${depId}/update-image`,
+      { method: 'POST' }
+    );
   }
 
   async listVersions(fnId: string): Promise<FunctionVersionSummary[]> {

@@ -8,12 +8,14 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import type { DeploymentRecord } from '@shared/types';
+import { consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { signRunner } from '../lib/signing';
+import { log } from '../lib/log';
 
 const Body = z.object({
   versionId: z.string().uuid().optional(),
@@ -104,6 +106,79 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
   startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn' });
 
   return c.json(toRecord(dep), 202);
+});
+
+// In-place runner image update. Akash's MsgUpdateDeployment lets us submit a
+// fresh SDL on the same dseq — the provider re-pulls and restarts the container
+// while keeping the lease, gseq, oseq, and uris intact. Used to roll out a new
+// runner image (e.g. supervisor changes) to existing live deployments without
+// charging the user for a fresh bid.
+deployRouter.post('/:id/deployments/:depId/update-image', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const akashKey = c.get('akashKey');
+  const fnId = c.req.param('id');
+  const depId = c.req.param('depId');
+
+  const [fn] = await db
+    .select()
+    .from(functions)
+    .where(
+      and(
+        eq(functions.id, fnId),
+        eq(functions.walletAddress, walletAddress),
+        isNull(functions.deletedAt)
+      )
+    )
+    .limit(1);
+  if (!fn) throw new HTTPException(404, { message: 'Function not found' });
+
+  const [dep] = await db
+    .select()
+    .from(deployments)
+    .where(and(eq(deployments.id, depId), eq(deployments.functionId, fnId)))
+    .limit(1);
+  if (!dep) throw new HTTPException(404, { message: 'Deployment not found' });
+  if (dep.state !== 'live' || !dep.dseq) {
+    throw new HTTPException(409, {
+      message: `Deployment is ${dep.state}; only live deployments can be updated`,
+    });
+  }
+
+  const [version] = await db
+    .select()
+    .from(functionVersions)
+    .where(eq(functionVersions.id, dep.versionId))
+    .limit(1);
+  if (!version) {
+    throw new HTTPException(500, { message: 'Version row missing for deployment' });
+  }
+
+  // Fresh runner token + fresh resolveRunnerImage() pick up the new :latest tag.
+  // The previous token stays valid until expiry, so any in-flight runner→server
+  // calls during the container swap won't 401.
+  const runnerToken = signRunner({ fnId });
+  const sdl = await buildSdl({
+    functionId: fnId,
+    initialVersionId: dep.versionId,
+    runnerToken,
+    resources: version.resources,
+    akashmlKey: version.envVars['AKASHML_API_KEY'],
+  });
+
+  await consoleApi.updateDeployment(akashKey, dep.dseq, sdl);
+  log.info('runner image update submitted', {
+    fnId,
+    depId,
+    dseq: dep.dseq,
+    versionId: dep.versionId,
+  });
+
+  // Optimistically clear errorMessage. The new container's health probe will
+  // re-write it if the new image breaks anything; otherwise the old text would
+  // sit there during the restart window even though it no longer applies.
+  await db.update(deployments).set({ errorMessage: null }).where(eq(deployments.id, dep.id));
+
+  return c.json(toRecord({ ...dep, errorMessage: null }), 202);
 });
 
 deployRouter.get('/:id/deployments/:depId', async (c) => {
