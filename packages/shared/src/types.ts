@@ -42,8 +42,10 @@ export type Preset = {
   akash?: boolean;
 };
 
-// Tokenized lines for the syntax-highlighted code preview in the function builder
-// and source-code tab. Each line is an array of [class, text] tuples.
+// Tokenized lines used as the seed for template previews. Display-only — the
+// canonical text the runner boots is `CodeSample.source` (or, for templates
+// that haven't been edited yet, the concatenation of these tokens).
+// Each line is an array of [class, text] tuples.
 export type CodeToken = readonly [string, string];
 export type TokenLine = ReadonlyArray<CodeToken>;
 
@@ -58,6 +60,7 @@ export type CodeSample = {
   name: string;
   needsAkashML?: boolean;
   code: TokenLine[];
+  source?: string;
   res: Resources;
 };
 
