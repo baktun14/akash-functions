@@ -132,7 +132,7 @@ function whatBump(commits) {
   let features = 0;
 
   commits.forEach((commit) => {
-    const isHiddenType = COMMIT_TYPES.find((t) => t.type === commit.type)?.hidden || false;
+    const matchedType = COMMIT_TYPES.find((t) => t.type === commit.type);
     addBangNotes(commit);
 
     if (commit.notes.length > 0) {
@@ -141,7 +141,7 @@ function whatBump(commits) {
     } else if (commit.type === "feat" || commit.type === "feature") {
       features += 1;
       if (level === 2 || level === undefined) level = 1;
-    } else if (!isHiddenType && level === undefined) {
+    } else if (matchedType && !matchedType.hidden && level === undefined) {
       level = 2;
     }
   });
