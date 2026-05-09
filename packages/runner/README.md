@@ -9,18 +9,21 @@ Single-image runtime for every function deployed via Akash Functions.
    (optionally) `AKASHML_API_KEY`.
 2. `boot.ts` fetches the initial version's source from
    `${BACKEND_BASE_URL}/api/runner/code/${FUNCTION_ID}/${INITIAL_VERSION_ID}`
-   and extracts it to `/app`.
+   and extracts it to `/app/versions/${INITIAL_VERSION_ID}/`.
 3. Runs `bun install --production` if a `package.json` is present.
-4. Spawns `bun /app/src/index.ts` (or `/app/index.ts`).
+4. Points `/app/current` (a relative symlink) at the version dir and spawns
+   `bun /app/current/src/index.ts` (or `/app/current/index.ts`).
 5. Forwards `SIGTERM` / `SIGINT` to the child.
 6. **Poll loop**: every `POLL_INTERVAL_MS` (default 10s, clamped to
    `[3000, 60000]`), GETs `${BACKEND_BASE_URL}/api/runner/current/${FUNCTION_ID}`.
-   On a new `versionId`, stages the new source in `/app.next`, runs
-   `bun install` if `package.json` changed, atomically swaps it into `/app`
-   (keeping the previous tree as `/app.lkg`), and respawns the user-code child.
+   On a new `versionId`, fetches into `/app/versions/${newId}/`, runs
+   `bun install` if `package.json` changed, atomically swaps the
+   `/app/current` symlink to the new version dir, and respawns the user-code
+   child.
 7. **Health-checked rollback**: after a swap, waits up to 5s for the new child
-   to listen on `PORT`. If it doesn't, restores `/app.lkg` and respawns the
-   previous good version.
+   to listen on `PORT`. If it doesn't, atomic-swaps `/app/current` back to the
+   previous version's directory and respawns. After a successful reload, all
+   version dirs except the current and previous are pruned.
 
 The image is **public** and **immutable** — every function deploys this exact
 image, only the env vars differ. This keeps cold starts predictable, eliminates
@@ -38,12 +41,12 @@ listener before exit.
 
 ```bash
 cd packages/runner
-docker build -t ghcr.io/baktun14/akash-functions-runner:2.0.0 .
-docker push ghcr.io/baktun14/akash-functions-runner:2.0.0
+docker build -t ghcr.io/baktun14/akash-functions-runner:2.0.1 .
+docker push ghcr.io/baktun14/akash-functions-runner:2.0.1
 ```
 
 The version tag is referenced by the backend's `RUNNER_IMAGE` env var (default
-`ghcr.io/baktun14/akash-functions-runner:2.0.0`). Bump the tag on breaking
+`ghcr.io/baktun14/akash-functions-runner:2.0.1`). Bump the tag on breaking
 changes to the env-var contract; the backend then ships SDL pointing at the
 new tag.
 

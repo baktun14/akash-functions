@@ -1,8 +1,14 @@
 // Akash Functions runner — supervisor entry point.
 //
-// Owns one mutable child process and a poll loop. On a new versionId, stages
-// the new source in /app.next, swaps it into /app, and respawns the child.
-// Falls back to /app.lkg if the new code fails to start.
+// Owns one mutable child process and a poll loop. Each version's source lives
+// under /app/versions/<id>/ and /app/current is a relative symlink into that
+// directory. Reloads extract the new version, atomically swap the symlink, and
+// respawn the child against /app/current. On health-check failure, the symlink
+// swaps back to the previous version's directory (still on disk).
+//
+// Keeping all reload state inside /app means every rename stays on a single
+// filesystem regardless of how the provider mounts /app — sibling paths like
+// /app.lkg would cross a mount boundary and fail with EXDEV.
 //
 // Required env vars (injected by the SDL at deploy time):
 //   FUNCTION_ID         opaque function identifier
@@ -14,13 +20,14 @@
 //   AKASHML_API_KEY     (optional) passthrough to user code
 
 import { connect } from 'node:net';
-import { mkdir, rename, rm, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { relative } from 'node:path';
 
 const APP_DIR = '/app';
-const STAGING_DIR = '/app.next';
-const LKG_DIR = '/app.lkg';
-const BROKEN_DIR = '/app.broken';
+const VERSIONS_DIR = '/app/versions';
+const CURRENT_LINK = '/app/current';
+const STAGING_LINK = '/app/.current.next';
 
 const POLL_MIN_MS = 3_000;
 const POLL_MAX_MS = 60_000;
@@ -67,9 +74,14 @@ let shuttingDown = false;
 
 console.log(`[boot] FUNCTION_ID=${FUNCTION_ID} initialVersion=${INITIAL_VERSION_ID} pollMs=${POLL_INTERVAL_MS}`);
 
-await fetchAndExtract(INITIAL_VERSION_ID, APP_DIR);
-await bunInstallIfNeeded(APP_DIR);
-currentChild = spawnChild(APP_DIR);
+await prepareAppDir();
+await mkdir(VERSIONS_DIR, { recursive: true });
+const initialDir = versionDir(INITIAL_VERSION_ID);
+await rm(initialDir, { recursive: true, force: true });
+await fetchAndExtract(INITIAL_VERSION_ID, initialDir);
+await bunInstallIfNeeded(initialDir);
+await swapCurrentSymlink(initialDir);
+currentChild = spawnChild(CURRENT_LINK);
 attachExitWatcher(currentChild);
 
 process.on('SIGTERM', () => forwardSignal('SIGTERM'));
@@ -120,26 +132,23 @@ async function reload(newVersionId: string): Promise<void> {
   if (reloading) return;
   reloading = true;
   console.log(`[reload] swapping ${currentVersion} → ${newVersionId}`);
+  const previousVersion = currentVersion;
   try {
-    await rm(STAGING_DIR, { recursive: true, force: true });
-    await fetchAndExtract(newVersionId, STAGING_DIR);
+    const newDir = versionDir(newVersionId);
+    await rm(newDir, { recursive: true, force: true });
+    await fetchAndExtract(newVersionId, newDir);
 
-    const installNeeded = await packageJsonChanged(APP_DIR, STAGING_DIR);
-    if (installNeeded) {
-      await bunInstall(STAGING_DIR);
+    if (await packageJsonChanged(versionDir(previousVersion), newDir)) {
+      await bunInstall(newDir);
     }
 
-    // Atomic-ish swap: keep last-known-good in /app.lkg in case the new code
-    // fails its health check.
-    await rm(LKG_DIR, { recursive: true, force: true });
-    await rename(APP_DIR, LKG_DIR);
-    await rename(STAGING_DIR, APP_DIR);
+    await swapCurrentSymlink(newDir);
 
     const oldChild = currentChild;
     currentChild = null; // tell the exit watcher the upcoming exit is expected
     if (oldChild) await terminateChild(oldChild);
 
-    const next = spawnChild(APP_DIR);
+    const next = spawnChild(CURRENT_LINK);
     currentChild = next;
     attachExitWatcher(next);
 
@@ -149,38 +158,39 @@ async function reload(newVersionId: string): Promise<void> {
 
     const healthy = await waitForListening(PORT, HEALTH_CHECK_MS);
     if (!healthy) {
-      console.error('[reload] health check failed, rolling back to last-known-good');
-      await rollbackToLkg();
+      console.error('[reload] health check failed, rolling back');
+      await rollbackToVersion(previousVersion);
     } else {
       console.log(`[reload] live on ${newVersionId}`);
+      await pruneOldVersions(new Set([newVersionId, previousVersion]));
     }
   } catch (err) {
     console.error(`[reload] failed: ${(err as Error).message}`);
     // Don't kill the running child; a bad fetch / install should leave the
     // pod serving its current version.
-    await rm(STAGING_DIR, { recursive: true, force: true }).catch(() => undefined);
+    await rm(versionDir(newVersionId), { recursive: true, force: true }).catch(() => undefined);
   } finally {
     reloading = false;
   }
 }
 
-async function rollbackToLkg(): Promise<void> {
-  if (!existsSync(LKG_DIR)) {
-    console.error('[rollback] no /app.lkg to restore from');
+async function rollbackToVersion(versionId: string): Promise<void> {
+  const dir = versionDir(versionId);
+  if (!existsSync(dir)) {
+    console.error(`[rollback] versions/${versionId} missing, cannot rollback`);
     return;
   }
   const broken = currentChild;
   currentChild = null;
   if (broken) await terminateChild(broken);
 
-  await rm(BROKEN_DIR, { recursive: true, force: true });
-  await rename(APP_DIR, BROKEN_DIR);
-  await rename(LKG_DIR, APP_DIR);
+  await swapCurrentSymlink(dir);
+  currentVersion = versionId;
 
-  const restored = spawnChild(APP_DIR);
+  const restored = spawnChild(CURRENT_LINK);
   currentChild = restored;
   attachExitWatcher(restored);
-  console.log('[rollback] restored last-known-good /app');
+  console.log(`[rollback] restored ${versionId}`);
 }
 
 async function fetchAndExtract(versionId: string, dest: string): Promise<void> {
@@ -237,6 +247,37 @@ async function packageJsonChanged(oldDir: string, newDir: string): Promise<boole
     return a !== b;
   } catch {
     return true;
+  }
+}
+
+function versionDir(id: string): string {
+  return `${VERSIONS_DIR}/${id}`;
+}
+
+async function prepareAppDir(): Promise<void> {
+  await mkdir(APP_DIR, { recursive: true });
+  // Clear stale top-level entries from any previous container life. Skip the
+  // dirs we own so a warm restart keeps existing version data.
+  const entries = await readdir(APP_DIR).catch(() => [] as string[]);
+  for (const entry of entries) {
+    if (entry === 'versions' || entry === 'current') continue;
+    await rm(`${APP_DIR}/${entry}`, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function swapCurrentSymlink(targetDir: string): Promise<void> {
+  // Relative target so the symlink stays valid no matter how /app is mounted.
+  const rel = relative(APP_DIR, targetDir);
+  await rm(STAGING_LINK, { force: true }).catch(() => undefined);
+  await symlink(rel, STAGING_LINK);
+  await rename(STAGING_LINK, CURRENT_LINK);
+}
+
+async function pruneOldVersions(keep: Set<string>): Promise<void> {
+  const entries = await readdir(VERSIONS_DIR).catch(() => [] as string[]);
+  for (const entry of entries) {
+    if (keep.has(entry)) continue;
+    await rm(`${VERSIONS_DIR}/${entry}`, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
