@@ -5,6 +5,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
+import { startReconciler } from './akash/reconciler';
 import { env } from './env';
 import { errorHandler } from './middleware/error';
 import { deployRouter } from './routes/deploy';
@@ -36,4 +37,5 @@ app.onError(errorHandler);
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   log.info(`server listening on http://localhost:${info.port}`, { runner: env.RUNNER_IMAGE });
+  startReconciler();
 });

@@ -323,7 +323,26 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
               {svc.image}
             </div>
             <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginTop: 2 }}>
-              {dep?.dseq ? `dseq ${dep.dseq}` : 'no deployment yet'}
+              {dep?.dseq ? (
+                <a
+                  href={`https://console.akash.network/deployments/${dep.dseq}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="View deployment on Akash Console"
+                  style={{
+                    color: 'var(--fg-muted)',
+                    textDecoration: 'none',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                  }}
+                >
+                  dseq {dep.dseq}
+                  <Icon name="external" size={10} />
+                </a>
+              ) : (
+                'no deployment yet'
+              )}
               {dep?.provider ? ` · ${truncate(dep.provider)}` : ''}
             </div>
           </div>
