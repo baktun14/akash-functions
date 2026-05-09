@@ -11,7 +11,7 @@ import type {
   FunctionVersionSummary,
   PresetId,
 } from '@shared/types';
-import { consoleApi } from '../akash/console-client';
+import { ConsoleApiError, consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
@@ -65,6 +65,7 @@ functionsRouter.use('*', requireAkashKey);
 
 functionsRouter.get('/', async (c) => {
   const walletAddress = c.get('walletAddress');
+  const akashKey = c.get('akashKey');
   const rows = await db
     .select()
     .from(functions)
@@ -73,23 +74,73 @@ functionsRouter.get('/', async (c) => {
 
   // Decorate with the latest deployment URI so the frontend can show it
   // straight away in the cards list.
-  const list: FunctionRecord[] = await Promise.all(
-    rows.map(async (fn) => {
-      const dep = await latestDeployment(fn.id);
-      return {
-        id: fn.id,
-        name: fn.name,
-        kind: 'function' as const,
-        subdomain: dep?.uris?.[0] ?? `${fn.subdomain}.akash-functions.io`,
-        image: env.RUNNER_IMAGE,
-        status: dep ? stateToStatus(dep.state) : 'idle',
-        latestDeploymentId: dep?.id,
-      };
-    })
+  const decorated = await Promise.all(
+    rows.map(async (fn) => ({ fn, dep: await latestDeployment(fn.id) }))
   );
+
+  const list: FunctionRecord[] = decorated.map(({ fn, dep }) => ({
+    id: fn.id,
+    name: fn.name,
+    kind: 'function' as const,
+    subdomain: dep?.uris?.[0] ?? `${fn.subdomain}.akash-functions.io`,
+    image: env.RUNNER_IMAGE,
+    status: dep ? stateToStatus(dep.state) : 'idle',
+    latestDeploymentId: dep?.id,
+  }));
+
+  // Fire-and-forget: cross-check on-chain state for any deployment we still
+  // believe is live/leased. The reconciler can't do this (no apiKey outside
+  // an authed request), so we piggyback on the user's poll. Updates land in
+  // the DB and the frontend's next 3s/30s tick reflects them.
+  void crossCheckAkashStates(akashKey, decorated.map((d) => d.dep));
 
   return c.json(list);
 });
+
+async function crossCheckAkashStates(
+  akashKey: string,
+  deps: Array<Awaited<ReturnType<typeof latestDeployment>>>
+): Promise<void> {
+  const candidates = deps.filter(
+    (d): d is NonNullable<typeof d> & { dseq: string } =>
+      !!d && !!d.dseq && (d.state === 'live' || d.state === 'leased')
+  );
+  if (candidates.length === 0) return;
+
+  await Promise.allSettled(
+    candidates.map(async (dep) => {
+      try {
+        const detail = await consoleApi.getDeployment(akashKey, dep.dseq);
+        const deploymentClosed = detail.deployment?.state === 'closed';
+        const allLeasesClosed =
+          Array.isArray(detail.leases) &&
+          detail.leases.length > 0 &&
+          detail.leases.every((l) => l.state === 'closed');
+        if (deploymentClosed || allLeasesClosed) {
+          await markClosedOnChain(dep.id, 'lease no longer active on-chain');
+        }
+      } catch (err) {
+        if (err instanceof ConsoleApiError && err.status === 404) {
+          await markClosedOnChain(dep.id, 'deployment not found on-chain');
+          return;
+        }
+        log.warn('akash state cross-check failed', {
+          deploymentId: dep.id,
+          dseq: dep.dseq,
+          err: String(err),
+        });
+      }
+    })
+  );
+}
+
+async function markClosedOnChain(deploymentId: string, errorMessage: string): Promise<void> {
+  await db
+    .update(deployments)
+    .set({ state: 'closed', closedAt: new Date(), errorMessage })
+    .where(and(eq(deployments.id, deploymentId), notInArray(deployments.state, ['closed', 'failed'])));
+  log.info('cross-check marked deployment closed', { deploymentId, errorMessage });
+}
 
 functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
   const ownerHash = c.get('ownerHash');
