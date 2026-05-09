@@ -285,7 +285,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           <span style={{ color: 'var(--fg)' }}>{meta.body}</span>
         </div>
 
-        {meta.tone === 'ok' && reachable && (
+        {meta.tone === 'ok' && reachable && !dep?.errorMessage && (
           <div
             style={{
               marginTop: 12,
@@ -304,6 +304,38 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
             </span>
             <span style={{ color: 'var(--fg-subtle)' }}>·</span>
             <span style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>ready to receive traffic</span>
+          </div>
+        )}
+
+        {meta.tone === 'ok' && dep?.errorMessage && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              background: 'rgba(245,165,36,0.06)',
+              border: '1px solid rgba(245,165,36,0.25)',
+              borderRadius: 8,
+              fontSize: 12.5,
+              color: 'var(--fg)',
+              wordBreak: 'break-word',
+            }}
+          >
+            <div
+              style={{
+                fontWeight: 500,
+                color: 'var(--warn, #f5a524)',
+                marginBottom: 4,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              <Icon name="x" size={12} color="var(--warn, #f5a524)" />
+              Runtime error on first request
+            </div>
+            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+              {dep.errorMessage}
+            </div>
           </div>
         )}
 

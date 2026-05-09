@@ -34,6 +34,8 @@ const POLL_MAX_MS = 60_000;
 const POLL_DEFAULT_MS = 10_000;
 const KILL_GRACE_MS = 5_000;
 const HEALTH_CHECK_MS = 5_000;
+const HTTP_PROBE_MS = 5_000;
+const HTTP_PROBE_BODY_MAX = 1500;
 
 // Must be declared before the top-level `await` below, otherwise spawnChild
 // (called at boot) reaches it through the TDZ and crashes the runner with
@@ -61,7 +63,13 @@ function clampPoll(n: number): number {
 const codeUrl = (versionId: string) =>
   `${BACKEND_BASE_URL}/api/runner/code/${FUNCTION_ID}/${versionId}`;
 const currentUrl = `${BACKEND_BASE_URL}/api/runner/current/${FUNCTION_ID}`;
+const healthUrl = `${BACKEND_BASE_URL}/api/runner/health/${FUNCTION_ID}`;
 const authHeader = { Authorization: `Bearer ${RUNNER_TOKEN}` };
+
+type ProbeResult =
+  | { kind: 'ok'; status: number }
+  | { kind: 'http-error'; status: number; statusText: string; bodyExcerpt: string }
+  | { kind: 'connect-error'; reason: string };
 
 type ChildHandle = ReturnType<typeof Bun.spawn>;
 
@@ -83,6 +91,11 @@ await bunInstallIfNeeded(initialDir);
 await swapCurrentSymlink(initialDir);
 currentChild = spawnChild(CURRENT_LINK);
 attachExitWatcher(currentChild);
+
+// Best-effort first-request probe so the dashboard shows runtime errors
+// (e.g. user code listens but throws on every request). No rollback path on
+// initial boot — there's no previous version to fall back to.
+void probeAndReport(INITIAL_VERSION_ID);
 
 process.on('SIGTERM', () => forwardSignal('SIGTERM'));
 process.on('SIGINT', () => forwardSignal('SIGINT'));
@@ -156,14 +169,24 @@ async function reload(newVersionId: string): Promise<void> {
     // re-attempt the same broken version on every poll.
     currentVersion = newVersionId;
 
-    const healthy = await waitForListening(PORT, HEALTH_CHECK_MS);
-    if (!healthy) {
-      console.error('[reload] health check failed, rolling back');
+    const tcpHealthy = await waitForListening(PORT, HEALTH_CHECK_MS);
+    if (!tcpHealthy) {
+      console.error('[reload] tcp health check failed, rolling back');
+      await reportHealth(newVersionId, { kind: 'connect-error', reason: 'listen timeout' });
       await rollbackToVersion(previousVersion);
-    } else {
-      console.log(`[reload] live on ${newVersionId}`);
-      await pruneOldVersions(new Set([newVersionId, previousVersion]));
+      return;
     }
+
+    const probe = await httpProbe(PORT, HTTP_PROBE_MS);
+    await reportHealth(newVersionId, probe);
+    if (probe.kind !== 'ok') {
+      console.error(`[reload] http probe ${probe.kind === 'http-error' ? `${probe.status} ${probe.statusText}` : `connect ${probe.reason}`}, rolling back`);
+      await rollbackToVersion(previousVersion);
+      return;
+    }
+
+    console.log(`[reload] live on ${newVersionId}`);
+    await pruneOldVersions(new Set([newVersionId, previousVersion]));
   } catch (err) {
     console.error(`[reload] failed: ${(err as Error).message}`);
     // Don't kill the running child; a bad fetch / install should leave the
@@ -191,6 +214,9 @@ async function rollbackToVersion(versionId: string): Promise<void> {
   currentChild = restored;
   attachExitWatcher(restored);
   console.log(`[rollback] restored ${versionId}`);
+  // Re-probe the restored version so the dashboard's runtime warning clears
+  // when the previous-good version still serves cleanly.
+  void probeAndReport(versionId);
 }
 
 async function fetchAndExtract(versionId: string, dest: string): Promise<void> {
@@ -330,6 +356,82 @@ function forwardSignal(sig: 'SIGTERM' | 'SIGINT'): void {
   console.log(`[boot] forwarding ${sig}`);
   if (currentChild) {
     try { currentChild.kill(sig); } catch { /* already gone */ }
+  }
+}
+
+// One-shot HTTP GET / against the user code. The TCP probe in waitForListening
+// only proves the port is bound; this proves the fetch handler actually
+// responds without a 5xx. 4xx is treated as healthy — many user functions
+// 404 on `/` because they only mount specific routes.
+async function httpProbe(port: number, deadlineMs: number): Promise<ProbeResult> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), deadlineMs);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      signal: ctrl.signal,
+      headers: { 'user-agent': 'akash-fn-runner-probe' },
+    });
+    if (res.status >= 500) {
+      const bodyExcerpt = await readExcerpt(res, HTTP_PROBE_BODY_MAX);
+      return { kind: 'http-error', status: res.status, statusText: res.statusText, bodyExcerpt };
+    }
+    await res.body?.cancel().catch(() => undefined);
+    return { kind: 'ok', status: res.status };
+  } catch (err) {
+    return { kind: 'connect-error', reason: (err as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readExcerpt(res: Response, max: number): Promise<string> {
+  try {
+    const text = await res.text();
+    return text.length > max ? `${text.slice(0, max)}…` : text;
+  } catch {
+    return '';
+  }
+}
+
+// Fire-and-forget. Health reporting must never block boot/reload, and a
+// transient backend failure should not affect the running child.
+async function reportHealth(versionId: string, probe: ProbeResult): Promise<void> {
+  const payload =
+    probe.kind === 'ok'
+      ? { ok: true, versionId, status: probe.status }
+      : probe.kind === 'http-error'
+        ? {
+            ok: false,
+            versionId,
+            status: probe.status,
+            statusText: probe.statusText,
+            bodyExcerpt: probe.bodyExcerpt,
+          }
+        : { ok: false, versionId, status: 0, reason: probe.reason };
+  try {
+    const res = await fetch(healthUrl, {
+      method: 'POST',
+      headers: { ...authHeader, 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      console.warn(`[health] report ${res.status} ${res.statusText}`);
+    }
+  } catch (err) {
+    console.warn(`[health] report failed: ${(err as Error).message}`);
+  }
+}
+
+async function probeAndReport(versionId: string): Promise<void> {
+  const tcpHealthy = await waitForListening(PORT, HEALTH_CHECK_MS);
+  if (!tcpHealthy) {
+    await reportHealth(versionId, { kind: 'connect-error', reason: 'listen timeout' });
+    return;
+  }
+  const probe = await httpProbe(PORT, HTTP_PROBE_MS);
+  await reportHealth(versionId, probe);
+  if (probe.kind !== 'ok') {
+    console.warn(`[health] ${probe.kind === 'http-error' ? `${probe.status} ${probe.statusText}` : `connect ${probe.reason}`}`);
   }
 }
 
