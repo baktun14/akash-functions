@@ -3,22 +3,25 @@
 import { useState } from 'react';
 import type { FunctionRecord } from '@shared/types';
 import { Icon } from '../icons';
+import { api } from '../../lib/api';
 import { DeploymentCard } from './DeploymentCard';
 
 type Props = {
   services: FunctionRecord[];
   onNewFunction?: () => void;
+  onRefresh?: () => void | Promise<void>;
 };
 
 type Filter = 'active' | 'all';
 
 const isActive = (s: FunctionRecord) => s.status === 'online' || s.status === 'pending';
 
-export function Canvas({ services, onNewFunction }: Props) {
+export function Canvas({ services, onNewFunction, onRefresh }: Props) {
   const [filter, setFilter] = useState<Filter>('active');
 
   const activeCount = services.filter(isActive).length;
   const visible = filter === 'active' ? services.filter(isActive) : services;
+  const outdated = services.filter((s) => s.runnerOutdated && s.latestDeploymentId);
 
   return (
     <div
@@ -63,6 +66,9 @@ export function Canvas({ services, onNewFunction }: Props) {
             </button>
           )}
         </div>
+        {outdated.length > 0 && (
+          <OutdatedRunnerBanner outdated={outdated} onDone={onRefresh} />
+        )}
       </div>
 
       {visible.length === 0 ? (
@@ -137,6 +143,103 @@ function FilterButton({
     >
       {children}
     </button>
+  );
+}
+
+function OutdatedRunnerBanner({
+  outdated,
+  onDone,
+}: {
+  outdated: FunctionRecord[];
+  onDone?: () => void | Promise<void>;
+}) {
+  const [state, setState] = useState<'idle' | 'running' | 'done' | 'partial'>('idle');
+  const [progress, setProgress] = useState({ ok: 0, failed: 0 });
+
+  // Runs in-place updates one at a time. Sequential because Akash's MsgUpdateDeployment
+  // already serializes per dseq, but more importantly so a bad function's failure
+  // surfaces immediately rather than after the whole batch lands.
+  const onUpdateAll = async () => {
+    if (state === 'running') return;
+    setState('running');
+    setProgress({ ok: 0, failed: 0 });
+    let ok = 0;
+    let failed = 0;
+    for (const svc of outdated) {
+      if (!svc.latestDeploymentId) {
+        failed += 1;
+        setProgress({ ok, failed });
+        continue;
+      }
+      try {
+        await api.updateRunnerImage(svc.id, svc.latestDeploymentId);
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+      setProgress({ ok, failed });
+    }
+    setState(failed === 0 ? 'done' : 'partial');
+    if (onDone) await onDone();
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 14,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '10px 14px',
+        background: 'rgba(245,165,36,0.08)',
+        border: '1px solid rgba(245,165,36,0.35)',
+        borderRadius: 10,
+        fontSize: 13,
+      }}
+    >
+      <Icon name="arrowUp" size={14} color="var(--warn, #f5a524)" />
+      <span style={{ color: 'var(--fg)' }}>
+        {state === 'running' ? (
+          <>
+            Updating runners… <span style={{ color: 'var(--fg-muted)' }}>
+              {progress.ok + progress.failed} / {outdated.length}
+            </span>
+          </>
+        ) : state === 'done' ? (
+          <>Updated {outdated.length} runner{outdated.length === 1 ? '' : 's'}.</>
+        ) : state === 'partial' ? (
+          <>
+            Updated {progress.ok}, {progress.failed} failed — check each function for details.
+          </>
+        ) : (
+          <>
+            {outdated.length} function{outdated.length === 1 ? '' : 's'} running an outdated
+            runner. Apply the in-place update to enforce protected routes.
+          </>
+        )}
+      </span>
+      <div style={{ flex: 1 }} />
+      {state !== 'done' && state !== 'partial' && (
+        <button
+          type="button"
+          onClick={onUpdateAll}
+          disabled={state === 'running'}
+          className="btn btn-sm"
+          style={{
+            background: 'var(--warn, #f5a524)',
+            color: 'var(--bg)',
+            border: 'none',
+            fontWeight: 500,
+            gap: 6,
+            opacity: state === 'running' ? 0.7 : 1,
+            cursor: state === 'running' ? 'progress' : 'pointer',
+          }}
+        >
+          <Icon name="refresh" size={11} className={state === 'running' ? 'spin' : undefined} />
+          {state === 'running' ? 'Updating…' : 'Update all'}
+        </button>
+      )}
+    </div>
   );
 }
 

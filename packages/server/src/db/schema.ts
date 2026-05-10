@@ -121,6 +121,11 @@ export const deployments = pgTable('deployments', {
   uris: text('uris').array(),
   state: text('state').notNull().default('pending'),
   errorMessage: text('error_message'),
+  // Self-reported by the running runner on each /api/runner/current poll. Null
+  // means the runner has never reported (legacy image pre-version-reporting,
+  // or a fresh deployment that hasn't polled yet — `runnerSeenAt` disambiguates).
+  runnerVersion: text('runner_version'),
+  runnerSeenAt: timestamp('runner_seen_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   liveAt: timestamp('live_at', { withTimezone: true }),
   closedAt: timestamp('closed_at', { withTimezone: true }),

@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { and, desc, eq, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -112,6 +112,24 @@ runnerRouter.get('/current/:fnId', async (c) => {
     .where(and(eq(functions.id, fnId), isNull(functions.deletedAt)))
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
+
+  // Runner self-reports its version via `?v=…`. Upsert it on the open
+  // deployment row(s) only when it changes — `ne` against NULL evaluates to
+  // NULL in SQL, so use a coalesced compare to match the initial-null case.
+  // Without this guard the row would take a write every ~10s per function.
+  const reportedVersion = c.req.query('v');
+  if (reportedVersion && /^\d+\.\d+\.\d+/.test(reportedVersion)) {
+    await db
+      .update(deployments)
+      .set({ runnerVersion: reportedVersion, runnerSeenAt: new Date() })
+      .where(
+        and(
+          eq(deployments.functionId, fnId),
+          ne(deployments.state, 'closed'),
+          sql`coalesce(${deployments.runnerVersion}, '') <> ${reportedVersion}`
+        )
+      );
+  }
 
   const [version] = await db
     .select({

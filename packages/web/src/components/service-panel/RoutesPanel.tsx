@@ -21,9 +21,13 @@ type Props = {
   /** Called when the user toggles a route's auth requirement. Should write
    *  the new set to the backend and refresh the deployment record. */
   onToggleAuth?: (route: FunctionRoute, nextProtected: boolean) => Promise<void>;
+  /** When set, the "Public → Protected" direction is disabled and the
+   *  string is shown as the toggle's tooltip + a banner above the list. The
+   *  "Protected → Public" direction remains enabled. */
+  protectionDisabledReason?: string;
 };
 
-export function RoutesPanel({ url, routes, onToggleAuth }: Props) {
+export function RoutesPanel({ url, routes, onToggleAuth, protectionDisabledReason }: Props) {
   const [expanded, setExpanded] = useState(false);
   const baseUrl = url.replace(/\/$/, '');
   const summary = routes.map((r) => `${r.method} ${r.path}`).join(' · ');
@@ -93,6 +97,23 @@ export function RoutesPanel({ url, routes, onToggleAuth }: Props) {
             overflowY: 'auto',
           }}
         >
+          {protectionDisabledReason && (
+            <div
+              style={{
+                padding: '8px 14px',
+                background: 'rgba(245,165,36,0.08)',
+                borderBottom: '1px solid var(--line)',
+                fontSize: 12,
+                color: 'var(--warn, #f5a524)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+              }}
+            >
+              <Icon name="info" size={12} color="var(--warn, #f5a524)" />
+              {protectionDisabledReason}
+            </div>
+          )}
           {routes.map((r, i) => (
             <RouteRow
               key={`${r.method}-${r.path}-${i}`}
@@ -100,6 +121,7 @@ export function RoutesPanel({ url, routes, onToggleAuth }: Props) {
               baseUrl={baseUrl}
               first={i === 0}
               onToggleAuth={onToggleAuth}
+              protectionDisabledReason={protectionDisabledReason}
             />
           ))}
         </div>
@@ -113,23 +135,29 @@ function RouteRow({
   baseUrl,
   first,
   onToggleAuth,
+  protectionDisabledReason,
 }: {
   route: FunctionRoute;
   baseUrl: string;
   first: boolean;
   onToggleAuth?: (route: FunctionRoute, nextProtected: boolean) => Promise<void>;
+  protectionDisabledReason?: string;
 }) {
   const fullUrl = `${baseUrl}${route.path}`;
   const canOpen = route.method === 'GET' && !hasPathParam(route.path) && route.auth !== 'apiKey';
   const isProtected = route.auth === 'apiKey';
   const [pending, setPending] = useState(false);
+  // Going from Public → Protected is what gets blocked on an outdated runner.
+  // The reverse direction (un-protecting) is always allowed since it removes
+  // a (broken) restriction, never adds one.
+  const protectDisabled = !isProtected && !!protectionDisabledReason;
 
   const onCopy = () => {
     navigator.clipboard?.writeText(fullUrl).catch(() => undefined);
   };
 
   const onToggle = async () => {
-    if (!onToggleAuth || pending) return;
+    if (!onToggleAuth || pending || protectDisabled) return;
     setPending(true);
     try {
       await onToggleAuth(route, !isProtected);
@@ -189,7 +217,13 @@ function RouteRow({
         )}
       </div>
       {onToggleAuth && (
-        <AuthToggle isProtected={isProtected} pending={pending} onClick={onToggle} />
+        <AuthToggle
+          isProtected={isProtected}
+          pending={pending}
+          disabled={protectDisabled}
+          disabledReason={protectionDisabledReason}
+          onClick={onToggle}
+        />
       )}
       <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         <button
@@ -232,18 +266,27 @@ function RouteRow({
 function AuthToggle({
   isProtected,
   pending,
+  disabled,
+  disabledReason,
   onClick,
 }: {
   isProtected: boolean;
   pending: boolean;
+  disabled: boolean;
+  disabledReason?: string;
   onClick: () => void;
 }) {
+  const title = disabled
+    ? (disabledReason ?? 'Disabled')
+    : isProtected
+      ? 'Make this route public'
+      : 'Require an API key for this route';
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={pending}
-      title={isProtected ? 'Make this route public' : 'Require an API key for this route'}
+      disabled={pending || disabled}
+      title={title}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -257,8 +300,8 @@ function AuthToggle({
           ? 'color-mix(in oklch, var(--accent) 12%, transparent)'
           : 'var(--bg-elev-3)',
         color: isProtected ? 'var(--accent)' : 'var(--fg-muted)',
-        cursor: pending ? 'progress' : 'pointer',
-        opacity: pending ? 0.7 : 1,
+        cursor: disabled ? 'not-allowed' : pending ? 'progress' : 'pointer',
+        opacity: disabled ? 0.55 : pending ? 0.7 : 1,
       }}
     >
       <Icon name={isProtected ? 'lock' : 'globe'} size={11} />

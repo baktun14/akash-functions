@@ -22,6 +22,7 @@ import { db } from '../db/client';
 import { deployments, functionVariables, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
 import { secrets } from '../lib/secrets';
+import { isRunnerOutdated } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { log } from '../lib/log';
@@ -91,6 +92,11 @@ functionsRouter.get('/', async (c) => {
     image: env.RUNNER_IMAGE,
     status: dep ? stateToStatus(dep.state) : 'idle',
     latestDeploymentId: dep?.id,
+    // Only flag live deployments; functions that are idle/pending/failed/closed
+    // either have no runner running or are mid-transition, so an "outdated"
+    // badge would be noise.
+    runnerOutdated:
+      dep?.state === 'live' ? isRunnerOutdated(dep.runnerVersion, dep.liveAt) : false,
   }));
 
   // Fire-and-forget: cross-check on-chain state for any deployment we still

@@ -31,6 +31,10 @@ export type FunctionRecord = {
   // Set by GET /api/functions list query — survives reload so the UI can
   // resume polling for an in-flight or failed deployment.
   latestDeploymentId?: string;
+  /** Decorated by GET /api/functions when the latest deployment is live and
+   *  the runner reported a version older than EXPECTED_RUNNER_VERSION (or
+   *  never reported and the deployment is past the grace window). */
+  runnerOutdated?: boolean;
 };
 
 export type PresetId = 'rest' | 'jsx' | 'cron' | 'gpu';
@@ -131,6 +135,16 @@ export type DeploymentRecord = {
   uris?: string[];
   errorMessage?: string;
   routes?: FunctionRoute[];
+  /** Semver self-reported by the running runner on its last successful poll. */
+  runnerVersion?: string;
+  /** ISO timestamp of the last poll that reported runnerVersion. */
+  runnerSeenAt?: string;
+  /** The version the platform currently expects runners to be at. */
+  expectedRunnerVersion?: string;
+  /** True when the runner is on an older version (or never reported and the
+   *  deployment is past the "just came up" grace window). UI uses this to
+   *  surface a nudge to click the in-place Update runner image button. */
+  runnerOutdated?: boolean;
   createdAt: string;
   liveAt?: string;
   closedAt?: string;

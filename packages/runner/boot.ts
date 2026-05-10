@@ -78,6 +78,10 @@ const EXTERNAL_PORT = Number(env.PORT ?? '3000');
 // and is unaware that PORT was rewritten.
 const USER_PORT = 3001;
 const POLL_INTERVAL_MS = clampPoll(Number(env.POLL_INTERVAL_MS ?? POLL_DEFAULT_MS));
+// Reported on every /api/runner/current poll so the dashboard can flag
+// deployments running an outdated runner and offer the in-place update flow.
+// Bump in lockstep with packages/runner/package.json.
+const RUNNER_VERSION = '2.1.0';
 
 if (!FUNCTION_ID || !INITIAL_VERSION_ID || !BACKEND_BASE_URL || !RUNNER_TOKEN) {
   console.error('[boot] missing one of FUNCTION_ID, INITIAL_VERSION_ID, BACKEND_BASE_URL, RUNNER_TOKEN');
@@ -91,7 +95,11 @@ function clampPoll(n: number): number {
 
 const codeUrl = (versionId: string) =>
   `${BACKEND_BASE_URL}/api/runner/code/${FUNCTION_ID}/${versionId}`;
-const currentUrl = `${BACKEND_BASE_URL}/api/runner/current/${FUNCTION_ID}`;
+// Self-report version via query string — shows up in standard request logs,
+// avoids CORS preflight concerns, and the backend just upserts it on the
+// deployment row when it changes.
+const currentUrl =
+  `${BACKEND_BASE_URL}/api/runner/current/${FUNCTION_ID}?v=${encodeURIComponent(RUNNER_VERSION)}`;
 const envUrl = `${BACKEND_BASE_URL}/api/runner/env/${FUNCTION_ID}`;
 const healthUrl = `${BACKEND_BASE_URL}/api/runner/health/${FUNCTION_ID}`;
 const authHeader = { Authorization: `Bearer ${RUNNER_TOKEN}` };
