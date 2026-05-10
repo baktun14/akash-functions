@@ -116,7 +116,7 @@ export function SourceCodeTab({ svc }: Props): ReactElement {
           className="card"
           style={{
             padding: '40px 18px',
-            background: '#08080B',
+            background: 'var(--code-surface)',
             textAlign: 'center',
             color: 'var(--fg-subtle)',
             fontSize: 13,
@@ -146,7 +146,7 @@ export function SourceCodeTab({ svc }: Props): ReactElement {
       )}
 
       {detail && !loading && !error && (
-        <div className="card" style={{ padding: 0, background: '#08080B', overflow: 'hidden' }}>
+        <div className="card" style={{ padding: 0, background: 'var(--code-surface)', overflow: 'hidden' }}>
           <CodeEditor value={primarySource} readOnly minHeight={360} />
         </div>
       )}

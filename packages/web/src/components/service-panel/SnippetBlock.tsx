@@ -27,7 +27,7 @@ export function SnippetBlock({ code, lang }: Props) {
   return (
     <div
       className="card"
-      style={{ padding: 0, background: '#08080B', position: 'relative', overflow: 'hidden' }}
+      style={{ padding: 0, background: 'var(--code-surface)', position: 'relative', overflow: 'hidden' }}
     >
       <button
         onClick={onCopy}

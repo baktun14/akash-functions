@@ -376,7 +376,7 @@ export function HistoryTab({ svc }: Props): ReactElement {
                           </span>
                         </div>
                         <div
-                          style={{ background: '#08080B', borderRadius: 10, overflow: 'hidden' }}
+                          style={{ background: 'var(--code-surface)', borderRadius: 10, overflow: 'hidden' }}
                         >
                           <CodeEditor
                             value={selected.source[selectedPrimaryPath] ?? ''}

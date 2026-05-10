@@ -4,7 +4,7 @@
 // (SourceCodeTab, HistoryTab) so the look stays consistent.
 
 import { useEffect, useRef, type ReactElement } from 'react';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState, type Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { javascript } from '@codemirror/lang-javascript';
@@ -15,6 +15,11 @@ import {
   indentOnInput,
   syntaxHighlighting,
 } from '@codemirror/language';
+import { useTheme } from '../../lib/theme';
+
+// In light mode we lean on CodeMirror's defaults + defaultHighlightStyle for
+// syntax colors; the surface chrome is driven by CSS variables in themeOverrides.
+const lightThemeExtension: Extension = [];
 
 type Props = {
   value: string;
@@ -26,10 +31,16 @@ type Props = {
 export function CodeEditor({ value, onChange, readOnly, minHeight = 280 }: Props): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const themeCompartmentRef = useRef<Compartment | null>(null);
+  const { resolved } = useTheme();
   // Latest onChange held in a ref so the editor's update listener never goes
   // stale without forcing a remount of the whole view.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  // Keep the latest resolved theme available to the view-creation effect
+  // without remounting the editor every time the user toggles.
+  const initialThemeRef = useRef(resolved);
+  initialThemeRef.current = resolved;
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -45,6 +56,7 @@ export function CodeEditor({ value, onChange, readOnly, minHeight = 280 }: Props
         height: '100%',
         fontSize: '13px',
         backgroundColor: 'var(--bg-elev-2)',
+        color: 'var(--fg)',
       },
       '.cm-scroller': {
         fontFamily:
@@ -56,14 +68,17 @@ export function CodeEditor({ value, onChange, readOnly, minHeight = 280 }: Props
         borderRight: '1px solid var(--line)',
         color: 'var(--fg-subtle)',
       },
-      '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.025)' },
+      '.cm-activeLine': { backgroundColor: 'var(--editor-active-line)' },
       '.cm-activeLineGutter': {
         backgroundColor: 'transparent',
         color: 'var(--fg-muted)',
       },
       '&.cm-focused': { outline: 'none' },
-      '.cm-content': { padding: '12px 0' },
+      '.cm-content': { padding: '12px 0', caretColor: 'var(--fg)' },
     });
+
+    const themeCompartment = new Compartment();
+    themeCompartmentRef.current = themeCompartment;
 
     const state = EditorState.create({
       doc: value,
@@ -76,7 +91,7 @@ export function CodeEditor({ value, onChange, readOnly, minHeight = 280 }: Props
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         javascript({ jsx: true, typescript: true }),
         keymap.of([...defaultKeymap, ...historyKeymap]),
-        oneDark,
+        themeCompartment.of(initialThemeRef.current === 'dark' ? oneDark : lightThemeExtension),
         themeOverrides,
         EditorView.editable.of(!readOnly),
         EditorState.readOnly.of(!!readOnly),
@@ -91,11 +106,22 @@ export function CodeEditor({ value, onChange, readOnly, minHeight = 280 }: Props
     return () => {
       view.destroy();
       viewRef.current = null;
+      themeCompartmentRef.current = null;
     };
     // We intentionally only construct the view once; subsequent prop changes
     // are funneled through dedicated effects below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly]);
+
+  // Live-swap CodeMirror's theme without rebuilding the view.
+  useEffect(() => {
+    const view = viewRef.current;
+    const compartment = themeCompartmentRef.current;
+    if (!view || !compartment) return;
+    view.dispatch({
+      effects: compartment.reconfigure(resolved === 'dark' ? oneDark : lightThemeExtension),
+    });
+  }, [resolved]);
 
   // Sync external value changes (e.g., loading a different version) into the view.
   useEffect(() => {

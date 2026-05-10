@@ -3,6 +3,7 @@
 import { useState, type ReactElement } from 'react';
 import type { Session } from '@shared/types';
 import { Avatar, Icon } from '../icons';
+import { useTheme } from '../../lib/theme';
 
 type Props = {
   session: Session;
@@ -21,6 +22,7 @@ export function TopBar({
 }: Props): ReactElement {
   const [menuOpen, setMenuOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  const { resolved, toggle } = useTheme();
 
   return (
     <div
@@ -53,6 +55,16 @@ export function TopBar({
       </span>
 
       <div style={{ flex: 1 }} />
+
+      <button
+        type="button"
+        onClick={toggle}
+        title={resolved === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        aria-label={resolved === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        style={iconBtnStyle()}
+      >
+        <Icon name={resolved === 'dark' ? 'sun' : 'moon'} size={15} />
+      </button>
 
       <button
         type="button"
