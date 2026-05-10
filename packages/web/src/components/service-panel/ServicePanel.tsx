@@ -1,6 +1,6 @@
 // Service detail — full-page view with breadcrumb, animated tab underline, 5 tabs.
 
-import { useLayoutEffect, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { FunctionRecord, ServiceStatus, Session } from '@shared/types';
 import { api } from '../../lib/api';
 import { FnLogo, Icon } from '../icons';
@@ -29,6 +29,7 @@ type Props = {
   onRedeploy?: (next: FunctionRecord) => void;
   onCloseDeployment?: () => void;
   onDelete?: () => void;
+  onRename?: (name: string) => void | Promise<void>;
 };
 
 export function ServicePanel({
@@ -38,12 +39,37 @@ export function ServicePanel({
   onRedeploy,
   onCloseDeployment,
   onDelete,
+  onRename,
 }: Props): ReactElement {
   const [tab, setTab] = useState<TabName>('Deployments');
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const [underline, setUnderline] = useState({ left: 0, width: 0 });
   const [redeploying, setRedeploying] = useState(false);
+  const [editingName, setEditingName] = useState(svc.name);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const tone = STATUS_TONE[svc.status] ?? STATUS_TONE.pending;
+
+  useEffect(() => {
+    setEditingName(svc.name);
+  }, [svc.name]);
+
+  const commitName = () => {
+    const trimmed = editingName.trim();
+    if (!trimmed) {
+      setEditingName(svc.name);
+      return;
+    }
+    if (trimmed === svc.name) {
+      setEditingName(svc.name);
+      return;
+    }
+    onRename?.(trimmed);
+  };
+
+  const cancelName = () => {
+    setEditingName(svc.name);
+    nameInputRef.current?.blur();
+  };
 
   const externalUrl = svc.subdomain.startsWith('http')
     ? svc.subdomain
@@ -122,7 +148,41 @@ export function ServicePanel({
                 gap: 12,
               }}
             >
-              {svc.name}
+              <input
+                ref={nameInputRef}
+                value={editingName}
+                onChange={(e) => setEditingName(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    nameInputRef.current?.blur();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelName();
+                  }
+                }}
+                maxLength={60}
+                spellCheck={false}
+                aria-label="Function name"
+                disabled={!onRename}
+                size={Math.max(editingName.length, 8)}
+                className="service-name-input"
+                style={{
+                  fontSize: 26,
+                  fontWeight: 600,
+                  letterSpacing: '-0.02em',
+                  background: 'transparent',
+                  border: '1px solid transparent',
+                  borderRadius: 6,
+                  color: 'var(--fg)',
+                  padding: '2px 6px',
+                  margin: '-2px -6px',
+                  outline: 'none',
+                  fontFamily: 'inherit',
+                  minWidth: 0,
+                }}
+              />
               <span
                 style={{
                   display: 'inline-flex',

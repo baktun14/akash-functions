@@ -45,6 +45,7 @@ export interface ApiClient {
   // will spin up a fresh deployment with the current runner image.
   closeDeployment(id: string): Promise<void>;
   remove(id: string): Promise<void>;
+  rename(id: string, name: string): Promise<FunctionRecord>;
 
   getDeployment(fnId: string, depId: string): Promise<DeploymentRecord>;
   // Submits a fresh SDL on the same dseq so the provider re-pulls the runner
@@ -221,6 +222,15 @@ class MockApi implements ApiClient {
     const services = (await this.listServices()).filter((s) => s.id !== id);
     writeJSON(SERVICES_KEY, services);
     removeKey(VERSIONS_KEY_PREFIX + id);
+  }
+
+  async rename(id: string, name: string): Promise<FunctionRecord> {
+    const services = await this.listServices();
+    const target = services.find((s) => s.id === id);
+    if (!target) throw new Error('Function not found');
+    const next: FunctionRecord = { ...target, name, updatedAt: new Date().toISOString() };
+    writeJSON(SERVICES_KEY, services.map((s) => (s.id === id ? next : s)));
+    return next;
   }
 
   async cloneAndDeploy(fnId: string): Promise<FunctionRecord> {
@@ -493,6 +503,13 @@ class LiveApi implements ApiClient {
 
   async remove(id: string): Promise<void> {
     await this.req(`/api/functions/${id}`, { method: 'DELETE' });
+  }
+
+  async rename(id: string, name: string): Promise<FunctionRecord> {
+    return this.req<FunctionRecord>(`/api/functions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    });
   }
 
   async cloneAndDeploy(fnId: string): Promise<FunctionRecord> {

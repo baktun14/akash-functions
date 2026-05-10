@@ -349,6 +349,12 @@
     .builder-prompt { border-top: 1px solid var(--line); }
   }
   .prompt-area::placeholder { color: var(--fg-faint); }
+  .builder-name-input::placeholder { color: var(--fg-faint); }
+  .builder-name-input:hover { border-color: var(--line) !important; }
+  .builder-name-input:focus { border-color: var(--line-strong) !important; background: var(--bg-elev-2) !important; }
+  .service-name-input:hover:not(:disabled) { border-color: var(--line) !important; }
+  .service-name-input:focus { border-color: var(--line-strong) !important; background: var(--bg-elev-2) !important; }
+  .service-name-input:disabled { cursor: default; }
 
   /* ─── Banner (expired key) ─── */
   .banner {

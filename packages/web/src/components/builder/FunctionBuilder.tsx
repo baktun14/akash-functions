@@ -24,9 +24,13 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
     tokensToSource(SAMPLES[initial].code)
   );
   const [prompt, setPrompt] = useState<string>(SAMPLES[initial].prompt);
+  const [name, setName] = useState<string>(SAMPLES[initial].name);
   const sample = SAMPLES[preset];
   const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
-  const dirty = source !== templateSource || prompt !== sample.prompt;
+  const dirty =
+    source !== templateSource || prompt !== sample.prompt || name !== sample.name;
+  const trimmedName = name.trim();
+  const canDeploy = trimmedName.length > 0;
 
   const onSelectPreset = (next: PresetId) => {
     if (next === preset) return;
@@ -35,6 +39,7 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
     setPreset(next);
     setSource(tokensToSource(ns.code));
     setPrompt(ns.prompt);
+    setName(ns.name);
   };
 
   const requestClose = () => {
@@ -53,9 +58,29 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <FnLogo size={26} />
             <div>
-              <div style={{ fontSize: 16, fontWeight: 600, letterSpacing: '-0.01em' }}>
-                {sample.name}
-              </div>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={60}
+                spellCheck={false}
+                aria-label="Function name"
+                placeholder="Name your function"
+                className="builder-name-input"
+                style={{
+                  fontSize: 16,
+                  fontWeight: 600,
+                  letterSpacing: '-0.01em',
+                  background: 'transparent',
+                  border: '1px solid transparent',
+                  borderRadius: 6,
+                  color: 'var(--fg)',
+                  padding: '2px 6px',
+                  margin: '-2px -6px',
+                  outline: 'none',
+                  fontFamily: 'inherit',
+                  width: 'min(360px, 40vw)',
+                }}
+              />
               <div
                 style={{ fontSize: 11, color: 'var(--fg-subtle)', marginTop: 1 }}
                 className="mono"
@@ -224,8 +249,15 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
 
           <button
             className="btn btn-primary"
-            onClick={() => onDeploy({ ...sample, source, prompt })}
-            style={{ width: '100%', marginTop: 18, justifyContent: 'center' }}
+            onClick={() => onDeploy({ ...sample, name: trimmedName, source, prompt })}
+            disabled={!canDeploy}
+            style={{
+              width: '100%',
+              marginTop: 18,
+              justifyContent: 'center',
+              opacity: canDeploy ? 1 : 0.5,
+              cursor: canDeploy ? 'pointer' : 'not-allowed',
+            }}
           >
             <Icon name="play" size={12} color="#0A0A0F" />
             Deploy function
