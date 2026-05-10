@@ -5,6 +5,8 @@ export const SERVICES_KEY = 'akash_functions_services_v2';
 export const AKASHML_KEY = 'akashml_connection_v1';
 export const VERSIONS_KEY_PREFIX = 'akash_functions_versions_v1__';
 export const VARIABLES_KEY_PREFIX = 'akash_functions_variables_v1__';
+export const API_KEYS_KEY = 'akash_functions_api_keys_v1';
+export const PROTECTED_ROUTES_KEY_PREFIX = 'akash_functions_protected_routes_v1__';
 
 export function readJSON<T>(key: string): T | null {
   try {

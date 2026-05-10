@@ -1,18 +1,33 @@
 // Collapsible panel listing every HTTP route the server detected in the
 // function's source code. Sits below the root URL bar on the Deployments tab
 // so multi-route APIs aren't hidden behind the snippet builder further down.
+// Each row exposes a Public/Protected toggle that writes to the function's
+// protected-routes set; the runner picks up the change on its next poll.
 
 import { useState } from 'react';
-import type { FunctionRoute } from '@shared/types';
+import type { FunctionRoute, ProtectedRouteKey } from '@shared/types';
 import { Icon } from '../icons';
 import { hasPathParam } from './routes';
 
 const BODY_ID = 'routes-panel-body';
 
-export function RoutesPanel({ url, routes }: { url: string; routes: FunctionRoute[] }) {
+export function routeKeyOf(r: { method: string; path: string }): ProtectedRouteKey {
+  return `${r.method.toUpperCase()} ${r.path}`;
+}
+
+type Props = {
+  url: string;
+  routes: FunctionRoute[];
+  /** Called when the user toggles a route's auth requirement. Should write
+   *  the new set to the backend and refresh the deployment record. */
+  onToggleAuth?: (route: FunctionRoute, nextProtected: boolean) => Promise<void>;
+};
+
+export function RoutesPanel({ url, routes, onToggleAuth }: Props) {
   const [expanded, setExpanded] = useState(false);
   const baseUrl = url.replace(/\/$/, '');
   const summary = routes.map((r) => `${r.method} ${r.path}`).join(' · ');
+  const protectedCount = routes.filter((r) => r.auth === 'apiKey').length;
 
   return (
     <div style={{ marginBottom: 14 }}>
@@ -42,6 +57,11 @@ export function RoutesPanel({ url, routes }: { url: string; routes: FunctionRout
         />
         <span style={{ fontSize: 13 }}>
           {routes.length} {routes.length === 1 ? 'route' : 'routes'} detected in your code
+          {protectedCount > 0 && (
+            <span style={{ color: 'var(--fg-muted)', fontWeight: 400 }}>
+              {' '}· {protectedCount} protected
+            </span>
+          )}
         </span>
         <span
           className="mono"
@@ -69,12 +89,18 @@ export function RoutesPanel({ url, routes }: { url: string; routes: FunctionRout
             border: '1px solid var(--line)',
             borderRadius: 10,
             background: 'var(--bg-elev-2)',
-            maxHeight: 320,
+            maxHeight: 360,
             overflowY: 'auto',
           }}
         >
           {routes.map((r, i) => (
-            <RouteRow key={`${r.method}-${r.path}-${i}`} route={r} baseUrl={baseUrl} first={i === 0} />
+            <RouteRow
+              key={`${r.method}-${r.path}-${i}`}
+              route={r}
+              baseUrl={baseUrl}
+              first={i === 0}
+              onToggleAuth={onToggleAuth}
+            />
           ))}
         </div>
       )}
@@ -86,23 +112,37 @@ function RouteRow({
   route,
   baseUrl,
   first,
+  onToggleAuth,
 }: {
   route: FunctionRoute;
   baseUrl: string;
   first: boolean;
+  onToggleAuth?: (route: FunctionRoute, nextProtected: boolean) => Promise<void>;
 }) {
   const fullUrl = `${baseUrl}${route.path}`;
-  const canOpen = route.method === 'GET' && !hasPathParam(route.path);
+  const canOpen = route.method === 'GET' && !hasPathParam(route.path) && route.auth !== 'apiKey';
+  const isProtected = route.auth === 'apiKey';
+  const [pending, setPending] = useState(false);
 
   const onCopy = () => {
     navigator.clipboard?.writeText(fullUrl).catch(() => undefined);
+  };
+
+  const onToggle = async () => {
+    if (!onToggleAuth || pending) return;
+    setPending(true);
+    try {
+      await onToggleAuth(route, !isProtected);
+    } finally {
+      setPending(false);
+    }
   };
 
   return (
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: '52px 1fr auto',
+        gridTemplateColumns: '52px 1fr auto auto',
         alignItems: 'center',
         gap: 12,
         padding: '10px 14px',
@@ -121,10 +161,16 @@ function RouteRow({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
           }}
           title={route.path}
         >
-          {route.path}
+          {isProtected && (
+            <Icon name="lock" size={11} color="var(--accent)" />
+          )}
+          <span>{route.path}</span>
         </div>
         {route.description && (
           <div
@@ -142,6 +188,9 @@ function RouteRow({
           </div>
         )}
       </div>
+      {onToggleAuth && (
+        <AuthToggle isProtected={isProtected} pending={pending} onClick={onToggle} />
+      )}
       <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         <button
           type="button"
@@ -177,5 +226,43 @@ function RouteRow({
         )}
       </div>
     </div>
+  );
+}
+
+function AuthToggle({
+  isProtected,
+  pending,
+  onClick,
+}: {
+  isProtected: boolean;
+  pending: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={pending}
+      title={isProtected ? 'Make this route public' : 'Require an API key for this route'}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        fontSize: 11.5,
+        fontWeight: 500,
+        borderRadius: 6,
+        border: '1px solid var(--line)',
+        background: isProtected
+          ? 'color-mix(in oklch, var(--accent) 12%, transparent)'
+          : 'var(--bg-elev-3)',
+        color: isProtected ? 'var(--accent)' : 'var(--fg-muted)',
+        cursor: pending ? 'progress' : 'pointer',
+        opacity: pending ? 0.7 : 1,
+      }}
+    >
+      <Icon name={isProtected ? 'lock' : 'globe'} size={11} />
+      {isProtected ? 'Protected' : 'Public'}
+    </button>
   );
 }

@@ -39,6 +39,8 @@ export function UseThisFunction({
   const samples = buildSamples(url, effectiveRoutes);
   const activeTab = LANG_TABS.find((t) => t.id === tab)!;
 
+  const hasProtected = effectiveRoutes.some((r) => r.auth === 'apiKey');
+
   return (
     <div style={{ marginTop: 28 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 12 }}>
@@ -46,7 +48,9 @@ export function UseThisFunction({
           Use this function
         </div>
         <div style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>
-          Hit the URL from anywhere — no auth required by default.
+          {hasProtected
+            ? 'Protected routes require an API key — replace YOUR_API_KEY below.'
+            : 'Hit the URL from anywhere — no auth required by default.'}
         </div>
       </div>
 
@@ -157,6 +161,12 @@ function methodHasBody(m: RouteMethod): boolean {
   return m === 'POST' || m === 'PUT' || m === 'PATCH';
 }
 
+function isProtected(r: FunctionRoute): boolean {
+  return r.auth === 'apiKey';
+}
+
+const API_KEY_PLACEHOLDER = 'YOUR_API_KEY';
+
 function buildShellSamples(url: string, routes: FunctionRoute[]): string {
   return routes
     .map((r) => {
@@ -164,17 +174,28 @@ function buildShellSamples(url: string, routes: FunctionRoute[]): string {
       const fullUrl = pathUrl === '/' ? url : `${url}${pathUrl}`;
       const hint = paramHint(r.path);
       const header = commentHeader(r, '#');
+      const authLine = isProtected(r)
+        ? `  -H 'Authorization: Bearer ${API_KEY_PLACEHOLDER}' \\`
+        : null;
 
       if (methodHasBody(r.method)) {
         return [
           header,
           `curl -X ${r.method} ${fullUrl}${hint} \\`,
+          ...(authLine ? [authLine] : []),
           `  -H 'Content-Type: application/json' \\`,
           `  -d '${bodyJson(r)}'`,
         ].join('\n');
       }
       // Default GET form skips the explicit -X for the cleanest copy-paste.
       const verb = r.method === 'GET' ? 'curl' : `curl -X ${r.method}`;
+      if (authLine) {
+        return [
+          header,
+          `${verb} ${fullUrl}${hint} \\`,
+          `  -H 'Authorization: Bearer ${API_KEY_PLACEHOLDER}'`,
+        ].join('\n');
+      }
       return `${header}\n${verb} ${fullUrl}${hint}`;
     })
     .join('\n\n');
@@ -187,14 +208,31 @@ function buildJsSamples(url: string, routes: FunctionRoute[]): string {
     const hint = paramHint(r.path).replace('# ', '// ');
     const header = commentHeader(r, '//');
     const v = `r${i + 1}`;
+    const authHeader = isProtected(r)
+      ? `"Authorization": "Bearer ${API_KEY_PLACEHOLDER}"`
+      : null;
 
     if (methodHasBody(r.method)) {
+      const headerLine = authHeader
+        ? `  headers: { "Content-Type": "application/json", ${authHeader} },`
+        : `  headers: { "Content-Type": "application/json" },`;
       return [
         header,
         `const ${v} = await fetch("${fullUrl}", {${hint}`,
         `  method: "${r.method}",`,
-        `  headers: { "Content-Type": "application/json" },`,
+        headerLine,
         `  body: JSON.stringify(${bodyJson(r)}),`,
+        `});`,
+        `console.log(await ${v}.text());`,
+      ].join('\n');
+    }
+
+    if (authHeader) {
+      return [
+        header,
+        `const ${v} = await fetch("${fullUrl}", {${hint}`,
+        ...(r.method === 'GET' ? [] : [`  method: "${r.method}",`]),
+        `  headers: { ${authHeader} },`,
         `});`,
         `console.log(await ${v}.text());`,
       ].join('\n');
@@ -216,13 +254,27 @@ function buildPythonSamples(url: string, routes: FunctionRoute[]): string {
     const fullUrl = pathUrl === '/' ? url : `${url}${pathUrl}`;
     const hint = paramHint(r.path);
     const header = commentHeader(r, '#');
+    const headersArg = isProtected(r)
+      ? `    headers={'Authorization': 'Bearer ${API_KEY_PLACEHOLDER}'},`
+      : null;
 
     if (methodHasBody(r.method)) {
       return [
         header,
         `r = requests.${r.method.toLowerCase()}(${hint}`,
         `    "${fullUrl}",`,
+        ...(headersArg ? [headersArg] : []),
         `    json=${bodyJson(r).replace(/"/g, "'")},`,
+        `)`,
+        `print(r.text)`,
+      ].join('\n');
+    }
+    if (headersArg) {
+      return [
+        header,
+        `r = requests.${r.method.toLowerCase()}(${hint}`,
+        `    "${fullUrl}",`,
+        headersArg,
         `)`,
         `print(r.text)`,
       ].join('\n');

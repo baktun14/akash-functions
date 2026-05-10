@@ -15,9 +15,15 @@ import type {
   PutFunctionVariableResponse,
   DeleteFunctionVariableResponse,
   UpdateCodeRequest,
+  ApiKeyRecord,
+  CreateApiKeyResponse,
+  ProtectedRouteKey,
+  ProtectedRoutesResponse,
 } from '@shared/types';
 import {
   AKASHML_KEY,
+  API_KEYS_KEY,
+  PROTECTED_ROUTES_KEY_PREFIX,
   SERVICES_KEY,
   SESSION_KEY,
   VARIABLES_KEY_PREFIX,
@@ -72,6 +78,18 @@ export interface ApiClient {
   listVariables(fnId: string): Promise<FunctionVariablesResponse>;
   putVariable(fnId: string, key: string, value: string): Promise<PutFunctionVariableResponse>;
   deleteVariable(fnId: string, key: string): Promise<DeleteFunctionVariableResponse>;
+
+  // Wallet-scoped API keys for protecting function routes.
+  listApiKeys(): Promise<ApiKeyRecord[]>;
+  createApiKey(name: string): Promise<CreateApiKeyResponse>;
+  deleteApiKey(id: string): Promise<void>;
+
+  // Per-function protected-routes set.
+  getProtectedRoutes(fnId: string): Promise<ProtectedRoutesResponse>;
+  updateProtectedRoutes(
+    fnId: string,
+    protectedRoutes: ProtectedRouteKey[]
+  ): Promise<ProtectedRoutesResponse>;
 
   getAkashMLConnection(): AkashMLConnection | null;
   saveAkashMLConnection(key: string): AkashMLConnection;
@@ -440,6 +458,57 @@ class MockApi implements ApiClient {
     return { key, variablesRevision: data.rev };
   }
 
+  async listApiKeys(): Promise<ApiKeyRecord[]> {
+    await delay(80);
+    return readJSON<ApiKeyRecord[]>(API_KEYS_KEY) ?? [];
+  }
+
+  async createApiKey(name: string): Promise<CreateApiKeyResponse> {
+    await delay(160);
+    const list = (await this.listApiKeys()).slice();
+    const plaintext =
+      'akf_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const record: CreateApiKeyResponse = {
+      id: 'key-' + Math.random().toString(36).slice(2, 9),
+      name: name.trim(),
+      key: plaintext,
+      maskedTail: plaintext.slice(-4),
+      createdAt: new Date().toISOString(),
+    };
+    list.push({
+      id: record.id,
+      name: record.name,
+      maskedTail: record.maskedTail,
+      createdAt: record.createdAt,
+    });
+    writeJSON(API_KEYS_KEY, list);
+    return record;
+  }
+
+  async deleteApiKey(id: string): Promise<void> {
+    await delay(80);
+    const list = (await this.listApiKeys()).filter((k) => k.id !== id);
+    writeJSON(API_KEYS_KEY, list);
+  }
+
+  async getProtectedRoutes(fnId: string): Promise<ProtectedRoutesResponse> {
+    await delay(40);
+    return {
+      protectedRoutes:
+        readJSON<ProtectedRouteKey[]>(PROTECTED_ROUTES_KEY_PREFIX + fnId) ?? [],
+    };
+  }
+
+  async updateProtectedRoutes(
+    fnId: string,
+    protectedRoutes: ProtectedRouteKey[]
+  ): Promise<ProtectedRoutesResponse> {
+    await delay(80);
+    const dedup = Array.from(new Set(protectedRoutes));
+    writeJSON(PROTECTED_ROUTES_KEY_PREFIX + fnId, dedup);
+    return { protectedRoutes: dedup };
+  }
+
   getAkashMLConnection(): AkashMLConnection | null {
     return readJSON<AkashMLConnection>(AKASHML_KEY);
   }
@@ -667,6 +736,35 @@ class LiveApi implements ApiClient {
       `/api/functions/${fnId}/variables/${encodeURIComponent(key)}`,
       { method: 'DELETE' }
     );
+  }
+
+  async listApiKeys(): Promise<ApiKeyRecord[]> {
+    return this.req<ApiKeyRecord[]>('/api/keys');
+  }
+
+  async createApiKey(name: string): Promise<CreateApiKeyResponse> {
+    return this.req<CreateApiKeyResponse>('/api/keys', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async deleteApiKey(id: string): Promise<void> {
+    await this.req(`/api/keys/${id}`, { method: 'DELETE' });
+  }
+
+  async getProtectedRoutes(fnId: string): Promise<ProtectedRoutesResponse> {
+    return this.req<ProtectedRoutesResponse>(`/api/functions/${fnId}/protected-routes`);
+  }
+
+  async updateProtectedRoutes(
+    fnId: string,
+    protectedRoutes: ProtectedRouteKey[]
+  ): Promise<ProtectedRoutesResponse> {
+    return this.req<ProtectedRoutesResponse>(`/api/functions/${fnId}/protected-routes`, {
+      method: 'PUT',
+      body: JSON.stringify({ protectedRoutes }),
+    });
   }
 
   getAkashMLConnection(): AkashMLConnection | null {

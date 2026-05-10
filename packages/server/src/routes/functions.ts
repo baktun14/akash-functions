@@ -11,6 +11,7 @@ import type {
   FunctionVersionDetail,
   FunctionVersionSummary,
   PresetId,
+  ProtectedRoutesResponse,
   PutFunctionVariableResponse,
 } from '@shared/types';
 import { validateVariableKey } from '@shared/reserved-vars';
@@ -601,6 +602,51 @@ functionsRouter.delete('/:id/variables/:key', async (c) => {
   c.status(200);
   return c.json({ key, variablesRevision: deletedRevision });
 });
+
+// Per-function protected-routes set. Each entry is a `"<METHOD> <path>"` string
+// (e.g. `"POST /api/secret"`). The runner sidecar reads this list via the same
+// /api/runner/current poll it already uses for version updates and rejects
+// unauthenticated calls before they reach user code.
+const ProtectedRoutesBody = z.object({
+  protectedRoutes: z
+    .array(z.string().min(3).max(2048))
+    .max(200),
+});
+
+functionsRouter.get('/:id/protected-routes', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const id = c.req.param('id');
+  const fn = await getFn(walletAddress, id);
+  const body: ProtectedRoutesResponse = { protectedRoutes: fn.protectedRoutes };
+  return c.json(body);
+});
+
+functionsRouter.put(
+  '/:id/protected-routes',
+  zValidator('json', ProtectedRoutesBody),
+  async (c) => {
+    const walletAddress = c.get('walletAddress');
+    const id = c.req.param('id');
+    await getFn(walletAddress, id);
+    const { protectedRoutes } = c.req.valid('json');
+    // De-dupe + normalize whitespace so the runner can compare with a Set.
+    const normalized = Array.from(
+      new Set(
+        protectedRoutes
+          .map((s) => s.trim())
+          .filter((s) => /^[A-Z]+ \//.test(s))
+      )
+    );
+    const [updated] = await db
+      .update(functions)
+      .set({ protectedRoutes: normalized, updatedAt: new Date() })
+      .where(eq(functions.id, id))
+      .returning({ protectedRoutes: functions.protectedRoutes });
+    if (!updated) throw new HTTPException(500, { message: 'Update failed' });
+    const body: ProtectedRoutesResponse = { protectedRoutes: updated.protectedRoutes };
+    return c.json(body);
+  }
+);
 
 functionsRouter.delete('/:id', async (c) => {
   const walletAddress = c.get('walletAddress');

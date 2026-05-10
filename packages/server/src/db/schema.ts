@@ -33,6 +33,14 @@ export const functions = pgTable(
     variablesRevision: bigint('variables_revision', { mode: 'number' })
       .notNull()
       .default(0),
+    // Per-function set of routes that require a wallet-scoped API key. Each
+    // entry is a `"<METHOD> <path>"` string (e.g. `"POST /api/secret"`). The
+    // runner sidecar polls /api/runner/current/:fnId and uses this list to
+    // reject unauthenticated calls before they reach user code.
+    protectedRoutes: jsonb('protected_routes')
+      .notNull()
+      .default(sql`'[]'::jsonb`)
+      .$type<string[]>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -49,6 +57,27 @@ export const keyLinks = pgTable('key_links', {
   walletAddress: text('wallet_address').notNull(),
   firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+// User-issued API keys for protecting function routes. Wallet-scoped: a key
+// belongs to a wallet and authorizes calls to any of that wallet's deployed
+// functions on routes the manifest declared as `auth: 'apiKey'`. Plaintext is
+// shown once at creation and never persisted; only the SHA-256 hash is stored.
+// The runner sidecar receives the wallet's set of hashes via the same
+// /api/runner/current poll it already uses for version updates.
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    walletAddress: text('wallet_address').notNull(),
+    name: text('name').notNull(),
+    keyHash: text('key_hash').notNull().unique(),
+    maskedTail: text('masked_tail').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    walletIdx: index('api_keys_wallet_address_idx').on(table.walletAddress),
+  })
+);
 
 export const functionVersions = pgTable(
   'function_versions',
@@ -142,3 +171,5 @@ export type KeyLinkRow = typeof keyLinks.$inferSelect;
 export type KeyLinkInsert = typeof keyLinks.$inferInsert;
 export type FunctionVariableRow = typeof functionVariables.$inferSelect;
 export type FunctionVariableInsert = typeof functionVariables.$inferInsert;
+export type ApiKeyRow = typeof apiKeys.$inferSelect;
+export type ApiKeyInsert = typeof apiKeys.$inferInsert;

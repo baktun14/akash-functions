@@ -1,8 +1,13 @@
-import { useEffect, useState } from 'react';
-import type { DeploymentRecord, DeploymentState, FunctionRecord } from '@shared/types';
+import { useCallback, useEffect, useState } from 'react';
+import type {
+  DeploymentRecord,
+  DeploymentState,
+  FunctionRecord,
+  FunctionRoute,
+} from '@shared/types';
 import { Icon } from '../../icons';
 import { api } from '../../../lib/api';
-import { RoutesPanel } from '../RoutesPanel';
+import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
 const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
@@ -10,8 +15,21 @@ const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
 const REACHABILITY_POLL_MS = 2000;
 
-function useDeployment(fnId: string, depId: string | undefined): DeploymentRecord | null {
+function useDeployment(
+  fnId: string,
+  depId: string | undefined
+): { dep: DeploymentRecord | null; refresh: () => Promise<void> } {
   const [dep, setDep] = useState<DeploymentRecord | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!depId) return;
+    try {
+      const next = await api.getDeployment(fnId, depId);
+      setDep(next);
+    } catch {
+      /* ignore — next poll will retry */
+    }
+  }, [fnId, depId]);
 
   useEffect(() => {
     if (!depId) {
@@ -41,7 +59,7 @@ function useDeployment(fnId: string, depId: string | undefined): DeploymentRecor
     };
   }, [fnId, depId]);
 
-  return dep;
+  return { dep, refresh };
 }
 
 // Akash reports `live` as soon as the lease's manifest is accepted, but the
@@ -131,10 +149,25 @@ type UpdateState = 'idle' | 'submitting' | 'submitted' | 'error';
 
 export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   const depId = svc.deploymentId ?? svc.latestDeploymentId;
-  const dep = useDeployment(svc.id, depId);
+  const { dep, refresh: refreshDeployment } = useDeployment(svc.id, depId);
   const meta = describe(dep);
   const [updateState, setUpdateState] = useState<UpdateState>('idle');
   const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const onToggleAuth = useCallback(
+    async (route: FunctionRoute, nextProtected: boolean) => {
+      const current = (dep?.routes ?? [])
+        .filter((r) => r.auth === 'apiKey')
+        .map((r) => routeKeyOf(r));
+      const key = routeKeyOf(route);
+      const next = nextProtected
+        ? Array.from(new Set([...current, key]))
+        : current.filter((k) => k !== key);
+      await api.updateProtectedRoutes(svc.id, next);
+      await refreshDeployment();
+    },
+    [dep?.routes, svc.id, refreshDeployment]
+  );
 
   const onUpdateRunner = async () => {
     if (!dep || dep.state !== 'live') return;
@@ -283,7 +316,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
       )}
 
       {publicUrl && dep?.routes && dep.routes.length > 0 && (
-        <RoutesPanel url={publicUrl} routes={dep.routes} />
+        <RoutesPanel url={publicUrl} routes={dep.routes} onToggleAuth={onToggleAuth} />
       )}
 
       {/* Active deployment */}
