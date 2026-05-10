@@ -1,9 +1,12 @@
 import { sql, desc } from 'drizzle-orm';
 import {
+  bigint,
+  check,
   index,
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uuid,
@@ -23,6 +26,13 @@ export const functions = pgTable(
     name: text('name').notNull(),
     subdomain: text('subdomain').notNull().unique(),
     status: text('status').notNull().default('draft'),
+    // Bumped in the same transaction as any function_variables mutation.
+    // The runner polls /api/runner/current/:fnId and uses this counter to
+    // detect when it should refetch /api/runner/env/:fnId and respawn the
+    // user process with new env.
+    variablesRevision: bigint('variables_revision', { mode: 'number' })
+      .notNull()
+      .default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -87,6 +97,41 @@ export const deployments = pgTable('deployments', {
   closedAt: timestamp('closed_at', { withTimezone: true }),
 });
 
+// User-defined environment variables, encrypted at rest with AES-256-GCM.
+// Decoupled from function_versions so a user can add/edit/remove variables
+// without creating a code version. The runner picks up changes via the
+// variables_revision counter on functions and respawns the user process.
+//
+// Plaintext NEVER lives in this table — only ciphertext + iv + auth_tag.
+// Plaintext is only emitted on the runner-only /api/runner/env/:fnId route,
+// authenticated by an HMAC token scoped to fnId.
+export const functionVariables = pgTable(
+  'function_variables',
+  {
+    functionId: uuid('function_id')
+      .notNull()
+      .references(() => functions.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    ciphertext: text('ciphertext').notNull(),
+    iv: text('iv').notNull(),
+    authTag: text('auth_tag').notNull(),
+    keyVersion: integer('key_version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.functionId, table.key] }),
+    keyShape: check(
+      'function_variables_key_shape',
+      sql`${table.key} ~ '^[A-Z][A-Z0-9_]{0,127}$'`
+    ),
+    keyReserved: check(
+      'function_variables_key_not_reserved',
+      sql`${table.key} NOT IN ('FUNCTION_ID','INITIAL_VERSION_ID','BACKEND_BASE_URL','RUNNER_TOKEN','POLL_INTERVAL_MS','PORT')`
+    ),
+  })
+);
+
 export type FunctionRow = typeof functions.$inferSelect;
 export type FunctionInsert = typeof functions.$inferInsert;
 export type FunctionVersionRow = typeof functionVersions.$inferSelect;
@@ -95,3 +140,5 @@ export type DeploymentRow = typeof deployments.$inferSelect;
 export type DeploymentInsert = typeof deployments.$inferInsert;
 export type KeyLinkRow = typeof keyLinks.$inferSelect;
 export type KeyLinkInsert = typeof keyLinks.$inferInsert;
+export type FunctionVariableRow = typeof functionVariables.$inferSelect;
+export type FunctionVariableInsert = typeof functionVariables.$inferInsert;

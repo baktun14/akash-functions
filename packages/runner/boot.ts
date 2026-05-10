@@ -17,7 +17,11 @@
 //   RUNNER_TOKEN        long-lived runner-kind HMAC, scoped to FUNCTION_ID
 //   PORT                port the user code listens on (default 3000)
 //   POLL_INTERVAL_MS    runner version poll cadence (default 10000, range [3000, 60000])
-//   AKASHML_API_KEY     (optional) passthrough to user code
+//
+// User-defined env vars (e.g. AKASHML_API_KEY, DATABASE_URL) are NOT in the
+// SDL — the supervisor fetches them from /api/runner/env/:fnId at boot and
+// whenever the poll loop sees variablesRevision change on /current/:fnId.
+// The SDL is visible to providers and unsuitable for secrets.
 
 import { connect } from 'node:net';
 import { mkdir, readdir, readFile, rename, rm, symlink } from 'node:fs/promises';
@@ -36,6 +40,15 @@ const KILL_GRACE_MS = 5_000;
 const HEALTH_CHECK_MS = 5_000;
 const HTTP_PROBE_MS = 5_000;
 const HTTP_PROBE_BODY_MAX = 1500;
+
+// Boot-time env-fetch retry policy. Three attempts with exponential backoff
+// (1s, 2s, 4s) — total max ~7s before we give up and exit non-zero so Akash
+// restarts the pod. Failing closed at boot is correct because there's no
+// previous-good env to fall back to; starting with a partial env would mean
+// the user's first request hits a function with missing secrets, which is
+// a worse failure mode than a clean restart-loop.
+const ENV_BOOT_FETCH_ATTEMPTS = 3;
+const ENV_BOOT_FETCH_BACKOFF_MS = 1_000;
 
 // Must be declared before the top-level `await` below, otherwise spawnChild
 // (called at boot) reaches it through the TDZ and crashes the runner with
@@ -63,6 +76,7 @@ function clampPoll(n: number): number {
 const codeUrl = (versionId: string) =>
   `${BACKEND_BASE_URL}/api/runner/code/${FUNCTION_ID}/${versionId}`;
 const currentUrl = `${BACKEND_BASE_URL}/api/runner/current/${FUNCTION_ID}`;
+const envUrl = `${BACKEND_BASE_URL}/api/runner/env/${FUNCTION_ID}`;
 const healthUrl = `${BACKEND_BASE_URL}/api/runner/health/${FUNCTION_ID}`;
 const authHeader = { Authorization: `Bearer ${RUNNER_TOKEN}` };
 
@@ -73,8 +87,14 @@ type ProbeResult =
 
 type ChildHandle = ReturnType<typeof Bun.spawn>;
 
+// SDL-injected env (FUNCTION_ID, RUNNER_TOKEN, PATH, etc.). Frozen at boot —
+// these are NOT user-controllable and must beat user vars on key collision.
+const baseEnv: Record<string, string> = { ...process.env } as Record<string, string>;
+
 let currentChild: ChildHandle | null = null;
 let currentVersion = INITIAL_VERSION_ID;
+let currentVarsRevision = -1;
+let currentEnv: Record<string, string> = {};
 let reloading = false;
 let shuttingDown = false;
 
@@ -86,9 +106,22 @@ await prepareAppDir();
 await mkdir(VERSIONS_DIR, { recursive: true });
 const initialDir = versionDir(INITIAL_VERSION_ID);
 await rm(initialDir, { recursive: true, force: true });
-await fetchAndExtract(INITIAL_VERSION_ID, initialDir);
-await bunInstallIfNeeded(initialDir);
-await swapCurrentSymlink(initialDir);
+
+// Code fetch+install and env fetch are independent — only spawn requires both.
+// Running them in parallel cuts cold-start by the smaller of the two.
+// Fail-closed on env: no previous-good to fall back to here, so retry-then-exit
+// is better than starting with a partial env on the user's first request.
+const [, initialEnvFetch] = await Promise.all([
+  (async () => {
+    await fetchAndExtract(INITIAL_VERSION_ID, initialDir);
+    await bunInstallIfNeeded(initialDir);
+    await swapCurrentSymlink(initialDir);
+  })(),
+  fetchEnvWithRetries(),
+]);
+currentEnv = initialEnvFetch.env;
+currentVarsRevision = initialEnvFetch.revision;
+
 currentChild = spawnChild(CURRENT_LINK);
 attachExitWatcher(currentChild);
 
@@ -110,10 +143,19 @@ async function pollLoop(): Promise<void> {
   while (!shuttingDown) {
     await sleep(POLL_INTERVAL_MS);
     if (shuttingDown) return;
+    if (reloading) continue;
     try {
-      const next = await fetchCurrentVersion();
-      if (next && next !== currentVersion && !reloading) {
-        await reload(next);
+      const next = await fetchCurrentPointer();
+      if (!next) continue;
+      if (next.versionId !== currentVersion) {
+        // Code-version change subsumes any concurrent vars-revision change —
+        // the post-reload state will be both new code + freshly-fetched env.
+        await reload(next.versionId, next.variablesRevision);
+      } else if (
+        next.variablesRevision !== undefined &&
+        next.variablesRevision !== currentVarsRevision
+      ) {
+        await reloadVarsOnly(next.variablesRevision);
       }
     } catch (err) {
       console.warn(`[poll] error: ${(err as Error).message}`);
@@ -121,7 +163,13 @@ async function pollLoop(): Promise<void> {
   }
 }
 
-async function fetchCurrentVersion(): Promise<string | null> {
+type CurrentPointer = {
+  versionId: string;
+  /** Server may not yet emit this in older deployments — treat as unchanged. */
+  variablesRevision?: number;
+};
+
+async function fetchCurrentPointer(): Promise<CurrentPointer | null> {
   const res = await fetch(currentUrl, { headers: authHeader });
   if (res.status === 404) {
     console.log('[poll] function deleted upstream, exiting cleanly');
@@ -137,15 +185,60 @@ async function fetchCurrentVersion(): Promise<string | null> {
     console.warn(`[poll] /current returned ${res.status}`);
     return null;
   }
-  const body = (await res.json()) as { versionId?: string };
-  return body.versionId ?? null;
+  const body = (await res.json()) as { versionId?: string; variablesRevision?: number };
+  if (!body.versionId) return null;
+  return {
+    versionId: body.versionId,
+    variablesRevision:
+      typeof body.variablesRevision === 'number' ? body.variablesRevision : undefined,
+  };
 }
 
-async function reload(newVersionId: string): Promise<void> {
+type EnvFetchResult = { env: Record<string, string>; revision: number };
+
+async function fetchEnv(): Promise<EnvFetchResult> {
+  const res = await fetch(envUrl, { headers: authHeader });
+  if (!res.ok) {
+    throw new Error(`/env fetch failed: ${res.status} ${res.statusText}`);
+  }
+  const body = (await res.json()) as {
+    env?: Record<string, string>;
+    variablesRevision?: number;
+  };
+  return {
+    env: body.env ?? {},
+    revision: typeof body.variablesRevision === 'number' ? body.variablesRevision : 0,
+  };
+}
+
+async function fetchEnvWithRetries(): Promise<EnvFetchResult> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= ENV_BOOT_FETCH_ATTEMPTS; attempt++) {
+    try {
+      const result = await fetchEnv();
+      const keyCount = Object.keys(result.env).length;
+      console.log(`[boot] fetched env: ${keyCount} keys, revision=${result.revision}`);
+      return result;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[boot] env fetch attempt ${attempt} failed: ${(err as Error).message}`);
+      if (attempt < ENV_BOOT_FETCH_ATTEMPTS) {
+        // 1s, 2s, 4s — total ≤ 7s before we give up.
+        await sleep(ENV_BOOT_FETCH_BACKOFF_MS * 2 ** (attempt - 1));
+      }
+    }
+  }
+  console.error(`[boot] env fetch failed after ${ENV_BOOT_FETCH_ATTEMPTS} attempts; exiting`);
+  throw lastErr instanceof Error ? lastErr : new Error('env fetch exhausted retries');
+}
+
+async function reload(newVersionId: string, newVarsRevision?: number): Promise<void> {
   if (reloading) return;
   reloading = true;
   console.log(`[reload] swapping ${currentVersion} → ${newVersionId}`);
   const previousVersion = currentVersion;
+  const previousEnv = currentEnv;
+  const previousRevision = currentVarsRevision;
   try {
     const newDir = versionDir(newVersionId);
     await rm(newDir, { recursive: true, force: true });
@@ -156,6 +249,19 @@ async function reload(newVersionId: string): Promise<void> {
     }
 
     await swapCurrentSymlink(newDir);
+
+    // Re-fetch env if the server signalled a vars change alongside this code
+    // change, or if it wasn't tracked before. Failure here keeps the previous
+    // env (fail-open at runtime — boot is the only place we fail-closed).
+    if (newVarsRevision !== undefined && newVarsRevision !== currentVarsRevision) {
+      try {
+        const fresh = await fetchEnv();
+        currentEnv = fresh.env;
+        currentVarsRevision = fresh.revision;
+      } catch (err) {
+        console.warn(`[reload] env refetch failed; keeping previous env: ${(err as Error).message}`);
+      }
+    }
 
     const oldChild = currentChild;
     currentChild = null; // tell the exit watcher the upcoming exit is expected
@@ -173,6 +279,8 @@ async function reload(newVersionId: string): Promise<void> {
     if (!tcpHealthy) {
       console.error('[reload] tcp health check failed, rolling back');
       await reportHealth(newVersionId, { kind: 'connect-error', reason: 'listen timeout' });
+      currentEnv = previousEnv;
+      currentVarsRevision = previousRevision;
       await rollbackToVersion(previousVersion);
       return;
     }
@@ -181,6 +289,8 @@ async function reload(newVersionId: string): Promise<void> {
     await reportHealth(newVersionId, probe);
     if (probe.kind !== 'ok') {
       console.error(`[reload] http probe ${probe.kind === 'http-error' ? `${probe.status} ${probe.statusText}` : `connect ${probe.reason}`}, rolling back`);
+      currentEnv = previousEnv;
+      currentVarsRevision = previousRevision;
       await rollbackToVersion(previousVersion);
       return;
     }
@@ -195,6 +305,68 @@ async function reload(newVersionId: string): Promise<void> {
   } finally {
     reloading = false;
   }
+}
+
+// Variables-only reload: same restart shape as `reload`, but skips the code
+// fetch/install/symlink swap. Fail-open at runtime — if the env fetch errors,
+// the running child keeps serving with stale env until the next poll. We
+// still respawn on a successful env fetch so user code that captures
+// `process.env.X` once at startup picks up the new value.
+async function reloadVarsOnly(newRevision: number): Promise<void> {
+  if (reloading) return;
+  reloading = true;
+  console.log(`[vars-reload] revision ${currentVarsRevision} → ${newRevision}`);
+  const previousEnv = currentEnv;
+  const previousRevision = currentVarsRevision;
+  try {
+    const fresh = await fetchEnv();
+    currentEnv = fresh.env;
+    currentVarsRevision = fresh.revision;
+
+    const oldChild = currentChild;
+    currentChild = null;
+    if (oldChild) await terminateChild(oldChild);
+
+    const next = spawnChild(CURRENT_LINK);
+    currentChild = next;
+    attachExitWatcher(next);
+
+    const tcpHealthy = await waitForListening(PORT, HEALTH_CHECK_MS);
+    if (!tcpHealthy) {
+      console.error('[vars-reload] tcp health check failed, reverting env');
+      await reportHealth(currentVersion, { kind: 'connect-error', reason: 'vars-reload listen timeout' });
+      currentEnv = previousEnv;
+      currentVarsRevision = previousRevision;
+      await respawnChildWithCurrentEnv();
+      return;
+    }
+
+    const probe = await httpProbe(PORT, HTTP_PROBE_MS);
+    await reportHealth(currentVersion, probe);
+    if (probe.kind !== 'ok') {
+      console.error(`[vars-reload] http probe failed (${probe.kind}); reverting env`);
+      currentEnv = previousEnv;
+      currentVarsRevision = previousRevision;
+      await respawnChildWithCurrentEnv();
+      return;
+    }
+
+    console.log(`[vars-reload] live with revision ${newRevision}`);
+  } catch (err) {
+    // fetchEnv() failure: keep the running child alive with stale env.
+    console.error(`[vars-reload] failed: ${(err as Error).message}; keeping previous env`);
+  } finally {
+    reloading = false;
+  }
+}
+
+async function respawnChildWithCurrentEnv(): Promise<void> {
+  const broken = currentChild;
+  currentChild = null;
+  if (broken) await terminateChild(broken);
+  const restored = spawnChild(CURRENT_LINK);
+  currentChild = restored;
+  attachExitWatcher(restored);
 }
 
 async function rollbackToVersion(versionId: string): Promise<void> {
@@ -321,11 +493,16 @@ function spawnChild(dir: string): ChildHandle {
     throw new Error(`no entry point found in ${dir}; tried ${ENTRY_CANDIDATES.join(', ')}`);
   }
   console.log(`[spawn] bun ${entry} on port ${PORT}`);
+  // Merge order matters: user vars first, then SDL-injected baseEnv, then
+  // PORT. Later spreads win, so SDL system vars (FUNCTION_ID, RUNNER_TOKEN,
+  // BACKEND_BASE_URL, …) and PORT cannot be shadowed by anything a user
+  // managed to slip into function_variables. This is defense-in-depth on top
+  // of the API/DB-layer reserved-key check.
   return Bun.spawn(['bun', entry], {
     cwd: dir,
     stdout: 'inherit',
     stderr: 'inherit',
-    env: { ...process.env, PORT: String(PORT) },
+    env: { ...currentEnv, ...baseEnv, PORT: String(PORT) },
   });
 }
 

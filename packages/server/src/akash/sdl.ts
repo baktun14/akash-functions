@@ -4,8 +4,11 @@
 // new versions without re-leasing the deployment.
 //
 // CPU/memory/storage come from function_versions.resources. Pricing amount
-// (uakt) and the runner image come from env. AkashML key, if present, becomes
-// an env var on the deployed service.
+// (uakt) and the runner image come from env. User-defined env vars (e.g.
+// AKASHML_API_KEY, DATABASE_URL) are NOT emitted here — the SDL manifest is
+// visible to providers and is unsuitable for secrets. The runner instead
+// fetches them from /api/runner/env/:fnId at boot and on poll-detected
+// changes, over an HMAC-authenticated channel.
 
 import yaml from 'js-yaml';
 import { env } from '../env';
@@ -25,7 +28,6 @@ export type BuildSdlArgs = {
   /** Long-lived runner-kind HMAC, scoped to functionId. */
   runnerToken: string;
   resources: ResourceSpec;
-  akashmlKey?: string | undefined;
   /** Override the public host for backend callbacks. Defaults to env.CODE_HOST_BASE. */
   backendBaseUrl?: string;
   /** Override the runner's poll cadence. Defaults to 10s. */
@@ -53,6 +55,8 @@ export async function buildSdl(args: BuildSdlArgs): Promise<string> {
   const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const runnerImage = await resolveRunnerImage();
 
+  // Only system-level vars go in the SDL — these are visible to providers.
+  // User secrets (function_variables) are fetched separately at runtime.
   const envVars: string[] = [
     `FUNCTION_ID=${args.functionId}`,
     `INITIAL_VERSION_ID=${args.initialVersionId}`,
@@ -61,9 +65,6 @@ export async function buildSdl(args: BuildSdlArgs): Promise<string> {
     `POLL_INTERVAL_MS=${pollIntervalMs}`,
     'PORT=3000',
   ];
-  if (args.akashmlKey) {
-    envVars.push(`AKASHML_API_KEY=${args.akashmlKey}`);
-  }
 
   const sdl = {
     version: '2.0',

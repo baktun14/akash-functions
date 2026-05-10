@@ -182,3 +182,37 @@ export type ApiError = {
   code: string;
   message: string;
 };
+
+// User-defined function variables. The browser-facing API is write-only:
+// `value` is set on PUT, but list/get responses NEVER return it. To "view"
+// a value, you can't — to "change" it, you overwrite.
+export type FunctionVariableSummary = {
+  key: string;
+  /** ISO timestamp of the last create/update for this variable. */
+  updatedAt: string;
+};
+
+export type FunctionVariablesResponse = {
+  variables: FunctionVariableSummary[];
+  /**
+   * Monotonic counter on the function. The runner polls
+   * /api/runner/current/:fnId; when this changes it refetches env and
+   * respawns the user process.
+   */
+  variablesRevision: number;
+};
+
+export type PutFunctionVariableRequest = {
+  value: string;
+};
+
+export type PutFunctionVariableResponse = {
+  key: string;
+  updatedAt: string;
+  variablesRevision: number;
+};
+
+export type DeleteFunctionVariableResponse = {
+  key: string;
+  variablesRevision: number;
+};
