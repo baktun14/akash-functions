@@ -15,16 +15,18 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { and, desc, eq, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import { db } from '../db/client';
-import { deployments, functionVariables, functionVersions, functions } from '../db/schema';
+import { apiKeys, deployments, functionVariables, functionVersions, functions } from '../db/schema';
 import { secrets } from '../lib/secrets';
 import { verifyToken } from '../lib/signing';
 import { log } from '../lib/log';
+import { decorateRoutesWithAuth } from './deploy';
+import { extractRoutes } from './extract-routes';
 
 export const runnerRouter = new Hono();
 
@@ -100,25 +102,74 @@ runnerRouter.get('/current/:fnId', async (c) => {
   // 404 if the function was deleted (tombstoned). The runner uses this as a
   // signal to exit cleanly so the Akash provider can release the lease.
   const [fn] = await db
-    .select({ id: functions.id, variablesRevision: functions.variablesRevision })
+    .select({
+      id: functions.id,
+      walletAddress: functions.walletAddress,
+      variablesRevision: functions.variablesRevision,
+      protectedRoutes: functions.protectedRoutes,
+    })
     .from(functions)
     .where(and(eq(functions.id, fnId), isNull(functions.deletedAt)))
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
 
+  // Runner self-reports its version via `?v=…`. Upsert it on the open
+  // deployment row(s) only when it changes — `ne` against NULL evaluates to
+  // NULL in SQL, so use a coalesced compare to match the initial-null case.
+  // Without this guard the row would take a write every ~10s per function.
+  const reportedVersion = c.req.query('v');
+  if (reportedVersion && /^\d+\.\d+\.\d+/.test(reportedVersion)) {
+    await db
+      .update(deployments)
+      .set({ runnerVersion: reportedVersion, runnerSeenAt: new Date() })
+      .where(
+        and(
+          eq(deployments.functionId, fnId),
+          ne(deployments.state, 'closed'),
+          sql`coalesce(${deployments.runnerVersion}, '') <> ${reportedVersion}`
+        )
+      );
+  }
+
   const [version] = await db
-    .select({ id: functionVersions.id, createdAt: functionVersions.createdAt })
+    .select({
+      id: functionVersions.id,
+      createdAt: functionVersions.createdAt,
+      source: functionVersions.source,
+    })
     .from(functionVersions)
     .where(eq(functionVersions.functionId, fnId))
     .orderBy(desc(functionVersions.createdAt))
     .limit(1);
   if (!version) throw new HTTPException(404, { message: 'No versions for function' });
 
+  // Auth payload for the runner sidecar's reverse proxy:
+  //  - apiKeyHashes: full SHA-256 hex of every active key on this wallet.
+  //    Replaced wholesale on each poll, so revocation takes effect within
+  //    one poll interval.
+  //  - routes: the auto-detected route list, decorated with auth='apiKey'
+  //    for any entry that appears in the function's protected_routes set.
+  // walletAddress can be null on legacy rows during the wallet migration; in
+  // that case there are no keys and any protected route 401s every caller.
+  const keyHashes: string[] = fn.walletAddress
+    ? (
+        await db
+          .select({ keyHash: apiKeys.keyHash })
+          .from(apiKeys)
+          .where(eq(apiKeys.walletAddress, fn.walletAddress))
+      ).map((row) => row.keyHash)
+    : [];
+
+  const detected = extractRoutes(version.source) ?? [];
+  const routes = decorateRoutesWithAuth(detected, fn.protectedRoutes);
+
   c.header('Cache-Control', 'no-store');
   return c.json({
     versionId: version.id,
     updatedAt: version.createdAt.toISOString(),
     variablesRevision: fn.variablesRevision,
+    apiKeyHashes: keyHashes,
+    routes,
   });
 });
 

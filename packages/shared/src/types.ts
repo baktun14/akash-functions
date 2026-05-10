@@ -31,6 +31,10 @@ export type FunctionRecord = {
   // Set by GET /api/functions list query — survives reload so the UI can
   // resume polling for an in-flight or failed deployment.
   latestDeploymentId?: string;
+  /** Decorated by GET /api/functions when the latest deployment is live and
+   *  the runner reported a version older than EXPECTED_RUNNER_VERSION (or
+   *  never reported and the deployment is past the grace window). */
+  runnerOutdated?: boolean;
 };
 
 export type PresetId = 'rest' | 'jsx' | 'cron' | 'gpu';
@@ -97,12 +101,27 @@ export type DeploymentState =
 // surface and runnable snippets.
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
+// 'public' — anyone can call the route.
+// 'apiKey' — caller must present a valid wallet-scoped API key via either
+//           `Authorization: Bearer <key>` or `x-api-key: <key>`. The runner
+//           sidecar enforces this before the request reaches user code.
+// `auth` is decorated onto extracted routes from the function's per-function
+// `protectedRoutes` set; it is NOT detected from source code itself.
+export type RouteAuth = 'public' | 'apiKey';
+
 export type FunctionRoute = {
   method: RouteMethod;
   path: string;
   description?: string;
   body?: unknown;
+  auth?: RouteAuth;
 };
+
+// Wire format for the per-function protected-routes set: array of
+// `"<METHOD> <path>"` strings (e.g. `"POST /api/secret"`). Stored on
+// functions.protected_routes and applied to the auto-detected route list
+// at fetch time.
+export type ProtectedRouteKey = string;
 
 export type DeploymentRecord = {
   id: string;
@@ -116,6 +135,16 @@ export type DeploymentRecord = {
   uris?: string[];
   errorMessage?: string;
   routes?: FunctionRoute[];
+  /** Semver self-reported by the running runner on its last successful poll. */
+  runnerVersion?: string;
+  /** ISO timestamp of the last poll that reported runnerVersion. */
+  runnerSeenAt?: string;
+  /** The version the platform currently expects runners to be at. */
+  expectedRunnerVersion?: string;
+  /** True when the runner is on an older version (or never reported and the
+   *  deployment is past the "just came up" grace window). UI uses this to
+   *  surface a nudge to click the in-place Update runner image button. */
+  runnerOutdated?: boolean;
   createdAt: string;
   liveAt?: string;
   closedAt?: string;
@@ -177,6 +206,35 @@ export type UpdateCodeResponse = {
 export type ApiError = {
   code: string;
   message: string;
+};
+
+// Wallet-scoped API key. Plaintext is only ever returned in
+// CreateApiKeyResponse — the UI shows it once at creation and forgets it.
+export type ApiKeyRecord = {
+  id: string;
+  name: string;
+  /** Last 4 chars of the plaintext key, used for UI display. */
+  maskedTail: string;
+  createdAt: string;
+};
+
+export type CreateApiKeyRequest = {
+  name: string;
+};
+
+export type CreateApiKeyResponse = ApiKeyRecord & {
+  /** Plaintext, returned exactly once on POST /api/keys. Never persisted. */
+  key: string;
+};
+
+// Per-function protected-routes set. Stored on the function and applied at
+// deployment-record fetch time.
+export type ProtectedRoutesResponse = {
+  protectedRoutes: ProtectedRouteKey[];
+};
+
+export type UpdateProtectedRoutesRequest = {
+  protectedRoutes: ProtectedRouteKey[];
 };
 
 // User-defined function variables. The browser-facing API is write-only:

@@ -29,6 +29,7 @@ import { TemplatesPage } from './components/templates/TemplatesPage';
 import { FunctionBuilder } from './components/builder/FunctionBuilder';
 import { FunctionEditor } from './components/builder/FunctionEditor';
 import { Toast } from './components/ui/Toast';
+import { ApiKeysPage } from './pages/ApiKeysPage';
 import { FunctionsPage } from './pages/FunctionsPage';
 import { FunctionDetailPage } from './pages/FunctionDetailPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
@@ -72,7 +73,7 @@ export default function App(): ReactElement {
         <Route path="/functions/:id" element={<FunctionDetailPage />} />
         <Route path="/templates" element={<TemplatesPageRoute />} />
         <Route path="/logs" element={<PlaceholderPage label="Logs" />} />
-        <Route path="/keys" element={<PlaceholderPage label="API keys" />} />
+        <Route path="/keys" element={<ApiKeysPage />} />
         <Route path="/usage" element={<PlaceholderPage label="Usage" />} />
         <Route path="/docs" element={<PlaceholderPage label="Documentation" />} />
         <Route path="/support" element={<PlaceholderPage label="Support" />} />

@@ -1,8 +1,13 @@
-import { useEffect, useState } from 'react';
-import type { DeploymentRecord, DeploymentState, FunctionRecord } from '@shared/types';
+import { useCallback, useEffect, useState } from 'react';
+import type {
+  DeploymentRecord,
+  DeploymentState,
+  FunctionRecord,
+  FunctionRoute,
+} from '@shared/types';
 import { Icon } from '../../icons';
 import { api } from '../../../lib/api';
-import { RoutesPanel } from '../RoutesPanel';
+import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
 const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
@@ -10,8 +15,21 @@ const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
 const REACHABILITY_POLL_MS = 2000;
 
-function useDeployment(fnId: string, depId: string | undefined): DeploymentRecord | null {
+function useDeployment(
+  fnId: string,
+  depId: string | undefined
+): { dep: DeploymentRecord | null; refresh: () => Promise<void> } {
   const [dep, setDep] = useState<DeploymentRecord | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!depId) return;
+    try {
+      const next = await api.getDeployment(fnId, depId);
+      setDep(next);
+    } catch {
+      /* ignore — next poll will retry */
+    }
+  }, [fnId, depId]);
 
   useEffect(() => {
     if (!depId) {
@@ -41,7 +59,7 @@ function useDeployment(fnId: string, depId: string | undefined): DeploymentRecor
     };
   }, [fnId, depId]);
 
-  return dep;
+  return { dep, refresh };
 }
 
 // Akash reports `live` as soon as the lease's manifest is accepted, but the
@@ -131,10 +149,34 @@ type UpdateState = 'idle' | 'submitting' | 'submitted' | 'error';
 
 export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   const depId = svc.deploymentId ?? svc.latestDeploymentId;
-  const dep = useDeployment(svc.id, depId);
+  const { dep, refresh: refreshDeployment } = useDeployment(svc.id, depId);
   const meta = describe(dep);
   const [updateState, setUpdateState] = useState<UpdateState>('idle');
   const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const onToggleAuth = useCallback(
+    async (route: FunctionRoute, nextProtected: boolean) => {
+      // Refuse to mark a route as protected when the runner is on an older
+      // version that doesn't enforce — toggling would save the flag but
+      // unauthenticated callers would still reach user code, which is a
+      // silent security regression. Allow un-protecting always.
+      if (nextProtected && dep?.runnerOutdated) {
+        throw new Error(
+          `Update the runner to ${dep.expectedRunnerVersion ?? 'the latest version'} before marking routes protected — older runners don't enforce auth.`
+        );
+      }
+      const current = (dep?.routes ?? [])
+        .filter((r) => r.auth === 'apiKey')
+        .map((r) => routeKeyOf(r));
+      const key = routeKeyOf(route);
+      const next = nextProtected
+        ? Array.from(new Set([...current, key]))
+        : current.filter((k) => k !== key);
+      await api.updateProtectedRoutes(svc.id, next);
+      await refreshDeployment();
+    },
+    [dep?.routes, dep?.runnerOutdated, dep?.expectedRunnerVersion, svc.id, refreshDeployment]
+  );
 
   const onUpdateRunner = async () => {
     if (!dep || dep.state !== 'live') return;
@@ -232,7 +274,11 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
             <button
               onClick={onUpdateRunner}
               disabled={updateState === 'submitting'}
-              title="Submit a fresh SDL on the same lease so the provider re-pulls the runner image"
+              title={
+                dep.runnerOutdated
+                  ? `Runner ${dep.runnerVersion ?? 'unknown'} → ${dep.expectedRunnerVersion}. Click to update in place.`
+                  : 'Submit a fresh SDL on the same lease so the provider re-pulls the runner image'
+              }
               style={{
                 marginLeft: 8,
                 display: 'inline-flex',
@@ -240,18 +286,22 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
                 gap: 6,
                 padding: '4px 10px',
                 fontSize: 12,
-                background: 'var(--bg-elev-3)',
-                border: '1px solid var(--line)',
+                background: dep.runnerOutdated
+                  ? 'rgba(245,165,36,0.12)'
+                  : 'var(--bg-elev-3)',
+                border: dep.runnerOutdated
+                  ? '1px solid rgba(245,165,36,0.45)'
+                  : '1px solid var(--line)',
                 borderRadius: 6,
-                color: 'var(--fg)',
+                color: dep.runnerOutdated ? 'var(--warn, #f5a524)' : 'var(--fg)',
                 cursor: updateState === 'submitting' ? 'progress' : 'pointer',
                 opacity: updateState === 'submitting' ? 0.7 : 1,
               }}
             >
               <Icon
-                name="refresh"
+                name={dep.runnerOutdated ? 'arrowUp' : 'refresh'}
                 size={11}
-                color="var(--fg-muted)"
+                color={dep.runnerOutdated ? 'var(--warn, #f5a524)' : 'var(--fg-muted)'}
                 className={updateState === 'submitting' ? 'spin' : undefined}
               />
               {updateState === 'submitting'
@@ -260,7 +310,17 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
                   ? 'Update submitted'
                   : updateState === 'error'
                     ? 'Update failed'
-                    : 'Update runner'}
+                    : dep.runnerOutdated
+                      ? 'Update runner ·'
+                      : 'Update runner'}
+              {dep.runnerOutdated && updateState === 'idle' && (
+                <span
+                  className="mono"
+                  style={{ fontSize: 11, color: 'var(--warn, #f5a524)', fontWeight: 500 }}
+                >
+                  {dep.runnerVersion ?? '—'} → {dep.expectedRunnerVersion}
+                </span>
+              )}
             </button>
           )}
         </div>
@@ -283,7 +343,16 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
       )}
 
       {publicUrl && dep?.routes && dep.routes.length > 0 && (
-        <RoutesPanel url={publicUrl} routes={dep.routes} />
+        <RoutesPanel
+          url={publicUrl}
+          routes={dep.routes}
+          onToggleAuth={onToggleAuth}
+          protectionDisabledReason={
+            dep.runnerOutdated
+              ? `Update the runner${dep.runnerVersion ? ` (${dep.runnerVersion} → ${dep.expectedRunnerVersion})` : ''} before marking routes protected — older runners don't enforce auth.`
+              : undefined
+          }
+        />
       )}
 
       {/* Active deployment */}

@@ -10,6 +10,7 @@ import { env } from './env';
 import { errorHandler } from './middleware/error';
 import { deployRouter } from './routes/deploy';
 import { functionsRouter } from './routes/functions';
+import { keysRouter } from './routes/keys';
 import { runnerRouter } from './routes/runner';
 import { usageRouter } from './routes/usage';
 import { log } from './lib/log';
@@ -22,7 +23,7 @@ app.use(
   cors({
     origin: (origin) => origin ?? '*',
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Authorization', 'Content-Type'],
+    allowHeaders: ['Authorization', 'Content-Type', 'X-Api-Key'],
     credentials: false,
   })
 );
@@ -30,6 +31,7 @@ app.use(
 app.get('/api/health', (c) => c.json({ ok: true, runner: env.RUNNER_IMAGE }));
 app.route('/api/functions', functionsRouter);
 app.route('/api/functions', deployRouter);
+app.route('/api/keys', keysRouter);
 app.route('/api/runner', runnerRouter);
 app.route('/api/usage', usageRouter);
 

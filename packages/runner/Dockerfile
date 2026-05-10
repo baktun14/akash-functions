@@ -12,6 +12,9 @@ RUN apk add --no-cache tar
 
 WORKDIR /app
 COPY boot.ts /boot/boot.ts
+# Preload script loaded by `bun --preload` into the user-code child to rewrite
+# hardcoded Bun.serve ports to the internal USER_PORT the runner expects.
+COPY preload.ts /boot/preload.ts
 
 ENV PORT=3000
 EXPOSE 3000

@@ -1,0 +1,1 @@
+ALTER TABLE "functions" ADD COLUMN "protected_routes" jsonb DEFAULT '[]'::jsonb NOT NULL;

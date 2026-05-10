@@ -14,6 +14,7 @@ import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
+import { EXPECTED_RUNNER_VERSION, isRunnerOutdated } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
 import { log } from '../lib/log';
 import { extractRoutes } from './extract-routes';
@@ -209,7 +210,10 @@ deployRouter.get('/:id/deployments/:depId', async (c) => {
     .from(functionVersions)
     .where(eq(functionVersions.id, dep.versionId))
     .limit(1);
-  const routes = version ? extractRoutes(version.source) : undefined;
+  const detected = version ? extractRoutes(version.source) : undefined;
+  const routes = detected
+    ? decorateRoutesWithAuth(detected, fn.protectedRoutes)
+    : undefined;
 
   return c.json(toRecord(dep, routes));
 });
@@ -230,9 +234,34 @@ function toRecord(
     uris: dep.uris ?? undefined,
     errorMessage: dep.errorMessage ?? undefined,
     routes,
+    runnerVersion: dep.runnerVersion ?? undefined,
+    runnerSeenAt: dep.runnerSeenAt?.toISOString(),
+    expectedRunnerVersion: EXPECTED_RUNNER_VERSION,
+    runnerOutdated: isRunnerOutdated(dep.runnerVersion, dep.liveAt),
     createdAt: dep.createdAt.toISOString(),
     liveAt: dep.liveAt?.toISOString(),
     closedAt: dep.closedAt?.toISOString(),
   };
+}
+
+// Stamps each detected route with `auth: 'public' | 'apiKey'` based on the
+// function's protected-routes set. The set holds `"<METHOD> <path>"` keys so
+// callers can compare without a second pass.
+export function decorateRoutesWithAuth(
+  routes: FunctionRoute[],
+  protectedRoutes: string[]
+): FunctionRoute[] {
+  if (protectedRoutes.length === 0) {
+    return routes.map((r) => ({ ...r, auth: 'public' as const }));
+  }
+  const set = new Set(protectedRoutes);
+  return routes.map((r) => ({
+    ...r,
+    auth: set.has(routeKey(r.method, r.path)) ? ('apiKey' as const) : ('public' as const),
+  }));
+}
+
+export function routeKey(method: string, path: string): string {
+  return `${method.toUpperCase()} ${path}`;
 }
 
