@@ -19,7 +19,6 @@ import { log } from '../lib/log';
 
 const Body = z.object({
   versionId: z.string().uuid().optional(),
-  akashmlKey: z.string().optional(),
 });
 
 export const deployRouter = new Hono<{ Variables: AuthVars }>();
@@ -91,14 +90,16 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
   if (!dep) throw new HTTPException(500, { message: 'Failed to record deployment' });
 
   // Build SDL with a long-lived runner token. The runner uses it both for the
-  // first code fetch and for the poll loop that picks up new versions.
+  // first code fetch and for the poll loop that picks up new versions. User
+  // env vars (including AKASHML_API_KEY) flow through /api/runner/env, not
+  // the SDL — the SDL is semi-public (providers see it) and unsuitable for
+  // secrets.
   const runnerToken = signRunner({ fnId: fn.id });
   const sdl = await buildSdl({
     functionId: fn.id,
     initialVersionId: version.id,
     runnerToken,
     resources: version.resources,
-    akashmlKey: body.akashmlKey ?? version.envVars['AKASHML_API_KEY'],
   });
 
   // Fire-and-forget the pipeline. The frontend polls /:id/deployments/:depId.
@@ -162,7 +163,6 @@ deployRouter.post('/:id/deployments/:depId/update-image', async (c) => {
     initialVersionId: dep.versionId,
     runnerToken,
     resources: version.resources,
-    akashmlKey: version.envVars['AKASHML_API_KEY'],
   });
 
   await consoleApi.updateDeployment(akashKey, dep.dseq, sdl);

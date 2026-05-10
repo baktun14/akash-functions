@@ -11,12 +11,16 @@ import type {
   TokenLine,
   FunctionVersionSummary,
   FunctionVersionDetail,
+  FunctionVariablesResponse,
+  PutFunctionVariableResponse,
+  DeleteFunctionVariableResponse,
   UpdateCodeRequest,
 } from '@shared/types';
 import {
   AKASHML_KEY,
   SERVICES_KEY,
   SESSION_KEY,
+  VARIABLES_KEY_PREFIX,
   VERSIONS_KEY_PREFIX,
   readJSON,
   removeKey,
@@ -63,6 +67,11 @@ export interface ApiClient {
     opts?: { message?: string }
   ): Promise<UpdateCodeResult>;
   deployVersion(fnId: string, versionId?: string): Promise<DeploymentRecord>;
+
+  // Function variables (write-only API: list returns only keys, never values).
+  listVariables(fnId: string): Promise<FunctionVariablesResponse>;
+  putVariable(fnId: string, key: string, value: string): Promise<PutFunctionVariableResponse>;
+  deleteVariable(fnId: string, key: string): Promise<DeleteFunctionVariableResponse>;
 
   getAkashMLConnection(): AkashMLConnection | null;
   saveAkashMLConnection(key: string): AkashMLConnection;
@@ -131,6 +140,19 @@ function writeMockVersions(fnId: string, list: FunctionVersionDetail[]): void {
   // Recompute isLatest so only the topmost row is flagged.
   const tagged = list.map((v, i) => ({ ...v, isLatest: i === 0 }));
   writeJSON(VERSIONS_KEY_PREFIX + fnId, tagged);
+}
+
+type MockVarsState = {
+  rev: number;
+  items: { key: string; value: string; updatedAt: string }[];
+};
+
+function readMockVars(fnId: string): MockVarsState {
+  return readJSON<MockVarsState>(VARIABLES_KEY_PREFIX + fnId) ?? { rev: 0, items: [] };
+}
+
+function writeMockVars(fnId: string, data: MockVarsState): void {
+  writeJSON(VARIABLES_KEY_PREFIX + fnId, data);
 }
 
 function seedMockVersionsIfEmpty(fnId: string): FunctionVersionDetail[] {
@@ -381,6 +403,46 @@ class MockApi implements ApiClient {
     };
   }
 
+  async listVariables(fnId: string): Promise<FunctionVariablesResponse> {
+    await delay(80);
+    const { rev, items } = readMockVars(fnId);
+    return {
+      variablesRevision: rev,
+      variables: items.map(({ key, updatedAt }) => ({ key, updatedAt })),
+    };
+  }
+
+  async putVariable(
+    fnId: string,
+    key: string,
+    value: string
+  ): Promise<PutFunctionVariableResponse> {
+    await delay(120);
+    const data = readMockVars(fnId);
+    const updatedAt = new Date().toISOString();
+    const idx = data.items.findIndex((v) => v.key === key);
+    if (idx >= 0) {
+      data.items[idx] = { key, value, updatedAt };
+    } else {
+      data.items.push({ key, value, updatedAt });
+    }
+    data.rev += 1;
+    writeMockVars(fnId, data);
+    return { key, updatedAt, variablesRevision: data.rev };
+  }
+
+  async deleteVariable(fnId: string, key: string): Promise<DeleteFunctionVariableResponse> {
+    await delay(120);
+    const data = readMockVars(fnId);
+    const next = data.items.filter((v) => v.key !== key);
+    if (next.length !== data.items.length) {
+      data.items = next;
+      data.rev += 1;
+      writeMockVars(fnId, data);
+    }
+    return { key, variablesRevision: data.rev };
+  }
+
   getAkashMLConnection(): AkashMLConnection | null {
     return readJSON<AkashMLConnection>(AKASHML_KEY);
   }
@@ -583,6 +645,31 @@ class LiveApi implements ApiClient {
       method: 'POST',
       body: JSON.stringify(versionId ? { versionId } : {}),
     });
+  }
+
+  async listVariables(fnId: string): Promise<FunctionVariablesResponse> {
+    return this.req<FunctionVariablesResponse>(`/api/functions/${fnId}/variables`);
+  }
+
+  async putVariable(
+    fnId: string,
+    key: string,
+    value: string
+  ): Promise<PutFunctionVariableResponse> {
+    return this.req<PutFunctionVariableResponse>(
+      `/api/functions/${fnId}/variables/${encodeURIComponent(key)}`,
+      { method: 'PUT', body: JSON.stringify({ value }) }
+    );
+  }
+
+  async deleteVariable(
+    fnId: string,
+    key: string
+  ): Promise<DeleteFunctionVariableResponse> {
+    return this.req<DeleteFunctionVariableResponse>(
+      `/api/functions/${fnId}/variables/${encodeURIComponent(key)}`,
+      { method: 'DELETE' }
+    );
   }
 
   getAkashMLConnection(): AkashMLConnection | null {

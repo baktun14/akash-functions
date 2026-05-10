@@ -11,7 +11,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:studio": "drizzle-kit studio",
-    "claim-orphans": "tsx scripts/claim-orphans.ts"
+    "claim-orphans": "tsx scripts/claim-orphans.ts",
+    "backfill-variables": "tsx scripts/backfill-variables.ts"
   },
   "dependencies": {
     "@akash-functions/shared": "*",

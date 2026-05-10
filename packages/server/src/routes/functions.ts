@@ -7,16 +7,20 @@ import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import type {
   FunctionRecord,
+  FunctionVariablesResponse,
   FunctionVersionDetail,
   FunctionVersionSummary,
   PresetId,
+  PutFunctionVariableResponse,
 } from '@shared/types';
+import { validateVariableKey } from '@shared/reserved-vars';
 import { ConsoleApiError, consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
-import { deployments, functionVersions, functions } from '../db/schema';
+import { deployments, functionVariables, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
+import { secrets } from '../lib/secrets';
 import { signRunner } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { log } from '../lib/log';
@@ -401,14 +405,16 @@ functionsRouter.post('/:id/clone', async (c) => {
     return { fn, version, dep };
   });
 
-  // Build SDL + fire pipeline (same shape as POST /:id/deploy).
+  // Build SDL + fire pipeline (same shape as POST /:id/deploy). User-defined
+  // env vars (including AKASHML_API_KEY) flow through /api/runner/env at boot,
+  // not through the SDL — the SDL is visible to providers and we don't want
+  // user secrets in it.
   const runnerToken = signRunner({ fnId: fn.id });
   const sdl = await buildSdl({
     functionId: fn.id,
     initialVersionId: version.id,
     runnerToken,
     resources: version.resources,
-    akashmlKey: version.envVars['AKASHML_API_KEY'],
   });
   startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn' });
 
@@ -437,6 +443,163 @@ functionsRouter.post('/:id/close-deployment', async (c) => {
     throw new HTTPException(409, { message: 'No active deployment to close' });
   }
   return c.body(null, 204);
+});
+
+// Encrypted user-defined env vars. Plaintext is only emitted on the
+// runner-only /api/runner/env/:fnId route — the browser API is write-only.
+
+const MAX_VARIABLES_PER_FUNCTION = 100;
+const MAX_TOTAL_PLAINTEXT_BYTES = 256 * 1024;
+
+const PutVariableBody = z.object({
+  value: z
+    .string()
+    .min(1, 'value cannot be empty')
+    .max(64 * 1024, 'value exceeds 64KB')
+    .refine((s) => !s.includes('\0'), 'value contains a null byte'),
+});
+
+functionsRouter.get('/:id/variables', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const id = c.req.param('id');
+  const fn = await getFn(walletAddress, id);
+
+  const rows = await db
+    .select({
+      key: functionVariables.key,
+      updatedAt: functionVariables.updatedAt,
+    })
+    .from(functionVariables)
+    .where(eq(functionVariables.functionId, id))
+    .orderBy(functionVariables.key);
+
+  const body: FunctionVariablesResponse = {
+    variables: rows.map((r) => ({ key: r.key, updatedAt: r.updatedAt.toISOString() })),
+    variablesRevision: fn.variablesRevision,
+  };
+  return c.json(body);
+});
+
+functionsRouter.put('/:id/variables/:key', zValidator('json', PutVariableBody), async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const id = c.req.param('id');
+  const key = c.req.param('key');
+  await getFn(walletAddress, id);
+
+  const keyError = validateVariableKey(key);
+  if (keyError) throw new HTTPException(400, { message: keyError });
+
+  const { value } = c.req.valid('json');
+
+  // Encrypt outside the transaction so cipher errors don't lock rows.
+  let encrypted;
+  try {
+    encrypted = secrets.encrypt(value);
+  } catch (err) {
+    log.error('secrets.encrypt failed', { err: String(err) });
+    throw new HTTPException(500, { message: 'Failed to encrypt variable' });
+  }
+
+  const updated = await db.transaction(async (tx) => {
+    // Single aggregate query for both caps + presence check.
+    const [stats] = await tx
+      .select({
+        n: sql<number>`count(*)::int`,
+        bytes: sql<number>`coalesce(sum(length(${functionVariables.ciphertext})), 0)::int`,
+        hasKey: sql<boolean>`bool_or(${functionVariables.key} = ${key})`,
+      })
+      .from(functionVariables)
+      .where(eq(functionVariables.functionId, id));
+
+    const count = stats?.n ?? 0;
+    const otherBytes = (stats?.bytes ?? 0) -
+      (stats?.hasKey ? Buffer.byteLength(encrypted.ciphertext, 'utf8') : 0);
+    if (!stats?.hasKey && count >= MAX_VARIABLES_PER_FUNCTION) {
+      throw new HTTPException(400, {
+        message: `Cannot exceed ${MAX_VARIABLES_PER_FUNCTION} variables per function`,
+      });
+    }
+    if (otherBytes + Buffer.byteLength(value, 'utf8') > MAX_TOTAL_PLAINTEXT_BYTES) {
+      throw new HTTPException(400, {
+        message: `Total variables size would exceed ${MAX_TOTAL_PLAINTEXT_BYTES} bytes`,
+      });
+    }
+
+    const now = new Date();
+    const [row] = await tx
+      .insert(functionVariables)
+      .values({
+        functionId: id,
+        key,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.authTag,
+        keyVersion: encrypted.keyVersion,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [functionVariables.functionId, functionVariables.key],
+        set: {
+          ciphertext: encrypted.ciphertext,
+          iv: encrypted.iv,
+          authTag: encrypted.authTag,
+          keyVersion: encrypted.keyVersion,
+          updatedAt: now,
+        },
+      })
+      .returning({ updatedAt: functionVariables.updatedAt });
+
+    if (!row) throw new HTTPException(500, { message: 'Upsert returned no row' });
+
+    const [bumped] = await tx
+      .update(functions)
+      .set({ variablesRevision: sql`${functions.variablesRevision} + 1` })
+      .where(eq(functions.id, id))
+      .returning({ revision: functions.variablesRevision });
+
+    return { updatedAt: row.updatedAt, revision: bumped?.revision ?? 0 };
+  });
+
+  log.info('function variable upserted', { fnId: id, key, revision: updated.revision });
+
+  const body: PutFunctionVariableResponse = {
+    key,
+    updatedAt: updated.updatedAt.toISOString(),
+    variablesRevision: updated.revision,
+  };
+  return c.json(body);
+});
+
+functionsRouter.delete('/:id/variables/:key', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const id = c.req.param('id');
+  const key = c.req.param('key');
+  await getFn(walletAddress, id);
+
+  const deletedRevision = await db.transaction(async (tx) => {
+    const result = await tx
+      .delete(functionVariables)
+      .where(and(eq(functionVariables.functionId, id), eq(functionVariables.key, key)))
+      .returning({ key: functionVariables.key });
+
+    if (result.length === 0) return null;
+
+    const [bumped] = await tx
+      .update(functions)
+      .set({ variablesRevision: sql`${functions.variablesRevision} + 1` })
+      .where(eq(functions.id, id))
+      .returning({ revision: functions.variablesRevision });
+    return bumped?.revision ?? 0;
+  });
+
+  if (deletedRevision === null) {
+    throw new HTTPException(404, { message: 'Variable not found' });
+  }
+  log.info('function variable deleted', { fnId: id, key, revision: deletedRevision });
+  // Returning the new revision lets the UI splice locally instead of refetching.
+  c.status(200);
+  return c.json({ key, variablesRevision: deletedRevision });
 });
 
 functionsRouter.delete('/:id', async (c) => {
