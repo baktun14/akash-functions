@@ -87,16 +87,6 @@ export const SAMPLES: Record<PresetId, CodeSample> = {
       'Create a REST API that returns "Hello world". Make sure it has a health check endpoint and CORS enabled.',
     name: 'function-bun',
     code: restCode,
-    manifest: JSON.stringify(
-      {
-        routes: [
-          { method: 'GET', path: '/',            description: 'Hello world' },
-          { method: 'GET', path: '/api/health',  description: 'Health check' },
-        ],
-      },
-      null,
-      2
-    ),
     res: { cpu: '0.5 vCPU', mem: '512 Mi', gpu: 'no GPU' },
   },
   jsx: {

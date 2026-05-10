@@ -61,10 +61,6 @@ export type CodeSample = {
   needsAkashML?: boolean;
   code: TokenLine[];
   source?: string;
-  // Optional contents for the function's `akash.json` manifest. When set, the
-  // deploy pipeline writes it alongside the entry file so the dashboard's
-  // "Use this function" snippets reflect every route the template mounts.
-  manifest?: string;
   res: Resources;
 };
 
@@ -95,10 +91,10 @@ export type Template = {
 export type DeploymentState =
   | 'pending' | 'bidding' | 'leased' | 'live' | 'failed' | 'closed';
 
-// Opt-in route declaration. A function publishes these by including an
-// `akash.json` file at its source root with `{ "routes": [...] }`. The server
-// parses and surfaces them on the deployment so the UI can render runnable
-// snippets that match the function's actual surface area.
+// HTTP route detected from the function's source code. The server scans the
+// source map for `<router>.<verb>("/path", ...)` registrations and surfaces
+// the result on the deployment so the UI can render an at-a-glance API
+// surface and runnable snippets.
 export type RouteMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 export type FunctionRoute = {

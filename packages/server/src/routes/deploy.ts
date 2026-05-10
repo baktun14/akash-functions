@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import type { DeploymentRecord, FunctionRoute, RouteMethod } from '@shared/types';
+import type { DeploymentRecord, FunctionRoute } from '@shared/types';
 import { consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
@@ -16,6 +16,7 @@ import { deployments, functionVersions, functions } from '../db/schema';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { signRunner } from '../lib/signing';
 import { log } from '../lib/log';
+import { extractRoutes } from './extract-routes';
 
 const Body = z.object({
   versionId: z.string().uuid().optional(),
@@ -200,16 +201,15 @@ deployRouter.get('/:id/deployments/:depId', async (c) => {
     .limit(1);
   if (!dep) throw new HTTPException(404, { message: 'Deployment not found' });
 
-  // The version's source map is the canonical place to look for the opt-in
-  // routes manifest. Parsing here (rather than at write time) means edits to
-  // `akash.json` propagate as soon as the new version is created — no schema
-  // change, no migration, no runner round-trip.
+  // Routes are derived from the version's source on every fetch. Parsing here
+  // (rather than at write time) means edits propagate as soon as a new version
+  // is created — no schema change, no migration, no runner round-trip.
   const [version] = await db
     .select({ source: functionVersions.source })
     .from(functionVersions)
     .where(eq(functionVersions.id, dep.versionId))
     .limit(1);
-  const routes = version ? parseRoutesManifest(version.source) : undefined;
+  const routes = version ? extractRoutes(version.source) : undefined;
 
   return c.json(toRecord(dep, routes));
 });
@@ -236,43 +236,3 @@ function toRecord(
   };
 }
 
-const VALID_METHODS: ReadonlySet<RouteMethod> = new Set([
-  'GET', 'POST', 'PUT', 'PATCH', 'DELETE',
-]);
-const MAX_ROUTES = 50;
-
-// Parses an opt-in `akash.json` from the source map. Returns undefined when
-// the file is absent, malformed, or empty after validation. A garbled manifest
-// must never break the deployment fetch — the UI just falls back to GET /.
-export function parseRoutesManifest(source: Record<string, string>): FunctionRoute[] | undefined {
-  const raw = source['akash.json'];
-  if (!raw) return undefined;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== 'object') return undefined;
-  const list = (parsed as { routes?: unknown }).routes;
-  if (!Array.isArray(list)) return undefined;
-
-  const out: FunctionRoute[] = [];
-  for (const entry of list) {
-    if (!entry || typeof entry !== 'object') continue;
-    const e = entry as Record<string, unknown>;
-    const method = typeof e.method === 'string' ? e.method.toUpperCase() : '';
-    const path = typeof e.path === 'string' ? e.path : '';
-    if (!VALID_METHODS.has(method as RouteMethod)) continue;
-    if (!path.startsWith('/')) continue;
-    out.push({
-      method: method as RouteMethod,
-      path,
-      description: typeof e.description === 'string' ? e.description : undefined,
-      body: e.body,
-    });
-    if (out.length >= MAX_ROUTES) break;
-  }
-  return out.length > 0 ? out : undefined;
-}
