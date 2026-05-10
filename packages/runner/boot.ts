@@ -761,7 +761,7 @@ function spawnChild(dir: string): ChildHandle {
   if (!entry) {
     throw new Error(`no entry point found in ${dir}; tried ${ENTRY_CANDIDATES.join(', ')}`);
   }
-  console.log(`[spawn] bun ${entry} on port ${USER_PORT}`);
+  console.log(`[spawn] bun --preload /boot/preload.ts ${entry} on port ${USER_PORT}`);
   // Merge order matters: user vars first, then SDL-injected baseEnv, then
   // PORT. Later spreads win, so SDL system vars (FUNCTION_ID, RUNNER_TOKEN,
   // BACKEND_BASE_URL, …) and PORT cannot be shadowed by anything a user
@@ -769,7 +769,10 @@ function spawnChild(dir: string): ChildHandle {
   // of the API/DB-layer reserved-key check. PORT is rewritten to USER_PORT so
   // user code listens on the internal port; the runner's proxy on
   // EXTERNAL_PORT is the only thing the outside world reaches.
-  return Bun.spawn(['bun', entry], {
+  //
+  // --preload rewrites Bun.serve port args to PORT so legacy user code with
+  // a hardcoded `port: 3000` doesn't collide with the runner on 3000.
+  return Bun.spawn(['bun', '--preload', '/boot/preload.ts', entry], {
     cwd: dir,
     stdout: 'inherit',
     stderr: 'inherit',
