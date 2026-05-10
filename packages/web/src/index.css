@@ -44,9 +44,8 @@
   font-display: swap;
 }
 
-/* ─── Brand tokens (Akash design system) ───────────────────
-   Static brand foundation: Akash red, neutral scale, fonts, radii, motion.
-   Dark product overrides live in :root below. */
+/* ─── Brand foundation (theme-invariant) ───────────────────
+   Akash red, neutral anchors, fonts, radii, motion. Same in every theme. */
 :root {
   /* Akash red — punctuation only, never background */
   --akash-red:        #FF2903;
@@ -77,7 +76,15 @@
   --dur-base: 200ms;
   --dur-slow: 420ms;
 
-  /* ─── Dark product surface (calibrated for Akash Functions chrome) ─── */
+  /* Brand-fixed surfaces (same on either theme) */
+  --on-accent:    #FFFFFF;  /* text/glyphs on top of --accent */
+}
+
+/* ─── Dark product surface (default until data-theme is set) ─── */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
   --bg:           #000000;
   --bg-elev-1:    #0A0A0A;
   --bg-elev-2:    #111111;
@@ -93,6 +100,7 @@
   --fg-muted:     #ABABAF;
   --fg-subtle:    #86868B;
   --fg-faint:     #4A4A4F;
+  --on-fg:        #000000;  /* text on a --fg-colored surface */
 
   --accent:       #FF2903;
   --accent-soft:  #FF3B30;
@@ -100,10 +108,74 @@
 
   --ok:           #2BD79F;
   --ok-soft:      rgba(43, 215, 159, 0.12);
+  --ok-line:      rgba(43, 215, 159, 0.22);
   --warn:         #F2C760;
   --bid:          #8C8CFF;
 
   --grid-dot:     rgba(255, 255, 255, 0.045);
+
+  /* Cross-theme floating/scrim/scrollbar tokens */
+  --surface-floating:    #0A0A0A;
+  --scrollbar-thumb:     #2A2A2A;
+  --scrim:               rgba(0, 0, 0, 0.78);
+  --shadow-soft:         0 10px 30px rgba(0, 0, 0, 0.55);
+  --shadow-strong:       0 18px 40px rgba(0, 0, 0, 0.65);
+  --shadow-modal:        0 24px 60px rgba(0, 0, 0, 0.7);
+
+  --btn-primary-bg:        #FFFFFF;
+  --btn-primary-fg:        #000000;
+  --btn-primary-bg-hover:  #E8E8E8;
+
+  --editor-active-line:    rgba(255, 255, 255, 0.025);
+  --code-surface:          #08080B;
+}
+
+/* ─── Light product surface ─── */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg:           #FAFAF8;
+  --bg-elev-1:    #FFFFFF;
+  --bg-elev-2:    #F4F4F1;
+  --bg-elev-3:    #ECECE8;
+  --bg-elev-4:    #E2E2DD;
+
+  --line-soft:    #EFEFEC;
+  --line:         #E2E2DD;
+  --line-strong:  #D2D2CC;
+  --line-bold:    #B8B8B1;
+
+  --fg:           #0A0A0A;
+  --fg-muted:     #4A4A4F;
+  --fg-subtle:    #6A6A6F;
+  --fg-faint:     #ABABAF;
+  --on-fg:        #FFFFFF;
+
+  --accent:       #FF2903;
+  --accent-soft:  #FF3B30;
+  --accent-bg:    rgba(255, 41, 3, 0.08);
+
+  --ok:           #1A9968;
+  --ok-soft:      rgba(26, 153, 104, 0.10);
+  --ok-line:      rgba(26, 153, 104, 0.30);
+  --warn:         #B8881A;
+  --bid:          #5D5DD8;
+
+  --grid-dot:     rgba(0, 0, 0, 0.045);
+
+  --surface-floating:    #FFFFFF;
+  --scrollbar-thumb:     #C2C2BC;
+  --scrim:               rgba(20, 20, 20, 0.55);
+  --shadow-soft:         0 10px 30px rgba(20, 20, 20, 0.12);
+  --shadow-strong:       0 18px 40px rgba(20, 20, 20, 0.18);
+  --shadow-modal:        0 24px 60px rgba(20, 20, 20, 0.22);
+
+  --btn-primary-bg:        #0A0A0A;
+  --btn-primary-fg:        #FFFFFF;
+  --btn-primary-bg-hover:  #2A2A2A;
+
+  --editor-active-line:    rgba(0, 0, 0, 0.035);
+  --code-surface:          #F4F4F1;
 }
 
 /* ─── Tailwind theme — exposes design tokens as utilities ───
@@ -193,16 +265,16 @@
     cursor: pointer;
   }
   .btn:active { transform: scale(0.99); }
-  .btn-primary { background: #FFFFFF; color: #000; border-color: #FFFFFF; }
-  .btn-primary:hover { background: #E8E8E8; border-color: #E8E8E8; }
-  .btn-primary:disabled { background: #2A2A2A; color: var(--fg-faint); border-color: #2A2A2A; cursor: not-allowed; }
+  .btn-primary { background: var(--btn-primary-bg); color: var(--btn-primary-fg); border-color: var(--btn-primary-bg); }
+  .btn-primary:hover { background: var(--btn-primary-bg-hover); border-color: var(--btn-primary-bg-hover); }
+  .btn-primary:disabled { background: var(--bg-elev-4); color: var(--fg-faint); border-color: var(--bg-elev-4); cursor: not-allowed; }
   .btn-ghost { background: transparent; color: var(--fg); border-color: var(--line-strong); }
   .btn-ghost:hover { background: var(--bg-elev-3); border-color: var(--line-bold); }
   .btn-subtle { background: var(--bg-elev-2); color: var(--fg); border-color: var(--line); }
   .btn-subtle:hover { background: var(--bg-elev-3); border-color: var(--line-strong); }
   .btn-outline { background: transparent; color: var(--fg); border-color: var(--fg); }
-  .btn-outline:hover { background: var(--fg); color: #000; }
-  .btn-danger { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-outline:hover { background: var(--fg); color: var(--on-fg); }
+  .btn-danger { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
   .btn-danger:hover { background: var(--accent-soft); border-color: var(--accent-soft); }
   .btn-sm { padding: 6px 12px; font-size: 12px; }
   .btn-lg { padding: 12px 20px; font-size: 14px; }
@@ -218,7 +290,7 @@
     white-space: nowrap;
     letter-spacing: -0.005em;
   }
-  .pill-ok    { color: var(--ok); background: var(--ok-soft); border-color: rgba(43, 215, 159, 0.22); }
+  .pill-ok    { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-line); }
   .pill-mono  { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; }
   .pill-ghost { background: transparent; }
 
@@ -287,7 +359,7 @@
   /* ─── Modal shell + cards ─── */
   .modal-shell {
     position: fixed; inset: 0;
-    background: rgba(0, 0, 0, 0.78);
+    background: var(--scrim);
     backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
     display: flex; align-items: center; justify-content: center;
     z-index: 100;
@@ -298,7 +370,7 @@
     background: var(--bg-elev-1);
     border: 1px solid var(--line-strong);
     border-radius: 20px;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7);
+    box-shadow: var(--shadow-modal);
     max-height: 88vh; overflow: auto;
     animation: modal-in 220ms var(--ease-out);
   }
@@ -372,11 +444,11 @@
     bottom: calc(100% + 8px); left: 0;
     min-width: 240px;
     padding: 12px 14px;
-    background: #0A0A0A;
+    background: var(--surface-floating);
     border: 1px solid var(--line-strong);
     border-radius: 12px;
     font-size: 12px; color: var(--fg);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+    box-shadow: var(--shadow-soft);
     z-index: 50;
     animation: fade-up 140ms var(--ease-out);
   }
@@ -385,9 +457,9 @@
   .popover {
     position: absolute; top: calc(100% + 8px); right: 0;
     min-width: 280px;
-    background: #0A0A0A; border: 1px solid var(--line-strong);
+    background: var(--surface-floating); border: 1px solid var(--line-strong);
     border-radius: 14px; padding: 10px;
-    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.65);
+    box-shadow: var(--shadow-strong);
     z-index: 60;
     animation: fade-up 160ms var(--ease-out);
   }
@@ -403,14 +475,14 @@
   /* ─── Toast ─── */
   .toast {
     position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
-    background: #0A0A0A; color: var(--fg);
+    background: var(--surface-floating); color: var(--fg);
     border: 1px solid var(--line-strong);
     padding: 10px 16px; border-radius: 9999px;
     font-size: 13px; letter-spacing: -0.005em;
     display: inline-flex; align-items: center; gap: 10px;
     z-index: 200;
     animation: toast-in 200ms var(--ease-out);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-soft);
   }
 
   /* ─── Tab underline (animated) ─── */
@@ -423,7 +495,7 @@
   .code-block {
     font-family: var(--font-mono);
     font-size: 13px; line-height: 1.55;
-    color: #D5D5DC;
+    color: var(--fg);
     background: transparent;
     white-space: pre;
   }
@@ -446,7 +518,7 @@
   /* ─── Function logo block ─── */
   .fn-logo {
     width: 32px; height: 32px; border-radius: 8px;
-    background: #fff; color: #000;
+    background: var(--fg); color: var(--on-fg);
     display: inline-flex; align-items: center; justify-content: center;
     font-family: var(--font-serif); font-style: italic;
     font-weight: 400; font-size: 19px;
@@ -457,9 +529,9 @@
   /* ─── Avatar ─── */
   .avatar {
     width: 24px; height: 24px; border-radius: 9999px;
-    background: #fff;
+    background: var(--fg);
     display: inline-flex; align-items: center; justify-content: center;
-    color: #000; font-size: 11px; font-weight: 600;
+    color: var(--on-fg); font-size: 11px; font-weight: 600;
     letter-spacing: -0.01em;
   }
 
@@ -509,9 +581,9 @@
   .wordmark-dot { color: var(--accent); }
 
   /* ─── Quiet scrollbars ─── */
-  .scroll, .scroll * { scrollbar-width: thin; scrollbar-color: #2A2A2A transparent; }
+  .scroll, .scroll * { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
   .scroll::-webkit-scrollbar { width: 8px; height: 8px; }
-  .scroll::-webkit-scrollbar-thumb { background: #2A2A2A; border-radius: 8px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 8px; }
   .scroll::-webkit-scrollbar-track { background: transparent; }
 }
 
