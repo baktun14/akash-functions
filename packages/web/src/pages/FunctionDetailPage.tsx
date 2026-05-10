@@ -41,6 +41,20 @@ export function FunctionDetailPage(): ReactElement {
     }
   };
 
+  const handleRename = async (name: string) => {
+    if (!id) return;
+    const prev = svc;
+    if (!prev) return;
+    setLocal((cur) => cur.map((s) => (s.id === id ? { ...s, name } : s)));
+    try {
+      await api.rename(id, name);
+      refresh().catch(() => undefined);
+    } catch (err) {
+      setLocal((cur) => cur.map((s) => (s.id === id ? prev : s)));
+      alert(`Failed to rename function: ${(err as Error).message}`);
+    }
+  };
+
   // Delete = close lease (if any) + tombstone function. Removes it from the list.
   const handleDelete = async () => {
     if (!id) return;
@@ -93,6 +107,7 @@ export function FunctionDetailPage(): ReactElement {
       onRedeploy={handleRedeploy}
       onCloseDeployment={handleCloseDeployment}
       onDelete={handleDelete}
+      onRename={handleRename}
     />
   );
 }
