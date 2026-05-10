@@ -1,13 +1,14 @@
 // "Use this function" — language tabs with copy-pasteable snippets.
 //
-// Snippets are derived from the function's declared routes (an opt-in
-// `akash.json` manifest parsed by the server) when available. Without a
-// manifest we fall back to a single `GET /` example, which is always safe
-// because the runner serves user code at root.
+// Snippets are derived from the routes the server detected in the function's
+// source code. When no routes are detected (e.g. raw `Bun.serve` with manual
+// routing), we fall back to a single `GET /` example — always safe because
+// the runner serves user code at root.
 
 import { useState } from 'react';
 import type { FunctionRecord, FunctionRoute, RouteMethod } from '@shared/types';
 import { Icon } from '../icons';
+import { concretePath } from './routes';
 import { SnippetBlock, type SnippetLang } from './SnippetBlock';
 
 type Lang = 'curl' | 'js' | 'python';
@@ -85,12 +86,12 @@ export function UseThisFunction({
 
       {!routes?.length && (
         <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--fg-muted)' }}>
-          Your function defines its own routes — this shows the root path. Add
-          an{' '}
+          We didn't detect any routes in your code — this shows the root path.
+          Use a framework like Hono, Express, or Fastify (e.g.{' '}
           <code className="mono" style={{ fontSize: 11.5, color: 'var(--fg)' }}>
-            akash.json
-          </code>{' '}
-          to your source to declare more.
+            app.get("/path")
+          </code>
+          ) to surface them here.
         </div>
       )}
 
@@ -135,18 +136,6 @@ function buildSamples(url: string, routes: FunctionRoute[]): Record<Lang, string
     js:     buildJsSamples(url, routes),
     python: buildPythonSamples(url, routes),
   };
-}
-
-// `:id` and `{id}` placeholders get replaced in the rendered URL with a
-// concrete value, with an inline comment so users know to swap it. Real client
-// code obviously needs the real value.
-function concretePath(p: string): { url: string; hadParam: boolean } {
-  let hadParam = false;
-  const replaced = p.replace(/(:[a-zA-Z_][a-zA-Z0-9_]*|\{[^}]+\})/g, () => {
-    hadParam = true;
-    return '123';
-  });
-  return { url: replaced, hadParam };
 }
 
 function paramHint(originalPath: string): string {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { DeploymentRecord, DeploymentState, FunctionRecord } from '@shared/types';
 import { Icon } from '../../icons';
 import { api } from '../../../lib/api';
+import { RoutesPanel } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
 const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
@@ -279,6 +280,10 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
         >
           Couldn't submit update: {updateError}
         </div>
+      )}
+
+      {publicUrl && dep?.routes && dep.routes.length > 0 && (
+        <RoutesPanel url={publicUrl} routes={dep.routes} />
       )}
 
       {/* Active deployment */}
