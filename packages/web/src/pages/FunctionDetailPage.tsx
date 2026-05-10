@@ -101,6 +101,12 @@ export function FunctionDetailPage(): ReactElement {
 
   return (
     <ServicePanel
+      // Remount on function change so the in-panel tab state resets to the
+      // default (Deployments). Without this, navigating between functions
+      // (create, redeploy, list-click) leaves the previously-active tab
+      // selected on the new function — confusing because the user just landed
+      // on a different deployment and expects to see its status.
+      key={svc.id}
       svc={svc}
       session={session}
       onClose={() => navigate('/functions')}
