@@ -170,22 +170,25 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           ? 'var(--warn, #f5a524)'
           : 'var(--fg-muted)';
 
+  // The header pill (`● Online`) already conveys a healthy state, so when
+  // everything is fine the card stays calm and neutral. Tone only escalates
+  // the card chrome when there's something the header pill can't express.
   const containerBorder =
-    meta.tone === 'ok'
-      ? 'rgba(43,215,159,0.18)'
-      : meta.tone === 'error'
-        ? 'rgba(229,72,77,0.25)'
-        : meta.tone === 'warn'
-          ? 'rgba(245,165,36,0.25)'
-          : 'var(--line)';
+    meta.tone === 'error'
+      ? 'rgba(229,72,77,0.25)'
+      : meta.tone === 'warn'
+        ? 'rgba(245,165,36,0.25)'
+        : 'var(--line)';
   const containerBg =
-    meta.tone === 'ok'
-      ? 'rgba(43,215,159,0.04)'
-      : meta.tone === 'error'
-        ? 'rgba(229,72,77,0.05)'
-        : meta.tone === 'warn'
-          ? 'rgba(245,165,36,0.05)'
-          : 'var(--bg-elev-2)';
+    meta.tone === 'error'
+      ? 'rgba(229,72,77,0.05)'
+      : meta.tone === 'warn'
+        ? 'rgba(245,165,36,0.05)'
+        : 'var(--bg-elev-2)';
+
+  // Show the inner status row only when it adds information beyond the header
+  // pill — i.e. transient/error states or "live but ingress not yet probed".
+  const showStatusRow = meta.tone !== 'ok' || !reachable;
 
   return (
     <div>
@@ -283,117 +286,86 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
         style={{
           border: `1px solid ${containerBorder}`,
           background: containerBg,
-          borderRadius: 12,
-          padding: 16,
+          borderRadius: 10,
+          padding: '12px 14px',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <span
-            className={meta.pillClass}
-            style={{
-              fontSize: 10,
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-              padding: '4px 10px',
-              color: toneColor,
-              borderColor: containerBorder,
-            }}
-          >
-            {meta.label}
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Icon name="box" size={14} color="var(--fg-muted)" />
           <div
+            className="mono"
             style={{
-              width: 28,
-              height: 28,
-              borderRadius: 7,
-              background: 'var(--bg-elev-3)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              border: '1px solid var(--line)',
+              flex: 1,
+              minWidth: 0,
+              fontSize: 12.5,
+              color: 'var(--fg)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
             }}
           >
-            <Icon name="box" size={14} color="var(--fg-muted)" />
+            {svc.image}
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              className="mono"
-              style={{ fontSize: 12.5, color: 'var(--fg)', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          {dep?.dseq && (
+            <a
+              href={`https://console.akash.network/deployments/${dep.dseq}`}
+              target="_blank"
+              rel="noreferrer"
+              title={`View deployment on Akash Console (dseq ${dep.dseq})`}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 10px',
+                fontSize: 12,
+                background: 'var(--bg-elev-3)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--fg)',
+                textDecoration: 'none',
+                whiteSpace: 'nowrap',
+              }}
             >
-              {svc.image}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginTop: 2 }}>
-              {dep?.dseq ? (
-                <a
-                  href={`https://console.akash.network/deployments/${dep.dseq}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  title="View deployment on Akash Console"
-                  style={{
-                    color: 'var(--fg-muted)',
-                    textDecoration: 'none',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                  }}
-                >
-                  dseq {dep.dseq}
-                  <Icon name="external" size={10} />
-                </a>
-              ) : (
-                'no deployment yet'
-              )}
-              {dep?.provider ? ` · ${truncate(dep.provider)}` : ''}
-            </div>
-          </div>
+              View on Akash Console
+              <Icon name="external" size={11} color="var(--fg-muted)" />
+            </a>
+          )}
         </div>
 
-        <div
-          style={{
-            marginTop: 12,
-            padding: '8px 12px',
-            borderRadius: 8,
-            background: 'var(--bg-elev-2)',
-            border: '1px solid var(--line)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 14,
-            fontSize: 12.5,
-          }}
-        >
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--fg)' }}>
-            {meta.tone === 'ok' ? (
-              <Icon name="check" size={12} color="var(--ok)" />
-            ) : meta.tone === 'error' ? (
-              <Icon name="x" size={12} color={toneColor} />
-            ) : (
-              <Icon name="box" size={12} color={toneColor} />
-            )}
-            <span style={{ fontWeight: 500, color: toneColor }}>{meta.label}</span>
-          </span>
-          <span style={{ color: 'var(--fg-muted)' }}>·</span>
-          <span style={{ color: 'var(--fg)' }}>{meta.body}</span>
-        </div>
-
-        {meta.tone === 'ok' && reachable && !dep?.errorMessage && (
+        {showStatusRow && (
           <div
             style={{
               marginTop: 12,
-              padding: '10px 12px',
-              background: 'rgba(43,215,159,0.06)',
-              border: '1px solid rgba(43,215,159,0.2)',
+              padding: '8px 12px',
               borderRadius: 8,
+              background: 'var(--bg-elev-2)',
+              border: '1px solid var(--line)',
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 14,
+              fontSize: 12.5,
             }}
           >
-            <Icon name="check" size={14} color="var(--ok)" />
-            <span style={{ fontSize: 13, color: 'var(--ok)', fontWeight: 500 }}>
-              Deployment successful
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--fg)' }}>
+              {meta.tone === 'ok' ? (
+                <Icon name="refresh" size={12} color="var(--warn, #f5a524)" className="spin" />
+              ) : meta.tone === 'error' ? (
+                <Icon name="x" size={12} color={toneColor} />
+              ) : (
+                <Icon name="box" size={12} color={toneColor} />
+              )}
+              <span style={{ fontWeight: 500, color: meta.tone === 'ok' ? 'var(--warn, #f5a524)' : toneColor }}>
+                {meta.tone === 'ok' && !reachable ? 'Waiting for ingress' : meta.label}
+              </span>
             </span>
-            <span style={{ color: 'var(--fg-subtle)' }}>·</span>
-            <span style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>ready to receive traffic</span>
+            <span style={{ color: 'var(--fg-muted)' }}>·</span>
+            <span style={{ color: 'var(--fg)' }}>
+              {meta.tone === 'ok' && !reachable
+                ? publicUrl
+                  ? 'probing URL until it serves traffic…'
+                  : 'lease is live, URL pending…'
+                : meta.body}
+            </span>
           </div>
         )}
 
@@ -429,30 +401,6 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           </div>
         )}
 
-        {meta.tone === 'ok' && !reachable && (
-          <div
-            style={{
-              marginTop: 12,
-              padding: '10px 12px',
-              background: 'rgba(245,165,36,0.06)',
-              border: '1px solid rgba(245,165,36,0.25)',
-              borderRadius: 8,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-            }}
-          >
-            <Icon name="refresh" size={14} color="var(--warn, #f5a524)" className="spin" />
-            <span style={{ fontSize: 13, color: 'var(--warn, #f5a524)', fontWeight: 500 }}>
-              Waiting for ingress
-            </span>
-            <span style={{ color: 'var(--fg-subtle)' }}>·</span>
-            <span style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>
-              {publicUrl ? 'probing URL until it serves traffic…' : 'lease is live, URL pending…'}
-            </span>
-          </div>
-        )}
-
         {meta.tone === 'error' && dep?.errorMessage && (
           <div
             style={{
@@ -474,7 +422,9 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
         )}
       </div>
 
-      {meta.tone === 'ok' && reachable && publicUrl && <UseThisFunction svc={svc} url={publicUrl} />}
+      {meta.tone === 'ok' && reachable && publicUrl && (
+        <UseThisFunction svc={svc} url={publicUrl} routes={dep?.routes} />
+      )}
     </div>
   );
 }

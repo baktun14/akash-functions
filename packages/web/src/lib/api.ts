@@ -78,6 +78,18 @@ export function tokensToSource(code: TokenLine[]): string {
   return code.map((line) => line.map((tok) => tok[1]).join('')).join('\n');
 }
 
+// Builds the path → contents map sent to the deploy endpoint. Always includes
+// the entry file; templates that ship an opt-in routes manifest also get an
+// `akash.json` written at the source root so the server can surface the
+// declared routes on the deployment record.
+function buildSourceMap(sample: CodeSample): Record<string, string> {
+  const map: Record<string, string> = {
+    'src/index.ts': sample.source ?? tokensToSource(sample.code),
+  };
+  if (sample.manifest) map['akash.json'] = sample.manifest;
+  return map;
+}
+
 const DEFAULT_SERVICES: FunctionRecord[] = [
   {
     id: 'fn-1',
@@ -201,7 +213,7 @@ class MockApi implements ApiClient {
       preset: 'rest',
       isLatest: true,
       deploymentCount: 1,
-      source: { 'src/index.ts': sample.source ?? tokensToSource(sample.code) },
+      source: buildSourceMap(sample),
       resources: { cpu: sample.res.cpu, memory: sample.res.mem, storage: '1Gi' },
       envVars: {},
     };
@@ -474,7 +486,7 @@ class LiveApi implements ApiClient {
         name: sample.name,
         preset: 'rest',
         prompt: sample.prompt,
-        source: { 'src/index.ts': sample.source ?? tokensToSource(sample.code) },
+        source: buildSourceMap(sample),
         resources: {
           cpu: sample.res.cpu,
           memory: sample.res.mem,
