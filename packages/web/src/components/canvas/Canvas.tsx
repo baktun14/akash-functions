@@ -146,6 +146,12 @@ function FilterButton({
   );
 }
 
+type ItemStatus =
+  | { kind: 'pending' }
+  | { kind: 'running' }
+  | { kind: 'ok' }
+  | { kind: 'failed'; error: string };
+
 function OutdatedRunnerBanner({
   outdated,
   onDone,
@@ -154,92 +160,258 @@ function OutdatedRunnerBanner({
   onDone?: () => void | Promise<void>;
 }) {
   const [state, setState] = useState<'idle' | 'running' | 'done' | 'partial'>('idle');
-  const [progress, setProgress] = useState({ ok: 0, failed: 0 });
+  const [items, setItems] = useState<Record<string, ItemStatus>>({});
 
   // Runs in-place updates one at a time. Sequential because Akash's MsgUpdateDeployment
   // already serializes per dseq, but more importantly so a bad function's failure
   // surfaces immediately rather than after the whole batch lands.
-  const onUpdateAll = async () => {
+  const runUpdates = async (targets: FunctionRecord[]) => {
     if (state === 'running') return;
+    if (targets.length === 0) return;
     setState('running');
-    setProgress({ ok: 0, failed: 0 });
-    let ok = 0;
+    const next: Record<string, ItemStatus> = {};
+    for (const svc of targets) next[svc.id] = { kind: 'pending' };
+    setItems(next);
+
     let failed = 0;
-    for (const svc of outdated) {
+    for (const svc of targets) {
+      setItems((cur) => ({ ...cur, [svc.id]: { kind: 'running' } }));
       if (!svc.latestDeploymentId) {
         failed += 1;
-        setProgress({ ok, failed });
+        setItems((cur) => ({
+          ...cur,
+          [svc.id]: { kind: 'failed', error: 'No deployment id on record — refresh and retry.' },
+        }));
         continue;
       }
       try {
         await api.updateRunnerImage(svc.id, svc.latestDeploymentId);
-        ok += 1;
-      } catch {
+        setItems((cur) => ({ ...cur, [svc.id]: { kind: 'ok' } }));
+      } catch (err) {
         failed += 1;
+        setItems((cur) => ({
+          ...cur,
+          [svc.id]: { kind: 'failed', error: (err as Error).message || 'Unknown error' },
+        }));
       }
-      setProgress({ ok, failed });
     }
     setState(failed === 0 ? 'done' : 'partial');
     if (onDone) await onDone();
   };
 
+  const onUpdateAll = () => void runUpdates(outdated);
+  const onRetryFailed = () => {
+    const failedIds = new Set(
+      Object.entries(items)
+        .filter(([, s]) => s.kind === 'failed')
+        .map(([id]) => id)
+    );
+    void runUpdates(outdated.filter((s) => failedIds.has(s.id)));
+  };
+
+  const okCount = Object.values(items).filter((s) => s.kind === 'ok').length;
+  const failedCount = Object.values(items).filter((s) => s.kind === 'failed').length;
+  const settled = okCount + failedCount;
+  const total = state === 'running' ? Object.keys(items).length : outdated.length;
+  // Progress bar still nudges off zero on the first tick so the user gets an
+  // immediate visual signal that something happened.
+  const pct = total === 0 ? 0 : Math.max(2, (settled / total) * 100);
+
+  const headerIcon =
+    state === 'running'
+      ? { name: 'spinner', color: 'var(--warn, #f5a524)', spin: true }
+      : state === 'done'
+        ? { name: 'check', color: 'var(--ok, #30a46c)', spin: false }
+        : { name: 'arrowUp', color: 'var(--warn, #f5a524)', spin: false };
+
   return (
     <div
       style={{
         marginTop: 14,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
         padding: '10px 14px',
-        background: 'rgba(245,165,36,0.08)',
-        border: '1px solid rgba(245,165,36,0.35)',
+        background:
+          state === 'done' ? 'rgba(48,164,108,0.08)' : 'rgba(245,165,36,0.08)',
+        border:
+          state === 'done'
+            ? '1px solid rgba(48,164,108,0.35)'
+            : '1px solid rgba(245,165,36,0.35)',
         borderRadius: 10,
         fontSize: 13,
       }}
     >
-      <Icon name="arrowUp" size={14} color="var(--warn, #f5a524)" />
-      <span style={{ color: 'var(--fg)' }}>
-        {state === 'running' ? (
-          <>
-            Updating runners… <span style={{ color: 'var(--fg-muted)' }}>
-              {progress.ok + progress.failed} / {outdated.length}
-            </span>
-          </>
-        ) : state === 'done' ? (
-          <>Updated {outdated.length} runner{outdated.length === 1 ? '' : 's'}.</>
-        ) : state === 'partial' ? (
-          <>
-            Updated {progress.ok}, {progress.failed} failed — check each function for details.
-          </>
-        ) : (
-          <>
-            {outdated.length} function{outdated.length === 1 ? '' : 's'} running an outdated
-            runner. Apply the in-place update to enforce protected routes.
-          </>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <Icon
+          name={headerIcon.name}
+          size={14}
+          color={headerIcon.color}
+          className={headerIcon.spin ? 'spin' : undefined}
+        />
+        <span style={{ color: 'var(--fg)' }}>
+          {state === 'running' ? (
+            <>
+              Updating runners…{' '}
+              <span style={{ color: 'var(--fg-muted)' }}>
+                {settled} / {total}
+              </span>
+            </>
+          ) : state === 'done' ? (
+            <>Updated {total} runner{total === 1 ? '' : 's'}.</>
+          ) : state === 'partial' ? (
+            <>
+              Updated {okCount}, {failedCount} failed — see below.
+            </>
+          ) : (
+            <>
+              {outdated.length} function{outdated.length === 1 ? '' : 's'} running an outdated
+              runner. Apply the in-place update to enforce protected routes.
+            </>
+          )}
+        </span>
+        <div style={{ flex: 1 }} />
+        {state === 'idle' && (
+          <button
+            type="button"
+            onClick={onUpdateAll}
+            className="btn btn-sm"
+            style={{
+              background: 'var(--warn, #f5a524)',
+              color: 'var(--bg)',
+              border: 'none',
+              fontWeight: 500,
+              gap: 6,
+            }}
+          >
+            <Icon name="arrowUp" size={11} />
+            Update all
+          </button>
         )}
-      </span>
-      <div style={{ flex: 1 }} />
-      {state !== 'done' && state !== 'partial' && (
-        <button
-          type="button"
-          onClick={onUpdateAll}
-          disabled={state === 'running'}
-          className="btn btn-sm"
+        {state === 'running' && (
+          <button
+            type="button"
+            disabled
+            className="btn btn-sm"
+            style={{
+              background: 'var(--bg-elev-3)',
+              color: 'var(--fg-muted)',
+              border: '1px solid var(--line)',
+              fontWeight: 500,
+              gap: 6,
+              opacity: 0.55,
+              cursor: 'not-allowed',
+            }}
+          >
+            <Icon name="spinner" size={11} className="spin" />
+            Updating…
+          </button>
+        )}
+        {state === 'partial' && failedCount > 0 && (
+          <button
+            type="button"
+            onClick={onRetryFailed}
+            className="btn btn-sm"
+            style={{
+              background: 'var(--warn, #f5a524)',
+              color: 'var(--bg)',
+              border: 'none',
+              fontWeight: 500,
+              gap: 6,
+            }}
+          >
+            <Icon name="refresh" size={11} />
+            Retry failed
+          </button>
+        )}
+      </div>
+
+      {state === 'running' && (
+        <div
+          aria-hidden="true"
           style={{
-            background: 'var(--warn, #f5a524)',
-            color: 'var(--bg)',
-            border: 'none',
-            fontWeight: 500,
-            gap: 6,
-            opacity: state === 'running' ? 0.7 : 1,
-            cursor: state === 'running' ? 'progress' : 'pointer',
+            marginTop: 10,
+            height: 3,
+            borderRadius: 999,
+            background: 'rgba(245,165,36,0.18)',
+            overflow: 'hidden',
           }}
         >
-          <Icon name="refresh" size={11} className={state === 'running' ? 'spin' : undefined} />
-          {state === 'running' ? 'Updating…' : 'Update all'}
-        </button>
+          <div
+            style={{
+              width: `${pct}%`,
+              height: '100%',
+              background: 'var(--warn, #f5a524)',
+              transition: 'width 240ms var(--ease-out)',
+            }}
+          />
+        </div>
+      )}
+
+      {(state === 'running' || state === 'partial') && (
+        <ul
+          style={{
+            margin: '12px 0 0',
+            padding: 0,
+            listStyle: 'none',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+          }}
+        >
+          {outdated.map((svc) => {
+            const s = items[svc.id];
+            if (!s) return null;
+            return <BulkItemRow key={svc.id} name={svc.name} status={s} />;
+          })}
+        </ul>
       )}
     </div>
+  );
+}
+
+function BulkItemRow({ name, status }: { name: string; status: ItemStatus }) {
+  const tone =
+    status.kind === 'ok'
+      ? { icon: 'check', color: 'var(--ok, #30a46c)', label: 'Done', spin: false }
+      : status.kind === 'failed'
+        ? { icon: 'x', color: 'var(--err, #e5484d)', label: 'Failed', spin: false }
+        : status.kind === 'running'
+          ? { icon: 'spinner', color: 'var(--warn, #f5a524)', label: 'Updating…', spin: true }
+          : { icon: 'cron', color: 'var(--fg-muted)', label: 'Pending', spin: false };
+
+  return (
+    <li
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 8,
+        padding: '6px 10px',
+        background: 'var(--bg-elev-2)',
+        border: '1px solid var(--line)',
+        borderRadius: 6,
+        fontSize: 12.5,
+      }}
+    >
+      <span style={{ display: 'inline-flex', alignItems: 'center', paddingTop: 2 }}>
+        <Icon name={tone.icon} size={12} color={tone.color} className={tone.spin ? 'spin' : undefined} />
+      </span>
+      <span style={{ color: 'var(--fg)', minWidth: 0, flex: 1, overflow: 'hidden' }}>
+        <span style={{ fontWeight: 500 }}>{name}</span>
+        <span style={{ color: 'var(--fg-muted)' }}> · {tone.label}</span>
+        {status.kind === 'failed' && (
+          <div
+            className="mono"
+            style={{
+              marginTop: 4,
+              fontSize: 11.5,
+              color: 'var(--fg-muted)',
+              wordBreak: 'break-word',
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            {status.error}
+          </div>
+        )}
+      </span>
+    </li>
   );
 }
 
