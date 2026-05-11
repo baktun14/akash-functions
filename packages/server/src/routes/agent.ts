@@ -28,6 +28,7 @@ function buildSystemPrompt(context: AgentChatContext): string {
     '- Use Hono for HTTP, Croner for scheduled tasks.\n' +
     '- The entry file is src/index.ts and must `export default app` (a Hono app) or `export default { fetch }`.\n' +
     '- Read env vars via `process.env` (or `Bun.env`); AKASHML_API_KEY is injected when the function needs AkashML.\n' +
+    `- AkashML integration: the ONLY correct base URL is "${akashmlApi.base}". Never use any other host (chatapi.akash.network, chat-api.akash.network, api.openai.com, etc.) — those will not work. Always initialize as: \`new OpenAI({ apiKey: process.env.AKASHML_API_KEY, baseURL: "${akashmlApi.base}" })\`.\n` +
     '- When the user asks for code, emit ONE fenced ```ts code block that is the full file contents — no diffs, no partial snippets. Keep prose outside the block short.\n' +
     '- Do not invent dependencies; stick to hono, croner, openai (for AkashML), and the standard Bun/Node runtime.';
 
