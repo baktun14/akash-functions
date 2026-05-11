@@ -7,13 +7,13 @@ import type {
 } from '@shared/types';
 import { Icon } from '../../icons';
 import { api } from '../../../lib/api';
+import { useReachable } from '../../../lib/useReachable';
 import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
 const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
 const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
-const REACHABILITY_POLL_MS = 2000;
 
 function useDeployment(
   fnId: string,
@@ -60,38 +60,6 @@ function useDeployment(
   }, [fnId, depId]);
 
   return { dep, refresh };
-}
-
-// Akash reports `live` as soon as the lease's manifest is accepted, but the
-// ingress can take another 10–30s to actually serve traffic. Probe the URL
-// from the browser until it stops erroring (any HTTP response counts — even
-// 404 means the ingress resolved).
-function useReachable(url: string | null): boolean {
-  const [reachable, setReachable] = useState(false);
-
-  useEffect(() => {
-    setReachable(false);
-    if (!url) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const probe = async () => {
-      try {
-        await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
-        if (!cancelled) setReachable(true);
-      } catch {
-        if (!cancelled) timer = setTimeout(probe, REACHABILITY_POLL_MS);
-      }
-    };
-    void probe();
-
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [url]);
-
-  return reachable;
 }
 
 type StateMeta = {
@@ -185,7 +153,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
     : null;
   // Only probe once Akash says the lease is live — otherwise we'd just be
   // burning cycles on a URL that doesn't exist yet.
-  const reachable = useReachable(dep?.state === 'live' ? publicUrl : null);
+  const reachable = useReachable(svc.id, dep?.state === 'live');
 
   const toneColor =
     meta.tone === 'ok'
@@ -222,8 +190,11 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
 
   return (
     <div>
-      {/* URL bar — only shown once Akash assigns a real public URL. */}
-      {publicUrl && (
+      {/* URL bar — only shown once the ingress is actually serving traffic.
+          Akash flips state to 'live' before the upstream container is ready,
+          so we wait for the server-side probe to succeed before exposing the
+          link (otherwise users click through to a 503). */}
+      {publicUrl && reachable && (
         <div
           style={{
             display: 'flex',
@@ -352,7 +323,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
         </div>
       )}
 
-      {publicUrl && dep?.routes && dep.routes.length > 0 && (
+      {publicUrl && reachable && dep?.routes && dep.routes.length > 0 && (
         <RoutesPanel
           url={publicUrl}
           routes={dep.routes}
