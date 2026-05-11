@@ -53,25 +53,31 @@ export function AgentPanel({
   }, [onClose]);
 
   // Auto-dispatch a prompt requested from outside the panel (e.g. the
-  // FunctionEditor's "Quick fix with agent" button). We always clear the
-  // pending prompt so we don't re-fire on unrelated re-renders, even if we
-  // bailed out because the chat is busy or AkashML isn't connected — the
-  // user will see the existing UI states (composer disabled / connect chip)
-  // and can retry manually.
+  // FunctionEditor's "Quick fix with agent" button).
+  //
+  // The ref dedupe guards against React StrictMode running this effect twice
+  // on mount with the same captured `pendingPrompt`. Without it, both runs
+  // see the same closure (pendingPrompt non-null, chat.pending=false because
+  // the second run uses the same captured snapshot), and chat.send fires
+  // twice — two SSE streams race to append into the same assistant message
+  // and produce garbled, interleaved output.
+  const consumedPromptRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!pendingPrompt) return;
-    if (chat.pending) {
-      onPendingPromptConsumed?.();
+    if (!pendingPrompt) {
+      consumedPromptRef.current = null;
       return;
     }
-    if (!conn) {
+    if (consumedPromptRef.current === pendingPrompt) return;
+    consumedPromptRef.current = pendingPrompt;
+
+    if (chat.pending || !conn) {
       onPendingPromptConsumed?.();
       return;
     }
     void chat.send(pendingPrompt);
     onPendingPromptConsumed?.();
-    // chat.send and onPendingPromptConsumed are stable per render; we
-    // intentionally depend only on the prompt identity here.
+    // chat.send / onPendingPromptConsumed change identity on every render;
+    // we intentionally key the effect on the prompt itself plus the ref dedupe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPrompt]);
 

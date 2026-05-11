@@ -19,8 +19,13 @@ export type StartupIssue = {
 const DOUBLE_SERVER_MESSAGE =
   'This file calls Bun.serve(…) AND has an `export default`. Bun will auto-serve the default export on top of the explicit Bun.serve, causing EADDRINUSE on port 3001 at startup. Remove one — the canonical pattern is to keep Bun.serve(…) and delete the default export.';
 
+// IMPORTANT: do not include literal backticks (`) in this string. The agent
+// chat surface renders user turns as plain text, but the model can mis-parse
+// triple-backtick sequences in its own input as fence delimiters and emit
+// stray closing fences that break our code-block parser. Refer to symbols by
+// their bare names.
 const DOUBLE_SERVER_AGENT_PROMPT =
-  'The current file has a server-start conflict: it calls `Bun.serve(...)` AND has an `export default app` (or `export default { fetch }`). Bun auto-serves the default export, which collides with the explicit Bun.serve on port 3001 and crashes the function at startup with EADDRINUSE. Please rewrite the file to remove the `export default` line and keep the `Bun.serve({ port: import.meta.env.PORT ?? 3000, fetch: app.fetch })` call. Emit the full corrected file in a single fenced ```ts block.';
+  'The current file has a server-start conflict: it calls Bun.serve(...) AND has an "export default app" (or "export default { fetch }"). Bun auto-serves the default export, which collides with the explicit Bun.serve on port 3001 and crashes the function at startup with EADDRINUSE. Please rewrite the file to remove the "export default" line and keep the Bun.serve({ port: import.meta.env.PORT ?? 3000, fetch: app.fetch }) call. Reply with the full corrected file as one TypeScript code block.';
 
 export function detectStartupIssue(code: string): StartupIssue | null {
   const hasBunServe = /\bBun\.serve\s*\(/.test(code);
