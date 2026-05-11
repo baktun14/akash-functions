@@ -12,19 +12,25 @@ const POLL_INTERVAL_MS = 2000;
 //
 // Returns `true` when there's nothing to probe — `active` is false, or this
 // fnId was already confirmed reachable earlier in the session. Otherwise
-// starts at `false` and polls until the server confirms the ingress is
-// reachable, then stops. Callers should pass `active=true` only when a deploy
-// has been initiated in the current session (see sessionDeploys); for already-
-// live functions loaded from the server we trust the status and skip probing.
+// returns `false` until the server confirms the ingress is reachable, then
+// stops. Callers should pass `active=true` only when a deploy has been
+// initiated in the current session (see sessionDeploys); for already-live
+// functions loaded from the server we trust the status and skip probing.
+//
+// Reachability is *derived per render* from the module-scope sessionDeploys
+// set rather than mirrored into React state. Mirroring caused a single-frame
+// flicker on the bidding → live transition: the previous render had
+// `reachable=true` (carried over from when active=false), and the new render
+// saw `active=true` but kept the stale true until useEffect committed
+// `setReachable(false)` on the next tick. The result was one frame of "live +
+// reachable" UI (URL bar, routes panel) appearing between "Starting" and
+// "Finishing up". The forceRender below is purely a bridge that lets us
+// notify React when sessionDeploys.confirm() flips the underlying set.
 export function useReachable(fnId: string, active: boolean): boolean {
-  const [reachable, setReachable] = useState(() => !active || sessionDeploys.confirmed(fnId));
+  const [, forceRender] = useState(0);
 
   useEffect(() => {
-    if (!active || sessionDeploys.confirmed(fnId)) {
-      setReachable(true);
-      return;
-    }
-    setReachable(false);
+    if (!active || sessionDeploys.confirmed(fnId)) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -34,7 +40,7 @@ export function useReachable(fnId: string, active: boolean): boolean {
         if (cancelled) return;
         if (ok) {
           sessionDeploys.confirm(fnId);
-          setReachable(true);
+          forceRender((n) => n + 1);
           return;
         }
       } catch {
@@ -50,5 +56,5 @@ export function useReachable(fnId: string, active: boolean): boolean {
     };
   }, [fnId, active]);
 
-  return reachable;
+  return !active || sessionDeploys.confirmed(fnId);
 }
