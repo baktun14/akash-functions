@@ -510,6 +510,22 @@
   .tok-cmd  { color: #C792EA; font-weight: 500; }
   .tok-arg  { color: #C3E88D; }
   .tok-flag { color: #82AAFF; }
+
+  /* The Material-Theme-ish palette above is tuned for the dark code surface
+     (#08080B). Against the light theme's near-white #F4F4F1 those values
+     turn neon (especially the green string token). Substitute calmer
+     darker hues — One Light's palette gives ~5:1+ contrast and reads as
+     "syntax" rather than "highlighter pen". */
+  :root[data-theme='light'] .tok-c    { color: #6A737D; }
+  :root[data-theme='light'] .tok-k    { color: #A626A4; }
+  :root[data-theme='light'] .tok-s    { color: #50A14F; }
+  :root[data-theme='light'] .tok-n    { color: #986801; }
+  :root[data-theme='light'] .tok-f    { color: #4078F2; }
+  :root[data-theme='light'] .tok-p    { color: #383A42; }
+  :root[data-theme='light'] .tok-t    { color: #C18401; }
+  :root[data-theme='light'] .tok-cmd  { color: #A626A4; }
+  :root[data-theme='light'] .tok-arg  { color: #50A14F; }
+  :root[data-theme='light'] .tok-flag { color: #4078F2; }
   .ln {
     display: inline-block; width: 28px; text-align: right;
     margin-right: 16px; color: var(--fg-faint); user-select: none;

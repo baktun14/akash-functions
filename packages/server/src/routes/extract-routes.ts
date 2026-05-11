@@ -136,7 +136,7 @@ function extractBunServeRoutes(source: string): FunctionRoute[] {
 function extractHandlerBodyShape(
   source: string,
   startAfterPath: number,
-): Record<string, string> | undefined {
+): Record<string, unknown> | undefined {
   // Advance past whitespace and the `,` separating path from handler.
   let i = startAfterPath;
   while (i < source.length && /\s/.test(source[i] ?? '')) i++;
@@ -162,7 +162,7 @@ function extractHandlerBodyShape(
 function bunServeMethodHandlerBodyShape(
   objBody: string,
   method: RouteMethod,
-): Record<string, string> | undefined {
+): Record<string, unknown> | undefined {
   const keyRe = new RegExp(String.raw`\b${method}\s*:`, 'g');
   const m = keyRe.exec(objBody);
   if (!m) return undefined;
@@ -194,11 +194,18 @@ function findHandlerBraceIndex(src: string, from: number): number {
   return -1;
 }
 
+// Matches `*.completions.create(` — the OpenAI/AkashML chat-completions
+// call. Used to detect when a `messages` body key is the OpenAI chat shape
+// (array of {role, content}) rather than an opaque string.
+const COMPLETIONS_CREATE_RE = /\.completions\.create\s*\(/;
+
 // Collects the body keys referenced inside a handler block. Looks for:
 //   const { a, b: rename } = await c.req.json()  → ['a', 'b']
 //   const body = await c.req.json(); body.prompt  → ['prompt']
-// Returns undefined when no shape can be inferred.
-function bodyKeysFromHandler(handler: string): Record<string, string> | undefined {
+// Returns undefined when no shape can be inferred. Keys that look like the
+// canonical OpenAI `messages` field get an array-of-objects placeholder so
+// the auto-generated curl example is a valid request, not a 400.
+function bodyKeysFromHandler(handler: string): Record<string, unknown> | undefined {
   const keys = new Set<string>();
 
   DESTRUCTURE_JSON_RE.lastIndex = 0;
@@ -247,8 +254,19 @@ function bodyKeysFromHandler(handler: string): Record<string, string> | undefine
   }
 
   if (keys.size === 0) return undefined;
-  const shape: Record<string, string> = {};
-  for (const k of keys) shape[k] = '...';
+  const callsCompletions = COMPLETIONS_CREATE_RE.test(handler);
+  const shape: Record<string, unknown> = {};
+  for (const k of keys) {
+    // `messages` forwarded to chat.completions.create is the OpenAI chat
+    // shape — emit a runnable example so the curl tab doesn't suggest a
+    // string. Any other key (or `messages` in a non-completions context)
+    // falls back to the generic `"..."` placeholder.
+    if (k === 'messages' && callsCompletions) {
+      shape[k] = [{ role: 'user', content: 'Hello' }];
+    } else {
+      shape[k] = '...';
+    }
+  }
   return shape;
 }
 
