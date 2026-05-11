@@ -6,7 +6,6 @@ import type {
   FunctionRecord,
   CodeSample,
   AkashMLConnection,
-  UsageInfo,
   DeploymentRecord,
   TokenLine,
   FunctionVersionSummary,
@@ -118,8 +117,6 @@ export interface ApiClient {
     req: AgentChatRequest,
     signal?: AbortSignal
   ): AsyncIterable<AgentChatChunk>;
-
-  getUsage(): Promise<UsageInfo>;
 }
 
 // CodeSample.code is tokenized for the template preview. Concatenating the
@@ -615,10 +612,6 @@ class MockApi implements ApiClient {
     }
     yield { type: 'done' };
   }
-
-  async getUsage(): Promise<UsageInfo> {
-    return { usd: 5.04, act: 12.4, burnRatePerDay: 0.17 };
-  }
 }
 
 class LiveApi implements ApiClient {
@@ -938,10 +931,6 @@ class LiveApi implements ApiClient {
     } finally {
       reader.releaseLock();
     }
-  }
-
-  async getUsage(): Promise<UsageInfo> {
-    return this.req<UsageInfo>('/api/usage');
   }
 }
 

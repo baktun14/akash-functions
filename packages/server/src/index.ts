@@ -14,7 +14,6 @@ import { deployRouter } from './routes/deploy';
 import { functionsRouter } from './routes/functions';
 import { keysRouter } from './routes/keys';
 import { runnerRouter } from './routes/runner';
-import { usageRouter } from './routes/usage';
 import { log } from './lib/log';
 
 const app = new Hono();
@@ -35,7 +34,6 @@ app.route('/api/functions', functionsRouter);
 app.route('/api/functions', deployRouter);
 app.route('/api/keys', keysRouter);
 app.route('/api/runner', runnerRouter);
-app.route('/api/usage', usageRouter);
 app.route('/api/agent', agentRouter);
 app.route('/api', akashMetaRouter);
 

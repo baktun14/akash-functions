@@ -1,4 +1,4 @@
-// TopBar — 56px, Beta pill, health, bell, USD-first balance, account popover, Akash Agent.
+// TopBar — 56px, Beta pill, theme toggle, account popover, Akash Agent.
 
 import { useState, type ReactElement } from 'react';
 import type { Session } from '@shared/types';
@@ -21,7 +21,6 @@ export function TopBar({
   onOpenAgent,
 }: Props): ReactElement {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [usageOpen, setUsageOpen] = useState(false);
   const { resolved, toggle } = useTheme();
 
   return (
@@ -65,74 +64,6 @@ export function TopBar({
       >
         <Icon name={resolved === 'dark' ? 'sun' : 'moon'} size={15} />
       </button>
-
-      <button
-        type="button"
-        title="System health"
-        style={iconBtnStyle()}
-      >
-        <Icon name="activity" size={15} />
-      </button>
-
-      <button
-        type="button"
-        title="Notifications"
-        style={iconBtnStyle()}
-      >
-        <Icon name="bell" size={15} />
-        <span
-          style={{
-            position: 'absolute',
-            top: 6,
-            right: 6,
-            width: 6,
-            height: 6,
-            borderRadius: 9999,
-            background: 'var(--accent)',
-          }}
-        />
-      </button>
-
-      {/* Balance pill — USD-first, ACT secondary in tooltip */}
-      <div style={{ position: 'relative' }}>
-        <button
-          className="pill pill-mono"
-          onMouseEnter={() => setUsageOpen(true)}
-          onMouseLeave={() => setUsageOpen(false)}
-          style={{
-            padding: '6px 12px',
-            background: 'var(--bg-elev-1)',
-            borderColor: 'var(--line-strong)',
-            color: 'var(--fg)',
-          }}
-        >
-          <Icon name="wallet" size={12} color="var(--fg-subtle)" />
-          <span style={{ fontSize: 12 }}>$5.04</span>
-          <span style={{ color: 'var(--fg-faint)' }}>·</span>
-          <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>30d</span>
-        </button>
-        {usageOpen && (
-          <div className="tooltip" style={{ left: 'auto', right: 0, minWidth: 240 }}>
-            <div className="eyebrow" style={{ marginBottom: 8 }}>Balance</div>
-            <KvRow label="USD" value="$5.04" />
-            <KvRow label="ACT" value="12.4" />
-            <KvRow label="Burn rate" value="$0.17/day" />
-            <div style={{ height: 1, background: 'var(--line)', margin: '10px 0' }} />
-            <a
-              href="#"
-              onClick={(e) => e.preventDefault()}
-              style={{
-                fontSize: 12,
-                color: 'var(--fg)',
-                textDecoration: 'underline',
-                textUnderlineOffset: 3,
-              }}
-            >
-              Top up balance →
-            </a>
-          </div>
-        )}
-      </div>
 
       {/* Account chip + popover */}
       <div style={{ position: 'relative' }}>
@@ -270,11 +201,3 @@ function iconBtnStyle() {
   };
 }
 
-function KvRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-      <span style={{ color: 'var(--fg-muted)' }}>{label}</span>
-      <span className="mono">{value}</span>
-    </div>
-  );
-}
