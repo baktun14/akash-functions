@@ -206,6 +206,63 @@ export const consoleApi = {
       'GET',
       `/wallets?userId=${encodeURIComponent(userId)}`
     ),
+
+  // GET /v1/gpu — fleet-wide GPU inventory across all providers. Public; no
+  // per-user filtering. Used to populate the resource picker's GPU dropdown.
+  getGpuModels: (apiKey: string) =>
+    call<GpuInventoryResponse>(apiKey, 'GET', '/gpu'),
+
+  // GET /v1/providers — full provider directory with per-provider capacity
+  // stats. Public. Used by the bid-matcher to decide which providers can
+  // service a proposed resource spec.
+  getProviders: (apiKey: string) =>
+    call<ProviderRow[]>(apiKey, 'GET', '/providers'),
+};
+
+// Console API shapes — typed here so the bid-matcher consumes a stable
+// surface instead of `any`.
+export type GpuModelDetail = {
+  model: string | null;
+  ram: string | null;
+  interface: string | null;
+  allocatable: number;
+  allocated: number;
+};
+export type GpuInventoryResponse = {
+  gpus: {
+    total: { allocatable: number; allocated: number };
+    /** keyed by vendor: "nvidia" | "amd" | "<UNKNOWN>" */
+    details: Record<string, GpuModelDetail[]>;
+  };
+};
+
+export type ProviderStat = {
+  active: number;
+  available: number;
+  pending: number;
+  total: number;
+};
+export type ProviderRow = {
+  owner: string;
+  hostUri: string;
+  isOnline: boolean;
+  isAudited: boolean;
+  stats: {
+    cpu: ProviderStat;        // milli-cpu (1000 = 1 vCPU)
+    gpu: ProviderStat;        // unit count
+    memory: ProviderStat;     // bytes
+    storage: {
+      ephemeral: ProviderStat;
+      persistent: ProviderStat;
+      total: ProviderStat;    // bytes
+    };
+  };
+  gpuModels: Array<{
+    vendor: string;
+    model: string;
+    ram: string | null;
+    interface: string | null;
+  }>;
 };
 
 // Resolve the wallet address for an API key. Two Console hits, but the caller

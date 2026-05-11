@@ -27,10 +27,17 @@ import { signRunner } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { log } from '../lib/log';
 
+const GpuSchema = z.object({
+  vendor: z.enum(['nvidia', 'amd']),
+  model: z.string().min(1).max(40),
+  units: z.number().int().positive().max(8).optional(),
+});
+
 const ResourceSchema = z.object({
   cpu: z.string(),
   memory: z.string(),
   storage: z.string(),
+  gpu: GpuSchema.optional(),
 });
 
 // Per-file 1MB cap, plus total-size cap of 5MB to keep JSONB rows reasonable.

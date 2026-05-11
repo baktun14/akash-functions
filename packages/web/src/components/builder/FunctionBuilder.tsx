@@ -1,20 +1,70 @@
 // Full-screen function builder: code editor + side panel (prompt, presets,
-// optional AkashMLConnect, inferred resources, Deploy).
+// optional AkashMLConnect, inferred or custom resources, Deploy).
+//
+// Resources start as the preset's "inferred" defaults (read-only chips). The
+// Adjust button toggles to an editable form (CPU/RAM/Storage/GPU) and, once
+// the user has customized anything, a live feasibility indicator polls the
+// backend for "how many online+audited providers can fulfill this spec?".
+// We let the user deploy with 0 matches (providers come online dynamically)
+// but require an explicit confirm so they don't sit in `bidding` by surprise.
 
 import { useMemo, useState } from 'react';
-import type { CodeSample, PresetId } from '@shared/types';
+import type {
+  CodeSample,
+  GpuSpec,
+  PresetId,
+  ResourceRequest,
+} from '@shared/types';
 import { FnLogo, Icon } from '../icons';
 import { PRESETS, SAMPLES } from '../../data/presets';
 import { ResChip } from './ResChip';
 import { AkashMLConnect } from './AkashMLConnect';
 import { CodeEditor } from './CodeEditor';
 import { tokensToSource } from '../../lib/api';
+import { useGpuModels } from '../../lib/use-gpu-models';
+import { useFeasibility } from '../../lib/use-feasibility';
 
 type Props = {
   initialPreset?: PresetId | null;
   onClose: () => void;
-  onDeploy: (sample: CodeSample) => void;
+  /** customResources is sent only when the user opened Adjust and edited the form. */
+  onDeploy: (sample: CodeSample, customResources?: ResourceRequest) => void;
 };
+
+type SizeUnit = 'Mi' | 'Gi';
+
+type ResourceForm = {
+  cpu: string;
+  memoryValue: number;
+  memoryUnit: SizeUnit;
+  storageValue: number;
+  storageUnit: SizeUnit;
+  gpu: GpuSpec | null;
+};
+
+const CPU_OPTIONS = ['0.25', '0.5', '1', '2', '4', '8'];
+
+function parseDefaultForm(sample: CodeSample): ResourceForm {
+  const cpu = sample.res.cpu.match(/[\d.]+/)?.[0] ?? '0.5';
+  const memMatch = sample.res.mem.match(/(\d+)\s*(Mi|Gi)/i);
+  return {
+    cpu,
+    memoryValue: memMatch ? parseInt(memMatch[1]!, 10) : 512,
+    memoryUnit: (memMatch?.[2]?.replace(/^\w/, (c) => c.toUpperCase()) ?? 'Mi') as SizeUnit,
+    storageValue: 1,
+    storageUnit: 'Gi',
+    gpu: null,
+  };
+}
+
+function toResourceRequest(form: ResourceForm): ResourceRequest {
+  return {
+    cpu: form.cpu,
+    memory: `${form.memoryValue}${form.memoryUnit}`,
+    storage: `${form.storageValue}${form.storageUnit}`,
+    gpu: form.gpu ?? undefined,
+  };
+}
 
 export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
   const initial: PresetId =
@@ -25,12 +75,33 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
   );
   const [prompt, setPrompt] = useState<string>(SAMPLES[initial].prompt);
   const [name, setName] = useState<string>(SAMPLES[initial].name);
+
+  // Adjust panel: closed by default so casual users see the preset chips, can
+  // open inline to override. customRes === null means "use the preset defaults"
+  // and skips both the feasibility call and the customResources payload.
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [customRes, setCustomRes] = useState<ResourceForm | null>(null);
+  const [confirmingNoMatch, setConfirmingNoMatch] = useState(false);
+
   const sample = SAMPLES[preset];
   const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
   const dirty =
     source !== templateSource || prompt !== sample.prompt || name !== sample.name;
   const trimmedName = name.trim();
   const canDeploy = trimmedName.length > 0;
+
+  const effectiveForm = customRes ?? parseDefaultForm(sample);
+  const customResourceRequest: ResourceRequest | null = customRes
+    ? toResourceRequest(customRes)
+    : null;
+
+  const gpuModelsState = useGpuModels();
+  const feasibility = useFeasibility(customResourceRequest, customRes !== null);
+
+  const updateForm = (patch: Partial<ResourceForm>) => {
+    setCustomRes((cur) => ({ ...(cur ?? parseDefaultForm(sample)), ...patch }));
+    setConfirmingNoMatch(false);
+  };
 
   const onSelectPreset = (next: PresetId) => {
     if (next === preset) return;
@@ -40,6 +111,30 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
     setSource(tokensToSource(ns.code));
     setPrompt(ns.prompt);
     setName(ns.name);
+    // Re-seed the form to the new preset's defaults so the user isn't stuck
+    // with "0.25 vCPU" they picked under rest after switching to gpu.
+    setCustomRes(null);
+    setConfirmingNoMatch(false);
+  };
+
+  const onDeployClick = () => {
+    if (!canDeploy) return;
+    // If the user customized resources AND 0 providers match, require a
+    // second click before we submit. Otherwise the bid pool will be empty
+    // and the deployment sits in `bidding` until something comes online.
+    if (
+      customResourceRequest &&
+      feasibility.status === 'ready' &&
+      feasibility.result.matchingProviders === 0 &&
+      !confirmingNoMatch
+    ) {
+      setConfirmingNoMatch(true);
+      return;
+    }
+    onDeploy(
+      { ...sample, name: trimmedName, source, prompt },
+      customResourceRequest ?? undefined
+    );
   };
 
   const requestClose = () => {
@@ -212,7 +307,7 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
           )}
 
           <div className="eyebrow" style={{ marginTop: 18, marginBottom: 8 }}>
-            Inferred resources
+            {customRes ? 'Custom resources' : 'Inferred resources'}
           </div>
           <div
             style={{
@@ -222,11 +317,48 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
               borderRadius: 12,
             }}
           >
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              <ResChip icon="cpu" value={sample.res.cpu} />
-              <ResChip icon="cube" value={sample.res.mem} />
-              <ResChip icon="gpu" value={sample.res.gpu} accent={preset === 'gpu'} />
-            </div>
+            {!adjustOpen ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <ResChip
+                  icon="cpu"
+                  value={customRes ? `${customRes.cpu} vCPU` : sample.res.cpu}
+                />
+                <ResChip
+                  icon="cube"
+                  value={
+                    customRes
+                      ? `${customRes.memoryValue} ${customRes.memoryUnit}`
+                      : sample.res.mem
+                  }
+                />
+                <ResChip
+                  icon="storage"
+                  value={
+                    customRes
+                      ? `${customRes.storageValue} ${customRes.storageUnit}`
+                      : '1 Gi'
+                  }
+                />
+                <ResChip
+                  icon="gpu"
+                  value={
+                    customRes
+                      ? customRes.gpu
+                        ? `${customRes.gpu.vendor} ${customRes.gpu.model}`
+                        : 'no GPU'
+                      : sample.res.gpu
+                  }
+                  accent={preset === 'gpu' || !!customRes?.gpu}
+                />
+              </div>
+            ) : (
+              <ResourceFormEditor
+                form={effectiveForm}
+                onChange={updateForm}
+                gpuModels={gpuModelsState}
+              />
+            )}
+
             <div
               style={{
                 fontSize: 11.5,
@@ -238,9 +370,17 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
                 gap: 8,
               }}
             >
-              <span>Providers will bid on this spec</span>
-              <button className="btn btn-ghost btn-sm" style={{ padding: '3px 8px' }}>
-                <Icon name="edit" size={11} /> Adjust
+              <FeasibilityLine
+                active={customRes !== null}
+                state={feasibility}
+              />
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ padding: '3px 8px' }}
+                onClick={() => setAdjustOpen((v) => !v)}
+              >
+                <Icon name={adjustOpen ? 'check' : 'edit'} size={11} />
+                {adjustOpen ? ' Done' : ' Adjust'}
               </button>
             </div>
           </div>
@@ -249,7 +389,7 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
 
           <button
             className="btn btn-primary"
-            onClick={() => onDeploy({ ...sample, name: trimmedName, source, prompt })}
+            onClick={onDeployClick}
             disabled={!canDeploy}
             style={{
               width: '100%',
@@ -257,13 +397,305 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
               justifyContent: 'center',
               opacity: canDeploy ? 1 : 0.5,
               cursor: canDeploy ? 'pointer' : 'not-allowed',
+              background: confirmingNoMatch ? 'var(--accent-soft)' : undefined,
             }}
           >
             <Icon name="play" size={12} color="#0A0A0F" />
-            Deploy function
+            {confirmingNoMatch ? 'Deploy anyway' : 'Deploy function'}
           </button>
+          {confirmingNoMatch && (
+            <div
+              style={{
+                fontSize: 11,
+                color: 'var(--fg-subtle)',
+                marginTop: 6,
+                textAlign: 'center',
+              }}
+            >
+              No providers currently match — your deployment will sit in
+              <span style={{ fontFamily: 'monospace' }}> bidding </span>
+              until one comes online.
+            </div>
+          )}
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── Resource editor ──────────────────────────────────────────────────
+
+type ResourceFormEditorProps = {
+  form: ResourceForm;
+  onChange: (patch: Partial<ResourceForm>) => void;
+  gpuModels: ReturnType<typeof useGpuModels>;
+};
+
+function ResourceFormEditor({ form, onChange, gpuModels }: ResourceFormEditorProps) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <Row label="CPU">
+        <ChipRow
+          options={CPU_OPTIONS}
+          value={form.cpu}
+          onSelect={(v) => onChange({ cpu: v })}
+          suffix="vCPU"
+        />
+      </Row>
+
+      <Row label="Memory">
+        <SizeField
+          value={form.memoryValue}
+          unit={form.memoryUnit}
+          onValue={(v) => onChange({ memoryValue: v })}
+          onUnit={(u) => onChange({ memoryUnit: u })}
+        />
+      </Row>
+
+      <Row label="Storage">
+        <SizeField
+          value={form.storageValue}
+          unit={form.storageUnit}
+          onValue={(v) => onChange({ storageValue: v })}
+          onUnit={(u) => onChange({ storageUnit: u })}
+        />
+      </Row>
+
+      <Row label="GPU">
+        <GpuSelect
+          value={form.gpu}
+          onChange={(gpu) => onChange({ gpu })}
+          state={gpuModels}
+        />
+      </Row>
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 26 }}>
+      <div
+        style={{
+          width: 60,
+          fontSize: 11,
+          color: 'var(--fg-muted)',
+          letterSpacing: '0.02em',
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+function ChipRow({
+  options,
+  value,
+  onSelect,
+  suffix,
+}: {
+  options: string[];
+  value: string;
+  onSelect: (v: string) => void;
+  suffix?: string;
+}) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+      {options.map((opt) => {
+        const active = opt === value;
+        return (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => onSelect(opt)}
+            style={{
+              padding: '3px 8px',
+              fontSize: 11,
+              fontFamily: 'inherit',
+              borderRadius: 6,
+              border: '1px solid ' + (active ? 'var(--line-strong)' : 'var(--line)'),
+              background: active ? 'var(--bg-elev-3)' : 'transparent',
+              color: active ? 'var(--fg)' : 'var(--fg-muted)',
+              cursor: 'pointer',
+            }}
+          >
+            {opt}
+            {suffix ? <span style={{ opacity: 0.6 }}> {suffix}</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SizeField({
+  value,
+  unit,
+  onValue,
+  onUnit,
+}: {
+  value: number;
+  unit: SizeUnit;
+  onValue: (v: number) => void;
+  onUnit: (u: SizeUnit) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <input
+        type="number"
+        min={1}
+        value={value}
+        onChange={(e) => {
+          const n = parseInt(e.target.value, 10);
+          if (Number.isFinite(n) && n > 0) onValue(n);
+        }}
+        style={{
+          width: 72,
+          padding: '3px 6px',
+          fontSize: 12,
+          background: 'var(--bg-elev-3)',
+          border: '1px solid var(--line)',
+          borderRadius: 6,
+          color: 'var(--fg)',
+          fontFamily: 'inherit',
+          outline: 'none',
+        }}
+      />
+      <div style={{ display: 'flex', gap: 2 }}>
+        {(['Mi', 'Gi'] as SizeUnit[]).map((u) => {
+          const active = u === unit;
+          return (
+            <button
+              key={u}
+              type="button"
+              onClick={() => onUnit(u)}
+              style={{
+                padding: '3px 7px',
+                fontSize: 11,
+                fontFamily: 'inherit',
+                borderRadius: 6,
+                border: '1px solid ' + (active ? 'var(--line-strong)' : 'var(--line)'),
+                background: active ? 'var(--bg-elev-3)' : 'transparent',
+                color: active ? 'var(--fg)' : 'var(--fg-muted)',
+                cursor: 'pointer',
+              }}
+            >
+              {u}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function GpuSelect({
+  value,
+  onChange,
+  state,
+}: {
+  value: GpuSpec | null;
+  onChange: (next: GpuSpec | null) => void;
+  state: ReturnType<typeof useGpuModels>;
+}) {
+  if (state.status === 'loading') {
+    return (
+      <div style={{ fontSize: 11, color: 'var(--fg-subtle)' }}>Loading models…</div>
+    );
+  }
+  if (state.status === 'error') {
+    return (
+      <div style={{ fontSize: 11, color: 'var(--fg-subtle)' }}>
+        Couldn’t load GPU options — try again later
+      </div>
+    );
+  }
+  const models = state.models;
+  // Encode "vendor:model" so the <select> value is a single string.
+  const currentKey = value ? `${value.vendor}:${value.model}` : '';
+  return (
+    <select
+      value={currentKey}
+      onChange={(e) => {
+        const v = e.target.value;
+        if (!v) {
+          onChange(null);
+          return;
+        }
+        const [vendor, model] = v.split(':');
+        if (!vendor || !model) return;
+        onChange({ vendor: vendor as 'nvidia' | 'amd', model });
+      }}
+      style={{
+        width: '100%',
+        padding: '4px 6px',
+        fontSize: 12,
+        background: 'var(--bg-elev-3)',
+        border: '1px solid var(--line)',
+        borderRadius: 6,
+        color: 'var(--fg)',
+        fontFamily: 'inherit',
+        outline: 'none',
+      }}
+    >
+      <option value="">None</option>
+      {models.map((m) => {
+        const key = `${m.vendor}:${m.model}`;
+        const ram = m.ram ? ` • ${m.ram}` : '';
+        const free = m.available > 0 ? ` (${m.available} free)` : ' (busy)';
+        return (
+          <option key={key} value={key} disabled={m.available <= 0}>
+            {m.vendor} {m.model}
+            {ram}
+            {free}
+          </option>
+        );
+      })}
+    </select>
+  );
+}
+
+// ─── Feasibility status line ──────────────────────────────────────────
+
+function FeasibilityLine({
+  active,
+  state,
+}: {
+  active: boolean;
+  state: ReturnType<typeof useFeasibility>;
+}) {
+  if (!active) {
+    return <span>Providers will bid on this spec</span>;
+  }
+  if (state.status === 'idle' || state.status === 'loading') {
+    return <span>Checking provider availability…</span>;
+  }
+  if (state.status === 'error') {
+    // Don't block the user on a feasibility-check failure; the deploy path
+    // still works, providers will either bid or not.
+    return <span>Couldn’t check availability</span>;
+  }
+  const { matchingProviders, totalActiveProviders, bottleneck } = state.result;
+  if (matchingProviders === 0) {
+    const hint = bottleneck ? ` — try lowering ${bottleneck}` : '';
+    return (
+      <span style={{ color: 'var(--accent-soft)' }}>
+        0 providers match{hint}
+      </span>
+    );
+  }
+  if (matchingProviders < 5) {
+    return (
+      <span style={{ color: 'var(--accent-soft)' }}>
+        {matchingProviders} of {totalActiveProviders} providers match
+      </span>
+    );
+  }
+  return (
+    <span>
+      {matchingProviders} of {totalActiveProviders} providers match
+    </span>
   );
 }
