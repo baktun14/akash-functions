@@ -6,10 +6,11 @@
     "packages/*"
   ],
   "scripts": {
+    "predev": "npm run dev:stop",
     "dev": "concurrently --kill-others-on-fail --names server,web --prefix-colors blue,green \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "npm run dev -w server",
     "dev:web": "npm run dev -w web",
-    "dev:stop": "lsof -iTCP:8081 -iTCP:5173 -iTCP:5174 -sTCP:LISTEN -t 2>/dev/null | xargs kill 2>/dev/null; sleep 3; lsof -iTCP:8081 -iTCP:5173 -iTCP:5174 -sTCP:LISTEN -t 2>/dev/null | xargs kill -9 2>/dev/null; true",
+    "dev:stop": "pids=$(lsof -iTCP:8081 -iTCP:5173 -iTCP:5174 -sTCP:LISTEN -t 2>/dev/null); if [ -n \"$pids\" ]; then echo \"$pids\" | xargs kill 2>/dev/null; sleep 1; pids=$(lsof -iTCP:8081 -iTCP:5173 -iTCP:5174 -sTCP:LISTEN -t 2>/dev/null); [ -n \"$pids\" ] && echo \"$pids\" | xargs kill -9 2>/dev/null; fi; true",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "web": "npm run dev -w web",
