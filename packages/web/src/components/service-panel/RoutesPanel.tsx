@@ -60,7 +60,7 @@ export function RoutesPanel({ url, routes, onToggleAuth, protectionDisabledReaso
           color="var(--fg-muted)"
         />
         <span style={{ fontSize: 13 }}>
-          {routes.length} {routes.length === 1 ? 'route' : 'routes'} detected in your code
+          {routes.length} {routes.length === 1 ? 'route' : 'routes'}
           {protectedCount > 0 && (
             <span style={{ color: 'var(--fg-muted)', fontWeight: 400 }}>
               {' '}· {protectedCount} protected
