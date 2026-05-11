@@ -8,6 +8,7 @@ import type {
 import { Icon } from '../../icons';
 import { api } from '../../../lib/api';
 import { useReachable } from '../../../lib/useReachable';
+import { sessionDeploys } from '../../../lib/sessionDeploys';
 import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
@@ -151,9 +152,10 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
       ? liveUri
       : `https://${liveUri}`
     : null;
-  // Only probe once Akash says the lease is live — otherwise we'd just be
-  // burning cycles on a URL that doesn't exist yet.
-  const reachable = useReachable(svc.id, dep?.state === 'live');
+  // Only probe once Akash says the lease is live AND this deploy was started
+  // in the current session — for already-live functions loaded from the
+  // server we trust the state and skip the post-deploy 503 probe entirely.
+  const reachable = useReachable(svc.id, dep?.state === 'live' && sessionDeploys.was(svc.id));
 
   const toneColor =
     meta.tone === 'ok'

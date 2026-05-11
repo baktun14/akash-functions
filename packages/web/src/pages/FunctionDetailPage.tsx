@@ -4,6 +4,7 @@ import type { FunctionRecord } from '@shared/types';
 import { ServicePanel } from '../components/service-panel/ServicePanel';
 import { useLayout } from '../App';
 import { api } from '../lib/api';
+import { sessionDeploys } from '../lib/sessionDeploys';
 
 export function FunctionDetailPage(): ReactElement {
   const { id } = useParams<{ id: string }>();
@@ -16,6 +17,7 @@ export function FunctionDetailPage(): ReactElement {
   // detail page renders before the next list-poll tick lands.
   const handleRedeploy = (next: FunctionRecord) => {
     setLocal((cur) => [next, ...cur.filter((s) => s.id !== next.id)]);
+    sessionDeploys.mark(next.id);
     refresh().catch(() => undefined);
     navigate(`/functions/${next.id}`);
   };
@@ -64,6 +66,7 @@ export function FunctionDetailPage(): ReactElement {
     try {
       await api.remove(id);
       setLocal((cur) => cur.filter((s) => s.id !== id));
+      sessionDeploys.clear(id);
       navigate('/functions');
     } catch (err) {
       alert(`Failed to delete function: ${(err as Error).message}`);

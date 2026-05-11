@@ -35,6 +35,7 @@ import { FunctionsPage } from './pages/FunctionsPage';
 import { FunctionDetailPage } from './pages/FunctionDetailPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 import { useFunctions } from './lib/useFunctions';
+import { sessionDeploys } from './lib/sessionDeploys';
 import { api } from './lib/api';
 
 type LayoutContext = {
@@ -159,6 +160,7 @@ function Layout({
             : s
         )
       );
+      sessionDeploys.mark(editorTarget.fnId);
     }
     setToast({ kind: 'ok', text: 'Saved & deploying new version…' });
     setTimeout(() => setToast(null), 3500);
@@ -169,6 +171,7 @@ function Layout({
     try {
       const svc = await api.deploy(sample, customResources);
       setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
+      sessionDeploys.mark(svc.id);
       setBuilderOpen(false);
       setToast({ kind: 'ok', text: `Deploying ${svc.name}…` });
       setTimeout(() => setToast(null), 3500);
