@@ -13,6 +13,7 @@ import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
 import { api } from '../../lib/api';
 import { detectStartupIssue } from '../../lib/codeChecks';
 import { Icon } from '../icons';
+import { AgentCTACard } from './AgentCTACard';
 import { CodeEditor } from './CodeEditor';
 import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
 
@@ -26,6 +27,11 @@ type Props = {
   onSavedAndDeployed: (newVersionId: string, deployment: DeploymentRecord) => void;
   /** Agent chat panel — when present, switches the editor to a 3-column grid. */
   agentSlot?: ReactNode;
+  /** Whether the agent panel is currently open. Controls whether the in-editor
+   *  CTA card is shown (hidden when the panel is already docked). */
+  agentOpen?: boolean;
+  /** Opens the agent panel; the Layout docks it into the editor's grid. */
+  onOpenAgent?: () => void;
   /** Invoked by the "Quick fix with agent" affordance when source has a known
    *  startup issue (e.g. double server-start). The host opens the agent panel
    *  and queues the corrective prompt for auto-send. */
@@ -53,6 +59,8 @@ export function FunctionEditor({
   onSaved,
   onSavedAndDeployed,
   agentSlot,
+  agentOpen,
+  onOpenAgent,
   onAgentFix,
 }: Props): ReactElement {
   const primaryPath = useMemo(() => pickPrimaryPath(initialDetail.source), [initialDetail.source]);
@@ -207,6 +215,14 @@ export function FunctionEditor({
         </div>
 
         <div className="builder-prompt scroll">
+          {!agentOpen && onOpenAgent && (
+            <div style={{ marginBottom: 18 }}>
+              <AgentCTACard
+                onOpen={onOpenAgent}
+                copy="Ask the agent to modify this function — bugfix, refactor, or add a route."
+              />
+            </div>
+          )}
           <div className="eyebrow" style={{ marginBottom: 8 }}>File</div>
           <div
             style={{

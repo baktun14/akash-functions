@@ -50,8 +50,16 @@ export interface ApiClient {
   disconnect(): void;
 
   listServices(): Promise<FunctionRecord[]>;
-  /** customResources overrides the preset's defaults when present. */
-  deploy(sample: CodeSample, customResources?: ResourceRequest): Promise<FunctionRecord>;
+  /**
+   * Deploy a brand-new function. `customResources` overrides preset defaults;
+   * `envVars` carries any user-supplied secrets the source references (e.g.
+   * AKASHML_API_KEY). Both default to undefined — keep the wire payload lean.
+   */
+  deploy(
+    sample: CodeSample,
+    customResources?: ResourceRequest,
+    envVars?: Record<string, string>
+  ): Promise<FunctionRecord>;
 
   /** Live GPU inventory across online+audited providers. */
   listGpuModels(): Promise<GpuModelOption[]>;
@@ -256,7 +264,11 @@ class MockApi implements ApiClient {
     return readJSON<FunctionRecord[]>(SERVICES_KEY) ?? DEFAULT_SERVICES;
   }
 
-  async deploy(sample: CodeSample, customResources?: ResourceRequest): Promise<FunctionRecord> {
+  async deploy(
+    sample: CodeSample,
+    customResources?: ResourceRequest,
+    envVars?: Record<string, string>
+  ): Promise<FunctionRecord> {
     await delay(900);
     const services = (await this.listServices()).slice();
     const id = 'fn-' + Math.random().toString(36).slice(2, 7);
@@ -283,7 +295,7 @@ class MockApi implements ApiClient {
       deploymentCount: 1,
       source: buildSourceMap(sample),
       resources: customResources ?? { cpu: sample.res.cpu, memory: sample.res.mem, storage: '1Gi' },
-      envVars: {},
+      envVars: envVars ?? {},
     };
     writeMockVersions(id, [initial]);
 
@@ -686,7 +698,11 @@ class LiveApi implements ApiClient {
     return this.req<FunctionRecord[]>('/api/functions');
   }
 
-  async deploy(sample: CodeSample, customResources?: ResourceRequest): Promise<FunctionRecord> {
+  async deploy(
+    sample: CodeSample,
+    customResources?: ResourceRequest,
+    envVars?: Record<string, string>
+  ): Promise<FunctionRecord> {
     // Two-phase: create the function record, then trigger the deploy pipeline.
     // If the second call fails, tombstone the function so it doesn't show up
     // in the list as an "idle" zombie the user has to clean up by hand.
@@ -695,6 +711,7 @@ class LiveApi implements ApiClient {
       memory: sample.res.mem,
       storage: '1Gi',
     };
+    const hasEnvVars = envVars && Object.keys(envVars).length > 0;
     const fn = await this.req<FunctionRecord>('/api/functions', {
       method: 'POST',
       body: JSON.stringify({
@@ -703,6 +720,7 @@ class LiveApi implements ApiClient {
         prompt: sample.prompt,
         source: buildSourceMap(sample),
         resources,
+        ...(hasEnvVars ? { envVars } : {}),
       }),
     });
     try {

@@ -190,9 +190,13 @@ function Layout({
     refresh().catch(() => undefined);
   };
 
-  const handleDeploy = async (sample: CodeSample, customResources?: ResourceRequest) => {
+  const handleDeploy = async (
+    sample: CodeSample,
+    customResources?: ResourceRequest,
+    envVars?: Record<string, string>,
+  ) => {
     try {
-      const svc = await api.deploy(sample, customResources);
+      const svc = await api.deploy(sample, customResources, envVars);
       setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
       sessionDeploys.mark(svc.id);
       setBuilderOpen(false);
@@ -308,6 +312,8 @@ function Layout({
                 onSaved={handleEditorSaved}
                 onSavedAndDeployed={handleEditorSavedAndDeployed}
                 agentSlot={editorHostsAgent ? agentPanelEl : null}
+                agentOpen={agentOpen}
+                onOpenAgent={() => setAgentOpen(true)}
                 onAgentFix={requestAgentFix}
               />
             )}

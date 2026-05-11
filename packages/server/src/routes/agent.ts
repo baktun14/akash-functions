@@ -21,7 +21,10 @@ import { log } from '../lib/log';
 export const agentRouter = new Hono<{ Variables: AuthVars }>();
 agentRouter.use('*', requireAkashKey);
 
-function buildSystemPrompt(context: AgentChatContext): string {
+function buildSystemPrompt(context: AgentChatContext, models: readonly string[]): string {
+  const modelList = models
+    .map((m) => `    - ${m}${m === akashmlApi.defaultModel ? ' (default — prefer this unless asked otherwise)' : ''}`)
+    .join('\n');
   const base =
     'You are an assistant that writes Bun + TypeScript source for the Akash Functions runtime. ' +
     'Guidelines:\n' +
@@ -33,6 +36,7 @@ function buildSystemPrompt(context: AgentChatContext): string {
     `- AkashML integration: the ONLY correct base URL is "${akashmlApi.base}". Never use any other host (chatapi.akash.network, chat-api.akash.network, api.openai.com, etc.) — those will not work.\n` +
     `- Construct \`new OpenAI({ apiKey: process.env.AKASHML_API_KEY, baseURL: "${akashmlApi.base}" })\` LAZILY inside the request handler (or memoized via a getter) — NEVER at module top level. The OpenAI SDK throws "Missing credentials" during construction when the key is empty/undefined, and at top level that crashes the whole function before any route can respond.\n` +
     `- NEVER write \`process.env.AKASHML_API_KEY || ""\` or any empty-string fallback for credentials — the empty string hits the same SDK validation as undefined and crashes construction. If you want a guard, branch inside the handler: \`if (!process.env.AKASHML_API_KEY) return c.json({ error: "AKASHML_API_KEY not set" }, 500);\`.\n` +
+    `- AkashML models — when calling \`chat.completions.create({ model })\`, use EXACTLY one of these literal IDs:\n${modelList}\n  Never use OpenAI/Anthropic IDs (\`gpt-*\`, \`claude-*\`, \`o1-*\`, \`o3-*\`) — they 404 on AkashML.\n` +
     '- When the user asks for code, emit ONE fenced ```ts code block that is the full file contents — no diffs, no partial snippets. Keep prose outside the block short.\n' +
     '- Do not invent dependencies; stick to hono, croner, openai (for AkashML), and the standard Bun/Node runtime.';
 
@@ -117,7 +121,29 @@ agentRouter.post('/chat', async (c) => {
 
   const context: AgentChatContext = body.context ?? { mode: 'none' };
   const model = body.model ?? akashmlApi.defaultModel;
-  const systemPrompt = buildSystemPrompt(context);
+
+  // Fetch the live AkashML model list so the prompt never lies about what's
+  // available. /v1/models requires auth (we use the user's per-request key)
+  // and is cached for 60s inside the client; on failure we fall back to the
+  // hard-coded list so the chat still streams.
+  let models: readonly string[];
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 2_000);
+    try {
+      models = await akashmlApi.listModels(body.akashmlKey, ac.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    log.warn('agent chat model list fetch failed — using fallback', {
+      err: err instanceof Error ? err.message : String(err),
+      fallbackCount: akashmlApi.fallbackModels.length,
+    });
+    models = akashmlApi.fallbackModels;
+  }
+
+  const systemPrompt = buildSystemPrompt(context, models);
 
   return streamSSE(c, async (sse) => {
     const send = (chunk: AgentChatChunk) => sse.writeSSE({ data: JSON.stringify(chunk) });
