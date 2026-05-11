@@ -18,6 +18,7 @@ import type {
   FunctionRecord,
   FunctionVersionDetail,
   PresetId,
+  ResourceRequest,
   Session,
   ToastMsg,
 } from '@shared/types';
@@ -164,9 +165,9 @@ function Layout({
     refresh().catch(() => undefined);
   };
 
-  const handleDeploy = async (sample: CodeSample) => {
+  const handleDeploy = async (sample: CodeSample, customResources?: ResourceRequest) => {
     try {
-      const svc = await api.deploy(sample);
+      const svc = await api.deploy(sample, customResources);
       setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
       setBuilderOpen(false);
       setToast({ kind: 'ok', text: `Deploying ${svc.name}…` });

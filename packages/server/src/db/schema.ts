@@ -94,6 +94,11 @@ export const functionVersions = pgTable(
       cpu: string;
       memory: string;
       storage: string;
+      gpu?: {
+        vendor: 'nvidia' | 'amd';
+        model: string;
+        units?: number;
+      };
     }>(),
     envVars: jsonb('env_vars').notNull().default(sql`'{}'::jsonb`).$type<Record<string, string>>(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

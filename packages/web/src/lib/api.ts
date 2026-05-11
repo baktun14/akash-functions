@@ -19,6 +19,9 @@ import type {
   CreateApiKeyResponse,
   ProtectedRouteKey,
   ProtectedRoutesResponse,
+  ResourceRequest,
+  GpuModelOption,
+  FeasibilityCheck,
 } from '@shared/types';
 import {
   AKASHML_KEY,
@@ -46,7 +49,13 @@ export interface ApiClient {
   disconnect(): void;
 
   listServices(): Promise<FunctionRecord[]>;
-  deploy(sample: CodeSample): Promise<FunctionRecord>;
+  /** customResources overrides the preset's defaults when present. */
+  deploy(sample: CodeSample, customResources?: ResourceRequest): Promise<FunctionRecord>;
+
+  /** Live GPU inventory across online+audited providers. */
+  listGpuModels(): Promise<GpuModelOption[]>;
+  /** "How many online+audited providers can fulfill this spec right now?" */
+  checkFeasibility(spec: ResourceRequest): Promise<FeasibilityCheck>;
   // Creates a new function from an existing one's source and fires deploy.
   // Returns the NEW function record (not the source). 1 function = 1 deployment.
   cloneAndDeploy(fnId: string): Promise<FunctionRecord>;
@@ -147,6 +156,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function mockSizeBytes(input: string): number {
+  const s = String(input).replace(/\s+/g, '').replace(/iB$/i, 'i');
+  const m = s.match(/^([0-9]+(?:\.[0-9]+)?)(Ki|Mi|Gi|Ti)?$/i);
+  if (!m) return 0;
+  const n = parseFloat(m[1]!);
+  const unit = (m[2] ?? '').toLowerCase();
+  const mult: Record<string, number> = { '': 1, ki: 1024, mi: 1024 ** 2, gi: 1024 ** 3, ti: 1024 ** 4 };
+  return Math.floor(n * (mult[unit] ?? 1));
+}
+
 function readMockVersions(fnId: string): FunctionVersionDetail[] {
   return readJSON<FunctionVersionDetail[]>(VERSIONS_KEY_PREFIX + fnId) ?? [];
 }
@@ -225,7 +244,7 @@ class MockApi implements ApiClient {
     return readJSON<FunctionRecord[]>(SERVICES_KEY) ?? DEFAULT_SERVICES;
   }
 
-  async deploy(sample: CodeSample): Promise<FunctionRecord> {
+  async deploy(sample: CodeSample, customResources?: ResourceRequest): Promise<FunctionRecord> {
     await delay(900);
     const services = (await this.listServices()).slice();
     const id = 'fn-' + Math.random().toString(36).slice(2, 7);
@@ -251,12 +270,37 @@ class MockApi implements ApiClient {
       isLatest: true,
       deploymentCount: 1,
       source: buildSourceMap(sample),
-      resources: { cpu: sample.res.cpu, memory: sample.res.mem, storage: '1Gi' },
+      resources: customResources ?? { cpu: sample.res.cpu, memory: sample.res.mem, storage: '1Gi' },
       envVars: {},
     };
     writeMockVersions(id, [initial]);
 
     return svc;
+  }
+
+  async listGpuModels(): Promise<GpuModelOption[]> {
+    await delay(100);
+    return [
+      { vendor: 'nvidia', model: 'rtx4090', ram: '24Gi', interface: 'PCIe', allocatable: 15, allocated: 6, available: 9 },
+      { vendor: 'nvidia', model: 'a100', ram: '80Gi', interface: 'SXM4', allocatable: 32, allocated: 3, available: 29 },
+      { vendor: 'nvidia', model: 'h100', ram: '80Gi', interface: 'SXM5', allocatable: 64, allocated: 42, available: 22 },
+      { vendor: 'nvidia', model: 'h200', ram: '141Gi', interface: 'SXM5', allocatable: 40, allocated: 21, available: 19 },
+    ];
+  }
+
+  async checkFeasibility(spec: ResourceRequest): Promise<FeasibilityCheck> {
+    await delay(80);
+    // Trivial mock: arbitrarily call anything above 16 vCPU / 64 GB / 200 GB unmatched.
+    const cpu = parseFloat(String(spec.cpu).replace(/[^0-9.]/g, '')) || 0;
+    const memBytes = mockSizeBytes(spec.memory);
+    const stoBytes = mockSizeBytes(spec.storage);
+    if (cpu > 16 || memBytes > 64 * 1024 ** 3 || stoBytes > 200 * 1024 ** 3) {
+      let bottleneck: FeasibilityCheck['bottleneck'] = 'cpu';
+      if (memBytes > 64 * 1024 ** 3) bottleneck = 'memory';
+      else if (stoBytes > 200 * 1024 ** 3) bottleneck = 'storage';
+      return { matchingProviders: 0, totalActiveProviders: 12, bottleneck };
+    }
+    return { matchingProviders: spec.gpu ? 3 : 8, totalActiveProviders: 12 };
   }
 
   async closeDeployment(id: string): Promise<void> {
@@ -604,10 +648,15 @@ class LiveApi implements ApiClient {
     return this.req<FunctionRecord[]>('/api/functions');
   }
 
-  async deploy(sample: CodeSample): Promise<FunctionRecord> {
+  async deploy(sample: CodeSample, customResources?: ResourceRequest): Promise<FunctionRecord> {
     // Two-phase: create the function record, then trigger the deploy pipeline.
     // If the second call fails, tombstone the function so it doesn't show up
     // in the list as an "idle" zombie the user has to clean up by hand.
+    const resources: ResourceRequest = customResources ?? {
+      cpu: sample.res.cpu,
+      memory: sample.res.mem,
+      storage: '1Gi',
+    };
     const fn = await this.req<FunctionRecord>('/api/functions', {
       method: 'POST',
       body: JSON.stringify({
@@ -615,11 +664,7 @@ class LiveApi implements ApiClient {
         preset: 'rest',
         prompt: sample.prompt,
         source: buildSourceMap(sample),
-        resources: {
-          cpu: sample.res.cpu,
-          memory: sample.res.mem,
-          storage: '1Gi',
-        },
+        resources,
       }),
     });
     try {
@@ -632,6 +677,17 @@ class LiveApi implements ApiClient {
       await this.req(`/api/functions/${fn.id}`, { method: 'DELETE' }).catch(() => undefined);
       throw err;
     }
+  }
+
+  async listGpuModels(): Promise<GpuModelOption[]> {
+    return this.req<GpuModelOption[]>('/api/gpu-models');
+  }
+
+  async checkFeasibility(spec: ResourceRequest): Promise<FeasibilityCheck> {
+    return this.req<FeasibilityCheck>('/api/check-feasibility', {
+      method: 'POST',
+      body: JSON.stringify(spec),
+    });
   }
 
   async closeDeployment(id: string): Promise<void> {

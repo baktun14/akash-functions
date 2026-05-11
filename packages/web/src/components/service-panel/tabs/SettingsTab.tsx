@@ -1,7 +1,12 @@
-import { useState } from 'react';
-import type { FunctionRecord, Session } from '@shared/types';
+import { useEffect, useState } from 'react';
+import type {
+  FunctionRecord,
+  FunctionVersionDetail,
+  Session,
+} from '@shared/types';
 import { Icon } from '../../icons';
 import { Toggle } from '../../ui/Toggle';
+import { api } from '../../../lib/api';
 
 type Props = {
   svc: FunctionRecord;
@@ -10,9 +15,52 @@ type Props = {
   onDelete?: () => void | Promise<void>;
 };
 
+// Formats the version's stored size strings for display: "512Mi" / "512 Mi"
+// / "8GI" → "512 MiB" / "8 GiB". Tolerates whitespace and case variation
+// because the preset CodeSamples store display-style "512 Mi" while the
+// custom-resources form stores normalized "512Mi" — both end up in the DB.
+function formatSize(value: string): string {
+  const m = String(value).trim().match(/^(\d+(?:\.\d+)?)\s*([kmgt])i$/i);
+  if (!m) return value;
+  return `${m[1]} ${m[2]!.toUpperCase()}iB`;
+}
+
+function formatGpu(gpu: FunctionVersionDetail['resources']['gpu']): string {
+  if (!gpu) return 'none';
+  const count = gpu.units && gpu.units > 1 ? `${gpu.units}× ` : '';
+  return `${count}${gpu.vendor} ${gpu.model}`;
+}
+
 export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props) {
   const [pending, setPending] = useState<'close' | 'delete' | null>(null);
+  const [version, setVersion] = useState<FunctionVersionDetail | null>(null);
   const hasActiveDeployment = svc.status === 'online' || svc.status === 'pending';
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getLatestVersion(svc.id).then(
+      (v) => {
+        if (!cancelled) setVersion(v);
+      },
+      // The version is best-effort — failing here just falls back to the
+      // placeholders ("—"), the rest of Settings still renders.
+      () => undefined
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [svc.id]);
+
+  const cpu = version?.resources.cpu;
+  const memory = version?.resources.memory;
+  const storage = version?.resources.storage;
+  const gpu = version?.resources.gpu;
+  const cpuLabel = cpu ? `${parseFloat(cpu) || cpu}` : '—';
+  const memoryLabel = memory ? formatSize(memory) : '—';
+  const storageLabel = storage ? formatSize(storage) : '—';
+  const gpuLabel = version ? formatGpu(gpu) : '—';
+  const pricingSub =
+    cpu && memory ? `${cpuLabel} vCPU · ${memoryLabel}` : '—';
 
   const runWithLock = (kind: 'close' | 'delete', fn: () => void | Promise<void>) => async () => {
     if (pending) return;
@@ -141,9 +189,10 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
       <Section icon="layers" title="Scale">
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <Kv label="Replicas" value="1" mono />
-          <Kv label="vCPU per replica" value="0.5" mono />
-          <Kv label="Memory" value="512 MiB" mono />
-          <Kv label="GPU" value="none" mono />
+          <Kv label="vCPU per replica" value={cpuLabel} mono />
+          <Kv label="Memory" value={memoryLabel} mono />
+          <Kv label="Storage" value={storageLabel} mono />
+          <Kv label="GPU" value={gpuLabel} mono />
         </div>
       </Section>
 
@@ -158,7 +207,7 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
                   <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>/day</span>
                 </>
               }
-              sub="0.5 vCPU · 512 MiB"
+              sub={pricingSub}
             />
             <PricingTile label="Balance" value={<>$5.04</>} sub="credits remaining" />
             <PricingTile label="Runway" value={<>~30 d</>} sub="at current rate" />

@@ -157,20 +157,56 @@ export type UsageInfo = {
 };
 
 // API request/response shapes
+
+// GPU spec carried in the resources block. Optional — when absent, no GPU is
+// requested. One vendor + one model per request (matches the Console API's
+// per-model availability granularity).
+export type GpuSpec = {
+  vendor: 'nvidia' | 'amd';
+  model: string;       // e.g. 'a100', 'h100', 'rtx4090'
+  units?: number;      // default 1
+};
+
+export type ResourceRequest = {
+  cpu: string;
+  memory: string;
+  storage: string;
+  gpu?: GpuSpec;
+};
+
 export type CreateFunctionRequest = {
   name: string;
   preset: PresetId;
   prompt?: string;
   source: Record<string, string>; // path → contents
-  resources: { cpu: string; memory: string; storage: string };
+  resources: ResourceRequest;
   envVars?: Record<string, string>;
 };
 
 export type UpdateCodeRequest = {
   source: Record<string, string>;
   message?: string;
-  resources?: { cpu: string; memory: string; storage: string };
+  resources?: ResourceRequest;
   envVars?: Record<string, string>;
+};
+
+// Surface for the GPU dropdown in the builder. Returned from /api/gpu-models.
+export type GpuModelOption = {
+  vendor: 'nvidia' | 'amd';
+  model: string;
+  ram: string | null;       // e.g. "80Gi" — null for unknown
+  interface: string | null; // e.g. "SXM4" | "PCIe"
+  allocatable: number;
+  allocated: number;
+  available: number;        // allocatable - allocated
+};
+
+// `bottleneck` names the single constraint filtering the pool the most.
+// When matchingProviders is 0, it's the dimension to relax first.
+export type FeasibilityCheck = {
+  matchingProviders: number;
+  totalActiveProviders: number;
+  bottleneck?: 'cpu' | 'memory' | 'storage' | 'gpu';
 };
 
 export type DeployRequest = {
@@ -189,7 +225,7 @@ export type FunctionVersionSummary = {
 
 export type FunctionVersionDetail = FunctionVersionSummary & {
   source: Record<string, string>;
-  resources: { cpu: string; memory: string; storage: string };
+  resources: ResourceRequest;
   envVars: Record<string, string>;
 };
 
