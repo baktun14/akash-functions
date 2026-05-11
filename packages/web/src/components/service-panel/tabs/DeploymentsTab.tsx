@@ -286,22 +286,45 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
                 gap: 6,
                 padding: '4px 10px',
                 fontSize: 12,
-                background: dep.runnerOutdated
-                  ? 'rgba(245,165,36,0.12)'
-                  : 'var(--bg-elev-3)',
-                border: dep.runnerOutdated
-                  ? '1px solid rgba(245,165,36,0.45)'
-                  : '1px solid var(--line)',
+                background:
+                  updateState === 'submitting'
+                    ? 'var(--bg-elev-3)'
+                    : dep.runnerOutdated
+                      ? 'rgba(245,165,36,0.12)'
+                      : 'var(--bg-elev-3)',
+                border:
+                  updateState === 'submitting'
+                    ? '1px solid var(--line)'
+                    : dep.runnerOutdated
+                      ? '1px solid rgba(245,165,36,0.45)'
+                      : '1px solid var(--line)',
                 borderRadius: 6,
-                color: dep.runnerOutdated ? 'var(--warn, #f5a524)' : 'var(--fg)',
-                cursor: updateState === 'submitting' ? 'progress' : 'pointer',
-                opacity: updateState === 'submitting' ? 0.7 : 1,
+                color:
+                  updateState === 'submitting'
+                    ? 'var(--fg-muted)'
+                    : dep.runnerOutdated
+                      ? 'var(--warn, #f5a524)'
+                      : 'var(--fg)',
+                cursor: updateState === 'submitting' ? 'not-allowed' : 'pointer',
+                opacity: updateState === 'submitting' ? 0.55 : 1,
               }}
             >
               <Icon
-                name={dep.runnerOutdated ? 'arrowUp' : 'refresh'}
+                name={
+                  updateState === 'submitting'
+                    ? 'spinner'
+                    : dep.runnerOutdated
+                      ? 'arrowUp'
+                      : 'refresh'
+                }
                 size={11}
-                color={dep.runnerOutdated ? 'var(--warn, #f5a524)' : 'var(--fg-muted)'}
+                color={
+                  updateState === 'submitting'
+                    ? 'var(--fg-muted)'
+                    : dep.runnerOutdated
+                      ? 'var(--warn, #f5a524)'
+                      : 'var(--fg-muted)'
+                }
                 className={updateState === 'submitting' ? 'spin' : undefined}
               />
               {updateState === 'submitting'
