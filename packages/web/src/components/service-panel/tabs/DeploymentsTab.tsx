@@ -107,42 +107,25 @@ function describe(dep: DeploymentRecord | null): StateMeta {
   }
   switch (dep.state) {
     case 'pending':
-      return { label: 'Queued', pillClass: 'pill', body: 'Preparing SDL…', tone: 'neutral' };
+      return { label: 'Preparing', pillClass: 'pill', body: 'Setting up your environment', tone: 'neutral' };
     case 'bidding':
-      return {
-        label: 'Bidding',
-        pillClass: 'pill',
-        body: dep.dseq ? `Waiting for providers · dseq ${dep.dseq}` : 'Waiting for providers…',
-        tone: 'warn',
-      };
+      return { label: 'Reserving', pillClass: 'pill', body: 'Allocating compute resources', tone: 'warn' };
     case 'leased':
-      return {
-        label: 'Provisioning',
-        pillClass: 'pill',
-        body: dep.provider
-          ? `Provider ${truncate(dep.provider)} accepted · booting container`
-          : 'Provider accepted · booting container',
-        tone: 'warn',
-      };
+      return { label: 'Starting', pillClass: 'pill', body: 'Bringing your function online', tone: 'warn' };
     case 'live':
       return { label: 'Active', pillClass: 'pill pill-ok', body: 'ready to receive traffic', tone: 'ok' };
     case 'failed':
       return {
         label: 'Failed',
         pillClass: 'pill',
-        body: dep.errorMessage ?? 'Deploy failed',
+        body: dep.errorMessage ?? "Couldn't start your function",
         tone: 'error',
       };
     case 'closed':
-      return { label: 'Closed', pillClass: 'pill', body: 'Lease closed', tone: 'neutral' };
+      return { label: 'Stopped', pillClass: 'pill', body: 'Function stopped', tone: 'neutral' };
     default:
       return { label: dep.state, pillClass: 'pill', body: '', tone: 'neutral' };
   }
-}
-
-function truncate(addr: string): string {
-  if (addr.length <= 16) return addr;
-  return `${addr.slice(0, 10)}…${addr.slice(-4)}`;
 }
 
 type UpdateState = 'idle' | 'submitting' | 'submitted' | 'error';
@@ -232,6 +215,10 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   // Show the inner status row only when it adds information beyond the header
   // pill — i.e. transient/error states or "live but ingress not yet probed".
   const showStatusRow = meta.tone !== 'ok' || !reachable;
+  // True whenever something is in motion behind the scenes — drives the
+  // shimmer, animated ellipsis, and spinning icon. Excludes failed (red,
+  // static) and fully-reachable live (status row hidden anyway).
+  const isWorking = meta.tone === 'warn' || meta.tone === 'neutral' || (meta.tone === 'ok' && !reachable);
 
   return (
     <div>
@@ -403,7 +390,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           >
             {svc.image}
           </div>
-          {dep?.dseq && (
+          {dep?.state === 'live' && dep?.dseq && (
             <a
               href={`https://console.akash.network/deployments/${dep.dseq}`}
               target="_blank"
@@ -431,6 +418,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
 
         {showStatusRow && (
           <div
+            className={isWorking ? 'shimmer-row' : undefined}
             style={{
               marginTop: 12,
               padding: '8px 12px',
@@ -444,24 +432,25 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
             }}
           >
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--fg)' }}>
-              {meta.tone === 'ok' ? (
-                <Icon name="refresh" size={12} color="var(--warn, #f5a524)" className="spin" />
-              ) : meta.tone === 'error' ? (
+              {meta.tone === 'error' ? (
                 <Icon name="x" size={12} color={toneColor} />
+              ) : isWorking ? (
+                <Icon
+                  name="refresh"
+                  size={12}
+                  color={meta.tone === 'ok' ? 'var(--warn, #f5a524)' : toneColor}
+                  className="spin"
+                />
               ) : (
                 <Icon name="box" size={12} color={toneColor} />
               )}
               <span style={{ fontWeight: 500, color: meta.tone === 'ok' ? 'var(--warn, #f5a524)' : toneColor }}>
-                {meta.tone === 'ok' && !reachable ? 'Waiting for ingress' : meta.label}
+                {meta.tone === 'ok' && !reachable ? 'Finishing up' : meta.label}
               </span>
             </span>
             <span style={{ color: 'var(--fg-muted)' }}>·</span>
-            <span style={{ color: 'var(--fg)' }}>
-              {meta.tone === 'ok' && !reachable
-                ? publicUrl
-                  ? 'probing URL until it serves traffic…'
-                  : 'lease is live, URL pending…'
-                : meta.body}
+            <span className={isWorking ? 'dots-anim' : undefined} style={{ color: 'var(--fg)' }}>
+              {meta.tone === 'ok' && !reachable ? 'Finalizing your endpoint' : meta.body}
             </span>
           </div>
         )}

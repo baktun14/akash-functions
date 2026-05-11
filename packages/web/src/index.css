@@ -616,6 +616,16 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+@keyframes ellipsis-dots {
+  0%, 20%   { content: ''; }
+  40%       { content: '.'; }
+  60%       { content: '..'; }
+  80%, 100% { content: '...'; }
+}
+@keyframes shimmer-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
 
 .panel-in { animation: panel-in 320ms var(--ease-out); }
 .page-in  { animation: fade-up 240ms var(--ease-out); }
@@ -623,3 +633,26 @@
 .toast-in { animation: toast-in 200ms var(--ease-out); }
 .modal-in { animation: modal-in 200ms var(--ease-out); }
 .spin     { animation: spin 800ms linear infinite; }
+
+.dots-anim::after {
+  content: '';
+  display: inline-block;
+  width: 1.1em;
+  text-align: left;
+  animation: ellipsis-dots 1.6s steps(1, end) infinite;
+}
+
+.shimmer-row { position: relative; overflow: hidden; }
+.shimmer-row::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.06) 50%,
+    transparent 100%
+  );
+  animation: shimmer-sweep 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
