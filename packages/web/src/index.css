@@ -642,6 +642,118 @@
   animation: ellipsis-dots 1.6s steps(1, end) infinite;
 }
 
+/* ─── Agent chat panel ─── */
+/* AGENT_PANEL_WIDTH keeps the page-area shift in sync with the panel width. */
+:root {
+  --agent-panel-width: 420px;
+}
+
+.agent-panel {
+  width: var(--agent-panel-width);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: var(--bg-elev-1);
+  animation: panel-in 220ms var(--ease-out);
+  min-height: 0;
+  z-index: 106; /* one above .builder so it sits on top of the modal */
+}
+.agent-panel-head {
+  display: flex; align-items: center; gap: 8px;
+  height: 48px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.agent-panel-conn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev-2);
+}
+.agent-panel-connect {
+  display: flex; gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev-2);
+}
+.agent-panel-context {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.agent-panel-error {
+  display: flex; align-items: center; gap: 6px;
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 41, 3, 0.08);
+  border: 1px solid rgba(255, 41, 3, 0.25);
+  color: var(--accent-soft);
+  font-size: 11.5px;
+}
+.agent-panel-composer {
+  display: flex; gap: 8px; align-items: flex-end;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-elev-2);
+}
+.agent-panel-composer textarea {
+  flex: 1;
+  resize: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  min-height: 36px;
+  max-height: 160px;
+}
+.agent-panel-composer textarea:focus { border-color: var(--line-strong); }
+.agent-panel-composer textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* When the agent is open and the builder modal is also up, the builder grows
+   to 3 columns so the editor + side-panel stay visible next to the chat. */
+.builder.with-agent {
+  grid-template-columns: 1fr 460px var(--agent-panel-width);
+  grid-template-areas:
+    'head head head'
+    'editor side agent';
+}
+.builder-agent-slot {
+  grid-area: agent;
+  border-left: 1px solid var(--line);
+  display: flex;
+  min-height: 0;
+}
+.builder-agent-slot > .agent-panel {
+  width: 100%;
+  border-left: none;
+}
+@media (max-width: 1100px) {
+  /* Narrow viewport: drop back to a single column stacked layout so the chat
+     doesn't crush the editor. The chat panel hides; the user can close the
+     builder to bring the chat back. */
+  .builder.with-agent {
+    grid-template-columns: 1fr;
+    grid-template-rows: 56px 1fr auto;
+    grid-template-areas:
+      'head'
+      'editor'
+      'side';
+  }
+  .builder-agent-slot { display: none; }
+}
+
 .shimmer-row { position: relative; overflow: hidden; }
 .shimmer-row::after {
   content: '';

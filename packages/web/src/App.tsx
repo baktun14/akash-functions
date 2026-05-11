@@ -30,6 +30,8 @@ import { TemplatesPage } from './components/templates/TemplatesPage';
 import { FunctionBuilder } from './components/builder/FunctionBuilder';
 import { FunctionEditor } from './components/builder/FunctionEditor';
 import { Toast } from './components/ui/Toast';
+import { ActiveEditorProvider } from './components/agent/ActiveEditorContext';
+import { AgentPanel } from './components/agent/AgentPanel';
 import { ApiKeysPage } from './pages/ApiKeysPage';
 import { FunctionsPage } from './pages/FunctionsPage';
 import { FunctionDetailPage } from './pages/FunctionDetailPage';
@@ -38,12 +40,14 @@ import { useFunctions } from './lib/useFunctions';
 import { sessionDeploys } from './lib/sessionDeploys';
 import { api } from './lib/api';
 
+type OpenBuilderOpts = { preset?: PresetId | null; initialSource?: string | null };
+
 type LayoutContext = {
   session: Session;
   services: FunctionRecord[];
   setLocal: (next: FunctionRecord[] | ((prev: FunctionRecord[]) => FunctionRecord[])) => void;
   refresh: () => Promise<void>;
-  openBuilder: (preset?: PresetId | null) => void;
+  openBuilder: (preset?: PresetId | null, opts?: OpenBuilderOpts) => void;
   openEditor: (fnId: string) => void;
   // Tick that bumps after a save/restore so subscribed tabs (Source Code,
   // History) re-fetch their version data without prop-drilling.
@@ -99,6 +103,7 @@ function Layout({
   const { services, refresh, setLocal } = useFunctions();
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderPreset, setBuilderPreset] = useState<PresetId | null>(null);
+  const [builderInitialSource, setBuilderInitialSource] = useState<string | null>(null);
   const [editorTarget, setEditorTarget] = useState<
     { fnId: string; detail: FunctionVersionDetail } | null
   >(null);
@@ -106,6 +111,7 @@ function Layout({
   const [versionRev, setVersionRev] = useState(0);
   const [toast, setToast] = useState<ToastMsg | null>(null);
   const [expired, setExpired] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
 
   // ?expired=1 banner on mount.
   useEffect(() => {
@@ -119,8 +125,17 @@ function Layout({
     setBuilderOpen(false);
   };
 
-  const openBuilder = (preset: PresetId | null = null) => {
-    setBuilderPreset(preset);
+  const openBuilder = (preset: PresetId | null = null, opts?: OpenBuilderOpts) => {
+    setBuilderPreset(opts?.preset ?? preset);
+    setBuilderInitialSource(opts?.initialSource ?? null);
+    setBuilderOpen(true);
+  };
+
+  // Agent's "Use as new function" lands here: open the builder seeded with the
+  // generated code.
+  const openBuilderWithSource = (code: string) => {
+    setBuilderPreset(null);
+    setBuilderInitialSource(code);
     setBuilderOpen(true);
   };
 
@@ -198,73 +213,96 @@ function Layout({
     versionRev,
   };
 
-  return (
-    <div
-      style={{
-        width: '100vw',
-        height: '100vh',
-        overflow: 'hidden',
-        position: 'relative',
-        display: 'flex',
-      }}
-    >
-      <Sidebar
-        active={sidebarActive}
-        onSelect={(id) => navigate(sidebarIdToPath(id))}
-        onDeploy={() => openBuilder(null)}
-      />
+  // Builder modal's grid is told whether to include the agent slot. When the
+  // agent is open AND the builder is mounted, the builder takes 3 columns
+  // (editor | side | agent) and renders the panel inside it. When the agent is
+  // open but no modal is mounted, the panel renders as a sibling of <Outlet/>.
+  const builderHostsAgent = builderOpen && agentOpen;
+  const editorHostsAgent = !!editorTarget && agentOpen;
+  const agentInModal = builderHostsAgent || editorHostsAgent;
 
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        <TopBar
-          session={session}
-          expired={expired}
-          onDisconnect={handleDisconnect}
-          onReconnect={() => setReconnecting(true)}
-          onOpenAgent={() => openBuilder(null)}
+  const agentPanelEl = agentOpen && (
+    <AgentPanel
+      onClose={() => setAgentOpen(false)}
+      onUseAsNewFunction={openBuilderWithSource}
+    />
+  );
+
+  return (
+    <ActiveEditorProvider>
+      <div
+        style={{
+          width: '100vw',
+          height: '100vh',
+          overflow: 'hidden',
+          position: 'relative',
+          display: 'flex',
+        }}
+      >
+        <Sidebar
+          active={sidebarActive}
+          onSelect={(id) => navigate(sidebarIdToPath(id))}
+          onDeploy={() => openBuilder(null)}
         />
 
-        <div style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative' }}>
-          <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
-            <Outlet context={ctx} />
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+          <TopBar
+            session={session}
+            expired={expired}
+            onDisconnect={handleDisconnect}
+            onReconnect={() => setReconnecting(true)}
+            onOpenAgent={() => setAgentOpen((o) => !o)}
+          />
+
+          <div style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative' }}>
+            <div style={{ flex: 1, position: 'relative', minWidth: 0 }}>
+              <Outlet context={ctx} />
+            </div>
+
+            {/* Page-level dock — only when agent is open AND no modal is up. */}
+            {agentOpen && !agentInModal && agentPanelEl}
+
+            {expired && (
+              <ExpiredBanner
+                onReconnect={() => {
+                  setReconnecting(true);
+                  setExpired(false);
+                }}
+                onDismiss={() => setExpired(false)}
+              />
+            )}
+
+            {builderOpen && (
+              <FunctionBuilder
+                initialPreset={builderPreset}
+                initialSource={builderInitialSource}
+                onClose={() => setBuilderOpen(false)}
+                onDeploy={handleDeploy}
+                agentSlot={builderHostsAgent ? agentPanelEl : null}
+              />
+            )}
+            {editorTarget && (
+              <FunctionEditor
+                functionId={editorTarget.fnId}
+                functionName={
+                  services.find((s) => s.id === editorTarget.fnId)?.name ?? 'function'
+                }
+                initialDetail={editorTarget.detail}
+                hasActiveDeployment={
+                  services.find((s) => s.id === editorTarget.fnId)?.status === 'online' ||
+                  services.find((s) => s.id === editorTarget.fnId)?.status === 'pending'
+                }
+                onClose={() => setEditorTarget(null)}
+                onSaved={handleEditorSaved}
+                onSavedAndDeployed={handleEditorSavedAndDeployed}
+                agentSlot={editorHostsAgent ? agentPanelEl : null}
+              />
+            )}
+            {toast && <Toast toast={toast} />}
           </div>
-
-          {expired && (
-            <ExpiredBanner
-              onReconnect={() => {
-                setReconnecting(true);
-                setExpired(false);
-              }}
-              onDismiss={() => setExpired(false)}
-            />
-          )}
-
-          {builderOpen && (
-            <FunctionBuilder
-              initialPreset={builderPreset}
-              onClose={() => setBuilderOpen(false)}
-              onDeploy={handleDeploy}
-            />
-          )}
-          {editorTarget && (
-            <FunctionEditor
-              functionId={editorTarget.fnId}
-              functionName={
-                services.find((s) => s.id === editorTarget.fnId)?.name ?? 'function'
-              }
-              initialDetail={editorTarget.detail}
-              hasActiveDeployment={
-                services.find((s) => s.id === editorTarget.fnId)?.status === 'online' ||
-                services.find((s) => s.id === editorTarget.fnId)?.status === 'pending'
-              }
-              onClose={() => setEditorTarget(null)}
-              onSaved={handleEditorSaved}
-              onSavedAndDeployed={handleEditorSavedAndDeployed}
-            />
-          )}
-          {toast && <Toast toast={toast} />}
         </div>
       </div>
-    </div>
+    </ActiveEditorProvider>
   );
 }
 

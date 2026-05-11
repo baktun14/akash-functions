@@ -22,6 +22,8 @@ import type {
   ResourceRequest,
   GpuModelOption,
   FeasibilityCheck,
+  AgentChatRequest,
+  AgentChatChunk,
 } from '@shared/types';
 import {
   AKASHML_KEY,
@@ -108,6 +110,14 @@ export interface ApiClient {
   getAkashMLConnection(): AkashMLConnection | null;
   saveAkashMLConnection(key: string): AkashMLConnection;
   clearAkashMLConnection(): void;
+
+  // Streams the agent chat reply from POST /api/agent/chat as SSE chunks.
+  // Generator yields one chunk per server-sent event; aborts when the
+  // caller's AbortSignal fires.
+  agentChatStream(
+    req: AgentChatRequest,
+    signal?: AbortSignal
+  ): AsyncIterable<AgentChatChunk>;
 
   getUsage(): Promise<UsageInfo>;
 }
@@ -569,6 +579,7 @@ class MockApi implements ApiClient {
   saveAkashMLConnection(key: string): AkashMLConnection {
     const trimmed = key.trim();
     const conn: AkashMLConnection = {
+      key: trimmed,
       last4: trimmed.slice(-4),
       connectedAt: Date.now(),
     };
@@ -578,6 +589,31 @@ class MockApi implements ApiClient {
 
   clearAkashMLConnection(): void {
     removeKey(AKASHML_KEY);
+  }
+
+  // Canned offline reply so the chat UI can be developed without a backend.
+  async *agentChatStream(
+    _req: AgentChatRequest,
+    signal?: AbortSignal
+  ): AsyncIterable<AgentChatChunk> {
+    const reply =
+      "Here's a Hono REST endpoint that returns a list of cats. " +
+      'Mock mode — wire VITE_API_MODE=live for real AkashML output.\n\n' +
+      '```ts\n' +
+      "import { Hono } from 'hono';\n\n" +
+      'const app = new Hono();\n\n' +
+      "app.get('/cats', (c) => c.json([\n" +
+      "  { id: 1, name: 'Whiskers' },\n" +
+      "  { id: 2, name: 'Mittens' },\n" +
+      ']));\n\n' +
+      'export default app;\n' +
+      '```\n';
+    for (const chunk of reply.match(/.{1,12}/gs) ?? []) {
+      if (signal?.aborted) return;
+      await new Promise((r) => setTimeout(r, 30));
+      yield { type: 'delta', text: chunk };
+    }
+    yield { type: 'done' };
   }
 
   async getUsage(): Promise<UsageInfo> {
@@ -841,8 +877,10 @@ class LiveApi implements ApiClient {
   }
 
   saveAkashMLConnection(key: string): AkashMLConnection {
+    const trimmed = key.trim();
     const conn: AkashMLConnection = {
-      last4: key.trim().slice(-4),
+      key: trimmed,
+      last4: trimmed.slice(-4),
       connectedAt: Date.now(),
     };
     writeJSON(AKASHML_KEY, conn);
@@ -851,6 +889,55 @@ class LiveApi implements ApiClient {
 
   clearAkashMLConnection(): void {
     removeKey(AKASHML_KEY);
+  }
+
+  async *agentChatStream(
+    req: AgentChatRequest,
+    signal?: AbortSignal
+  ): AsyncIterable<AgentChatChunk> {
+    const res = await fetch(this.base + '/api/agent/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...this.authHeader,
+      },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`${res.status}: ${text || res.statusText}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE events end on a blank line. Parse all complete events out of the
+        // buffer; leave any partial event behind for the next read.
+        let sep: number;
+        while ((sep = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const line = frame.split('\n').find((l) => l.startsWith('data:'));
+          if (!line) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          try {
+            yield JSON.parse(payload) as AgentChatChunk;
+          } catch {
+            // Tolerate malformed frames rather than killing the stream.
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   async getUsage(): Promise<UsageInfo> {

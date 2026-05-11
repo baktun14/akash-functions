@@ -8,7 +8,7 @@
 // We let the user deploy with 0 matches (providers come online dynamically)
 // but require an explicit confirm so they don't sit in `bidding` by surprise.
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import type {
   CodeSample,
   GpuSpec,
@@ -23,12 +23,19 @@ import { CodeEditor } from './CodeEditor';
 import { tokensToSource } from '../../lib/api';
 import { useGpuModels } from '../../lib/use-gpu-models';
 import { useFeasibility } from '../../lib/use-feasibility';
+import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
 
 type Props = {
   initialPreset?: PresetId | null;
+  /** Seed for the editor when opening the builder from the agent chat. Falls
+   *  back to the preset's template source when absent. */
+  initialSource?: string | null;
   onClose: () => void;
   /** customResources is sent only when the user opened Adjust and edited the form. */
   onDeploy: (sample: CodeSample, customResources?: ResourceRequest) => void;
+  /** Agent chat panel — when present, the builder shifts to a 3-column grid
+   *  with the agent docked on the right. Layout owns the panel; we just host it. */
+  agentSlot?: ReactNode;
 };
 
 type SizeUnit = 'Mi' | 'Gi';
@@ -66,15 +73,31 @@ function toResourceRequest(form: ResourceForm): ResourceRequest {
   };
 }
 
-export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
+export function FunctionBuilder({
+  initialPreset,
+  initialSource,
+  onClose,
+  onDeploy,
+  agentSlot,
+}: Props) {
   const initial: PresetId =
     initialPreset && SAMPLES[initialPreset] ? initialPreset : 'rest';
   const [preset, setPreset] = useState<PresetId>(initial);
   const [source, setSource] = useState<string>(() =>
-    tokensToSource(SAMPLES[initial].code)
+    initialSource ?? tokensToSource(SAMPLES[initial].code)
   );
   const [prompt, setPrompt] = useState<string>(SAMPLES[initial].prompt);
   const [name, setName] = useState<string>(SAMPLES[initial].name);
+
+  // Expose this editor to the agent panel so it can read the current source
+  // and write generated code back via setSource.
+  useRegisterActiveEditor({
+    mode: 'create',
+    preset,
+    name,
+    currentSource: source,
+    applySource: setSource,
+  });
 
   // Adjust panel: closed by default so casual users see the preset chips, can
   // open inline to override. customRes === null means "use the preset defaults"
@@ -148,7 +171,10 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
       onClick={requestClose}
       style={{ alignItems: 'stretch', justifyContent: 'stretch', padding: 0 }}
     >
-      <div className="builder" onClick={(e) => e.stopPropagation()}>
+      <div
+        className={agentSlot ? 'builder with-agent' : 'builder'}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="builder-head">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <FnLogo size={26} />
@@ -418,6 +444,7 @@ export function FunctionBuilder({ initialPreset, onClose, onDeploy }: Props) {
             </div>
           )}
         </div>
+        {agentSlot && <div className="builder-agent-slot">{agentSlot}</div>}
       </div>
     </div>
   );

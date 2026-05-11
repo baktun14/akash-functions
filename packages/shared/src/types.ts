@@ -69,9 +69,41 @@ export type CodeSample = {
 };
 
 export type AkashMLConnection = {
+  // Full key, stored locally. Sent to the backend only when the user explicitly
+  // triggers an action that needs it (deploy with GPU preset, agent chat).
+  key: string;
   last4: string;
   connectedAt: number;
 };
+
+// Agent chat — natural-language function authoring.
+
+export type AgentChatRole = 'user' | 'assistant';
+
+export type AgentChatMessage = {
+  role: AgentChatRole;
+  content: string;
+};
+
+// Snapshot of whichever function editor is currently mounted in the UI. The
+// backend uses this to prime the model with the relevant source.
+export type AgentChatContext =
+  | { mode: 'create'; preset: PresetId; name?: string; currentSource: string }
+  | { mode: 'edit'; functionId: string; functionName: string; primaryPath: string; currentSource: string }
+  | { mode: 'none' };
+
+export type AgentChatRequest = {
+  messages: AgentChatMessage[];
+  context: AgentChatContext;
+  akashmlKey: string;
+  model?: string;
+};
+
+// Streamed chunks the route emits as SSE `data: {json}` frames.
+export type AgentChatChunk =
+  | { type: 'delta'; text: string }
+  | { type: 'done' }
+  | { type: 'error'; message: string };
 
 export type ToastKind = 'ok' | 'error';
 export type ToastMsg = { kind: ToastKind; text: string };
