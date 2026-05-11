@@ -112,6 +112,14 @@ function Layout({
   const [toast, setToast] = useState<ToastMsg | null>(null);
   const [expired, setExpired] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
+  const [agentPendingPrompt, setAgentPendingPrompt] = useState<string | null>(null);
+
+  // Editor's "Quick fix with agent" affordance funnels through here: ensure
+  // the panel is mounted, then queue the prompt for the panel to consume.
+  const requestAgentFix = (prompt: string) => {
+    setAgentOpen(true);
+    setAgentPendingPrompt(prompt);
+  };
 
   // ?expired=1 banner on mount.
   useEffect(() => {
@@ -225,6 +233,8 @@ function Layout({
     <AgentPanel
       onClose={() => setAgentOpen(false)}
       onUseAsNewFunction={openBuilderWithSource}
+      pendingPrompt={agentPendingPrompt}
+      onPendingPromptConsumed={() => setAgentPendingPrompt(null)}
     />
   );
 
@@ -298,6 +308,7 @@ function Layout({
                 onSaved={handleEditorSaved}
                 onSavedAndDeployed={handleEditorSavedAndDeployed}
                 agentSlot={editorHostsAgent ? agentPanelEl : null}
+                onAgentFix={requestAgentFix}
               />
             )}
             {toast && <Toast toast={toast} />}

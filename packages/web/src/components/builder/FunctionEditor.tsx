@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
 import { api } from '../../lib/api';
+import { detectStartupIssue } from '../../lib/codeChecks';
 import { Icon } from '../icons';
 import { CodeEditor } from './CodeEditor';
 import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
@@ -25,6 +26,10 @@ type Props = {
   onSavedAndDeployed: (newVersionId: string, deployment: DeploymentRecord) => void;
   /** Agent chat panel — when present, switches the editor to a 3-column grid. */
   agentSlot?: ReactNode;
+  /** Invoked by the "Quick fix with agent" affordance when source has a known
+   *  startup issue (e.g. double server-start). The host opens the agent panel
+   *  and queues the corrective prompt for auto-send. */
+  onAgentFix?: (prompt: string) => void;
 };
 
 const PRIMARY_PATH_CANDIDATES = ['src/index.ts', 'src/index.tsx', 'index.ts', 'index.tsx'];
@@ -48,6 +53,7 @@ export function FunctionEditor({
   onSaved,
   onSavedAndDeployed,
   agentSlot,
+  onAgentFix,
 }: Props): ReactElement {
   const primaryPath = useMemo(() => pickPrimaryPath(initialDetail.source), [initialDetail.source]);
   const initialPrimaryValue = initialDetail.source[primaryPath] ?? '';
@@ -70,6 +76,7 @@ export function FunctionEditor({
     | null
   >(null);
   const dirty = source !== initialPrimaryValue || message.length > 0;
+  const startupIssue = useMemo(() => detectStartupIssue(source), [source]);
 
   // Confirm-on-close if the user has unsaved edits.
   const requestClose = () => {
@@ -179,6 +186,22 @@ export function FunctionEditor({
 
         <div className="builder-editor scroll" style={{ padding: 0 }}>
           <div style={{ height: '100%', padding: '16px 24px' }}>
+            {startupIssue && (
+              <div className="editor-warn" role="alert">
+                <Icon name="info" size={13} />
+                <span style={{ flex: 1, lineHeight: 1.5 }}>{startupIssue.message}</span>
+                {onAgentFix && (
+                  <button
+                    type="button"
+                    onClick={() => onAgentFix(startupIssue.agentPrompt)}
+                    className="btn btn-primary btn-sm editor-warn-action"
+                  >
+                    <Icon name="sparkles" size={11} />
+                    Quick fix with agent
+                  </button>
+                )}
+              </div>
+            )}
             <CodeEditor value={source} onChange={setSource} minHeight={400} />
           </div>
         </div>

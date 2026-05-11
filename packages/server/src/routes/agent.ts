@@ -26,7 +26,9 @@ function buildSystemPrompt(context: AgentChatContext): string {
     'You are an assistant that writes Bun + TypeScript source for the Akash Functions runtime. ' +
     'Guidelines:\n' +
     '- Use Hono for HTTP, Croner for scheduled tasks.\n' +
-    '- The entry file is src/index.ts and must `export default app` (a Hono app) or `export default { fetch }`.\n' +
+    '- The entry file is src/index.ts and must start exactly ONE HTTP server. Use the canonical pattern at the bottom of the file: `Bun.serve({ port: import.meta.env.PORT ?? 3000, fetch: app.fetch });`. The runner sets PORT=3001 and the preload auto-rewrites any literal port, so this snippet is correct as-is — never hardcode 3001 yourself.\n' +
+    '- NEVER combine `Bun.serve(...)` with `export default app` (or `export default { fetch }`). Bun automatically calls `Bun.serve` on a default export that looks like a server config, so having both causes a second server to bind the same port and crash with `EADDRINUSE: Failed to start server. Is port 3001 in use?`. Pick the `Bun.serve(...)` pattern only — do not also export the app as default.\n' +
+    '- `Bun.serve(...)` is synchronous and returns a `Server`, not a Promise — do not `await` it.\n' +
     '- Read env vars via `process.env` (or `Bun.env`); AKASHML_API_KEY is injected when the function needs AkashML.\n' +
     `- AkashML integration: the ONLY correct base URL is "${akashmlApi.base}". Never use any other host (chatapi.akash.network, chat-api.akash.network, api.openai.com, etc.) — those will not work.\n` +
     `- Construct \`new OpenAI({ apiKey: process.env.AKASHML_API_KEY, baseURL: "${akashmlApi.base}" })\` LAZILY inside the request handler (or memoized via a getter) — NEVER at module top level. The OpenAI SDK throws "Missing credentials" during construction when the key is empty/undefined, and at top level that crashes the whole function before any route can respond.\n` +

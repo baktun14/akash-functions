@@ -14,9 +14,20 @@ type Props = {
   /** Invoked when the user clicks "Use as new function" on a code block while
    *  no editor is currently open. The Layout owns the builder-open flow. */
   onUseAsNewFunction: (code: string) => void;
+  /** When set, the panel auto-sends this string as a user turn on mount/change
+   *  and calls `onPendingPromptConsumed` to clear it. Used by the editor's
+   *  "Quick fix with agent" affordance to dispatch a corrective request without
+   *  the user having to retype it. */
+  pendingPrompt?: string | null;
+  onPendingPromptConsumed?: () => void;
 };
 
-export function AgentPanel({ onClose, onUseAsNewFunction }: Props): ReactElement {
+export function AgentPanel({
+  onClose,
+  onUseAsNewFunction,
+  pendingPrompt,
+  onPendingPromptConsumed,
+}: Props): ReactElement {
   // Re-read the AkashML connection each render so connecting it from the
   // builder reflects here without a remount.
   const [conn, setConn] = useState(() => api.getAkashMLConnection());
@@ -40,6 +51,29 @@ export function AgentPanel({ onClose, onUseAsNewFunction }: Props): ReactElement
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  // Auto-dispatch a prompt requested from outside the panel (e.g. the
+  // FunctionEditor's "Quick fix with agent" button). We always clear the
+  // pending prompt so we don't re-fire on unrelated re-renders, even if we
+  // bailed out because the chat is busy or AkashML isn't connected — the
+  // user will see the existing UI states (composer disabled / connect chip)
+  // and can retry manually.
+  useEffect(() => {
+    if (!pendingPrompt) return;
+    if (chat.pending) {
+      onPendingPromptConsumed?.();
+      return;
+    }
+    if (!conn) {
+      onPendingPromptConsumed?.();
+      return;
+    }
+    void chat.send(pendingPrompt);
+    onPendingPromptConsumed?.();
+    // chat.send and onPendingPromptConsumed are stable per render; we
+    // intentionally depend only on the prompt identity here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPrompt]);
 
   const submit = () => {
     const trimmed = text.trim();
@@ -176,6 +210,10 @@ export function AgentPanel({ onClose, onUseAsNewFunction }: Props): ReactElement
         messages={chat.messages}
         pending={chat.pending}
         onUseAsNewFunction={onUseAsNewFunction}
+        onQuickFix={(prompt) => {
+          if (chat.pending || !conn) return;
+          void chat.send(prompt);
+        }}
       />
 
       {chat.error && (
