@@ -152,6 +152,8 @@ type ItemStatus =
   | { kind: 'ok' }
   | { kind: 'failed'; error: string };
 
+const COLLAPSE_THRESHOLD = 5;
+
 function OutdatedRunnerBanner({
   outdated,
   onDone,
@@ -161,40 +163,43 @@ function OutdatedRunnerBanner({
 }) {
   const [state, setState] = useState<'idle' | 'running' | 'done' | 'partial'>('idle');
   const [items, setItems] = useState<Record<string, ItemStatus>>({});
+  const [batch, setBatch] = useState<FunctionRecord[]>([]);
+  const [collapsed, setCollapsed] = useState(false);
 
-  // Runs in-place updates one at a time. Sequential because Akash's MsgUpdateDeployment
-  // already serializes per dseq, but more importantly so a bad function's failure
-  // surfaces immediately rather than after the whole batch lands.
   const runUpdates = async (targets: FunctionRecord[]) => {
     if (state === 'running') return;
     if (targets.length === 0) return;
     setState('running');
+    setBatch(targets);
+    setCollapsed(targets.length > COLLAPSE_THRESHOLD);
     const next: Record<string, ItemStatus> = {};
     for (const svc of targets) next[svc.id] = { kind: 'pending' };
     setItems(next);
 
     let failed = 0;
-    for (const svc of targets) {
-      setItems((cur) => ({ ...cur, [svc.id]: { kind: 'running' } }));
-      if (!svc.latestDeploymentId) {
-        failed += 1;
-        setItems((cur) => ({
-          ...cur,
-          [svc.id]: { kind: 'failed', error: 'No deployment id on record — refresh and retry.' },
-        }));
-        continue;
-      }
-      try {
-        await api.updateRunnerImage(svc.id, svc.latestDeploymentId);
-        setItems((cur) => ({ ...cur, [svc.id]: { kind: 'ok' } }));
-      } catch (err) {
-        failed += 1;
-        setItems((cur) => ({
-          ...cur,
-          [svc.id]: { kind: 'failed', error: (err as Error).message || 'Unknown error' },
-        }));
-      }
-    }
+    await Promise.all(
+      targets.map(async (svc) => {
+        setItems((cur) => ({ ...cur, [svc.id]: { kind: 'running' } }));
+        if (!svc.latestDeploymentId) {
+          failed += 1;
+          setItems((cur) => ({
+            ...cur,
+            [svc.id]: { kind: 'failed', error: 'No deployment id on record — refresh and retry.' },
+          }));
+          return;
+        }
+        try {
+          await api.updateRunnerImage(svc.id, svc.latestDeploymentId);
+          setItems((cur) => ({ ...cur, [svc.id]: { kind: 'ok' } }));
+        } catch (err) {
+          failed += 1;
+          setItems((cur) => ({
+            ...cur,
+            [svc.id]: { kind: 'failed', error: (err as Error).message || 'Unknown error' },
+          }));
+        }
+      })
+    );
     setState(failed === 0 ? 'done' : 'partial');
     if (onDone) await onDone();
   };
@@ -206,13 +211,15 @@ function OutdatedRunnerBanner({
         .filter(([, s]) => s.kind === 'failed')
         .map(([id]) => id)
     );
-    void runUpdates(outdated.filter((s) => failedIds.has(s.id)));
+    void runUpdates(batch.filter((s) => failedIds.has(s.id)));
   };
 
   const okCount = Object.values(items).filter((s) => s.kind === 'ok').length;
   const failedCount = Object.values(items).filter((s) => s.kind === 'failed').length;
+  const runningCount = Object.values(items).filter((s) => s.kind === 'running').length;
+  const pendingCount = Object.values(items).filter((s) => s.kind === 'pending').length;
   const settled = okCount + failedCount;
-  const total = state === 'running' ? Object.keys(items).length : outdated.length;
+  const total = state === 'idle' ? outdated.length : Object.keys(items).length;
   // Progress bar still nudges off zero on the first tick so the user gets an
   // immediate visual signal that something happened.
   const pct = total === 0 ? 0 : Math.max(2, (settled / total) * 100);
@@ -346,9 +353,78 @@ function OutdatedRunnerBanner({
       )}
 
       {(state === 'running' || state === 'partial') && (
+        <BulkDetails
+          batch={batch}
+          items={items}
+          collapsed={collapsed}
+          onToggle={() => setCollapsed((v) => !v)}
+          okCount={okCount}
+          runningCount={runningCount}
+          pendingCount={pendingCount}
+          failedCount={failedCount}
+        />
+      )}
+    </div>
+  );
+}
+
+function BulkDetails({
+  batch,
+  items,
+  collapsed,
+  onToggle,
+  okCount,
+  runningCount,
+  pendingCount,
+  failedCount,
+}: {
+  batch: FunctionRecord[];
+  items: Record<string, ItemStatus>;
+  collapsed: boolean;
+  onToggle: () => void;
+  okCount: number;
+  runningCount: number;
+  pendingCount: number;
+  failedCount: number;
+}) {
+  const showToggle = batch.length > COLLAPSE_THRESHOLD;
+  const summaryParts: string[] = [];
+  if (okCount) summaryParts.push(`${okCount} done`);
+  if (runningCount) summaryParts.push(`${runningCount} updating`);
+  if (pendingCount) summaryParts.push(`${pendingCount} pending`);
+  if (failedCount) summaryParts.push(`${failedCount} failed`);
+  const visible = collapsed
+    ? batch.filter((svc) => items[svc.id]?.kind === 'failed')
+    : batch;
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {showToggle && (
+        <button
+          type="button"
+          onClick={onToggle}
+          className="btn btn-subtle btn-sm"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '2px 8px',
+            fontSize: 12,
+            color: 'var(--fg-muted)',
+            background: 'transparent',
+            border: 'none',
+          }}
+        >
+          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
+          {collapsed
+            ? `${summaryParts.join(' · ')} — show details`
+            : 'Hide details'}
+        </button>
+      )}
+      {visible.length > 0 && (
         <ul
           style={{
-            margin: '12px 0 0',
+            margin: showToggle ? '6px 0 0' : 0,
             padding: 0,
             listStyle: 'none',
             display: 'flex',
@@ -356,7 +432,7 @@ function OutdatedRunnerBanner({
             gap: 6,
           }}
         >
-          {outdated.map((svc) => {
+          {visible.map((svc) => {
             const s = items[svc.id];
             if (!s) return null;
             return <BulkItemRow key={svc.id} name={svc.name} status={s} />;
