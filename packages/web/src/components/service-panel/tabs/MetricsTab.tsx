@@ -7,112 +7,157 @@ type Range = (typeof RANGES)[number];
 export function MetricsTab() {
   const [range, setRange] = useState<Range>('1h');
   return (
-    <div>
+    <div style={{ position: 'relative' }}>
       <div
+        aria-hidden="true"
         style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 18,
+          filter: 'blur(3px)',
+          opacity: 0.45,
+          pointerEvents: 'none',
+          userSelect: 'none',
         }}
       >
         <div
           style={{
-            display: 'inline-flex',
-            padding: 3,
-            borderRadius: 9999,
-            background: 'var(--bg-elev-2)',
-            border: '1px solid var(--line)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 18,
           }}
         >
-          {RANGES.map((r) => (
+          <div
+            style={{
+              display: 'inline-flex',
+              padding: 3,
+              borderRadius: 9999,
+              background: 'var(--bg-elev-2)',
+              border: '1px solid var(--line)',
+            }}
+          >
+            {RANGES.map((r) => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                style={{
+                  padding: '5px 14px',
+                  borderRadius: 9999,
+                  border: 'none',
+                  background: range === r ? 'var(--bg-elev-4)' : 'transparent',
+                  color: range === r ? 'var(--fg)' : 'var(--fg-muted)',
+                  fontSize: 12,
+                  fontWeight: 500,
+                  fontFamily: 'JetBrains Mono, monospace',
+                  cursor: 'pointer',
+                }}
+              >
+                {r}
+              </button>
+            ))}
+          </div>
+          <div
+            style={{
+              display: 'inline-flex',
+              padding: 3,
+              borderRadius: 8,
+              background: 'var(--bg-elev-2)',
+              border: '1px solid var(--line)',
+            }}
+          >
             <button
-              key={r}
-              onClick={() => setRange(r)}
               style={{
-                padding: '5px 14px',
-                borderRadius: 9999,
+                padding: '5px 8px',
                 border: 'none',
-                background: range === r ? 'var(--bg-elev-4)' : 'transparent',
-                color: range === r ? 'var(--fg)' : 'var(--fg-muted)',
-                fontSize: 12,
-                fontWeight: 500,
-                fontFamily: 'JetBrains Mono, monospace',
-                cursor: 'pointer',
+                borderRadius: 6,
+                background: 'transparent',
+                color: 'var(--fg-muted)',
               }}
             >
-              {r}
+              <Icon name="layers" size={13} />
             </button>
-          ))}
+            <button
+              style={{
+                padding: '5px 8px',
+                border: 'none',
+                borderRadius: 6,
+                background: 'var(--bg-elev-4)',
+                color: 'var(--fg)',
+              }}
+            >
+              <Icon name="grid" size={13} />
+            </button>
+          </div>
         </div>
-        <div
-          style={{
-            display: 'inline-flex',
-            padding: 3,
-            borderRadius: 8,
-            background: 'var(--bg-elev-2)',
-            border: '1px solid var(--line)',
-          }}
-        >
-          <button
-            style={{
-              padding: '5px 8px',
-              border: 'none',
-              borderRadius: 6,
-              background: 'transparent',
-              color: 'var(--fg-muted)',
-            }}
-          >
-            <Icon name="layers" size={13} />
-          </button>
-          <button
-            style={{
-              padding: '5px 8px',
-              border: 'none',
-              borderRadius: 6,
-              background: 'var(--bg-elev-4)',
-              color: 'var(--fg)',
-            }}
-          >
-            <Icon name="grid" size={13} />
-          </button>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <MetricTile
+            title="CPU"
+            unit="vCPU"
+            max={0.8}
+            kind="line"
+            data={[0.04, 0.05, 0.04, 0.05, 0.06, 0.04]}
+            accent="#8C8CFF"
+          />
+          <MetricTile
+            title="Memory"
+            unit="MB"
+            max={400}
+            kind="line"
+            data={[120, 119, 122, 120, 121, 120]}
+            accent="#8C8CFF"
+          />
+          <MetricTile
+            title="Public Network Traffic"
+            unit="kB"
+            max={50}
+            kind="line"
+            data={[0.4, 0.6, 0.5, 0.4, 0.6, 0.4]}
+            accent="#2BD79F"
+          />
+          <MetricTile
+            title="Requests"
+            unit=""
+            max={4}
+            kind="bar"
+            data={[0, 0, 0, 1, 2, 0]}
+            accent="#F2C760"
+            totalLabel="3 total"
+          />
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <MetricTile
-          title="CPU"
-          unit="vCPU"
-          max={0.8}
-          kind="line"
-          data={[0.04, 0.05, 0.04, 0.05, 0.06, 0.04]}
-          accent="#8C8CFF"
-        />
-        <MetricTile
-          title="Memory"
-          unit="MB"
-          max={400}
-          kind="line"
-          data={[120, 119, 122, 120, 121, 120]}
-          accent="#8C8CFF"
-        />
-        <MetricTile
-          title="Public Network Traffic"
-          unit="kB"
-          max={50}
-          kind="line"
-          data={[0.4, 0.6, 0.5, 0.4, 0.6, 0.4]}
-          accent="#2BD79F"
-        />
-        <MetricTile
-          title="Requests"
-          unit=""
-          max={4}
-          kind="bar"
-          data={[0, 0, 0, 1, 2, 0]}
-          accent="#F2C760"
-          totalLabel="3 total"
-        />
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+        }}
+      >
+        <div
+          className="card"
+          style={{
+            padding: '20px 24px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 8,
+            maxWidth: 360,
+            textAlign: 'center',
+            background: 'var(--bg-elev-1)',
+            border: '1px solid var(--line)',
+          }}
+        >
+          <Icon name="chart" size={20} color="var(--fg-muted)" />
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)' }}>
+            Metrics coming soon
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--fg-muted)', lineHeight: 1.5 }}>
+            Real-time CPU, memory, network, and request metrics will be available
+            once cloud-deployed functions expose them.
+          </div>
+        </div>
       </div>
     </div>
   );
