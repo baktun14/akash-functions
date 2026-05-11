@@ -71,11 +71,12 @@ const gpuCode: TokenLine[] = [
   [],
   [['k', 'const'], ['v', ' app '], ['p', '= '], ['k', 'new'], ['t', ' Hono'], ['p', '();']],
   [['v', 'app'], ['p', '.'], ['f', 'post'], ['p', '('], ['s', '"/chat"'], ['p', ', '], ['k', 'async'], ['p', ' ('], ['v', 'c'], ['p', ') => {']],
-  [['p', '  '], ['k', 'const'], ['v', ' { messages } '], ['p', '= '], ['k', 'await'], ['p', ' '], ['v', 'c'], ['p', '.'], ['f', 'req'], ['p', '.'], ['f', 'json'], ['p', '();']],
-  [['p', '  '], ['k', 'const'], ['v', ' stream '], ['p', '= '], ['k', 'await'], ['p', ' '], ['v', 'ml'], ['p', '.'], ['v', 'chat'], ['p', '.'], ['v', 'completions'], ['p', '.'], ['f', 'create'], ['p', '({']],
-  [['p', '    '], ['v', 'model'], ['p', ': '], ['s', '"meta-llama/Llama-3.3-70B-Instruct"'], ['p', ', '], ['v', 'messages'], ['p', ', '], ['v', 'stream'], ['p', ': '], ['k', 'true'], ['p', ',']],
+  [['p', '  '], ['k', 'const'], ['v', ' { prompt } '], ['p', '= '], ['k', 'await'], ['p', ' '], ['v', 'c'], ['p', '.'], ['f', 'req'], ['p', '.'], ['f', 'json'], ['p', '();']],
+  [['p', '  '], ['k', 'const'], ['v', ' completion '], ['p', '= '], ['k', 'await'], ['p', ' '], ['v', 'ml'], ['p', '.'], ['v', 'chat'], ['p', '.'], ['v', 'completions'], ['p', '.'], ['f', 'create'], ['p', '({']],
+  [['p', '    '], ['v', 'model'], ['p', ': '], ['s', '"meta-llama/Llama-3.3-70B-Instruct"'], ['p', ',']],
+  [['p', '    '], ['v', 'messages'], ['p', ': [{ '], ['v', 'role'], ['p', ': '], ['s', '"user"'], ['p', ', '], ['v', 'content'], ['p', ': '], ['v', 'prompt'], ['p', ' }],']],
   [['p', '  });']],
-  [['p', '  '], ['k', 'return'], ['v', ' c'], ['p', '.'], ['f', 'stream'], ['p', '('], ['v', 'stream'], ['p', '.'], ['f', 'toReadableStream'], ['p', '());']],
+  [['p', '  '], ['k', 'return'], ['v', ' c'], ['p', '.'], ['f', 'json'], ['p', '({ '], ['v', 'reply'], ['p', ': '], ['v', 'completion'], ['p', '.'], ['v', 'choices'], ['p', '[0].'], ['v', 'message'], ['p', '.'], ['v', 'content'], ['p', ' });']],
   [['p', '});']],
   [],
   [['t', 'Bun'], ['p', '.'], ['f', 'serve'], ['p', '({ '], ['v', 'port'], ['p', ': '], ['n', '3000'], ['p', ', '], ['v', 'fetch'], ['p', ': '], ['v', 'app'], ['p', '.'], ['v', 'fetch'], ['p', ' });']],
@@ -102,7 +103,9 @@ export const SAMPLES: Record<PresetId, CodeSample> = {
     res: { cpu: '0.25 vCPU', mem: '256 Mi', gpu: 'no GPU' },
   },
   gpu: {
-    prompt: 'Build a chat endpoint backed by AkashML Llama 3.3 70B. Stream tokens to the client.',
+    prompt:
+      'Build a /chat endpoint backed by AkashML Llama 3.3 70B. ' +
+      'Accept { "prompt": "..." } and return the model\'s reply.',
     name: 'llama-chat',
     needsAkashML: true,
     code: gpuCode,
