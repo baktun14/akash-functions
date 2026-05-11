@@ -124,8 +124,12 @@ async function failStuckDeploy(row: DeploymentRow, ageMs: number): Promise<void>
 }
 
 async function probe(url: string): Promise<boolean> {
+  return probeIngress(url, PROBE_TIMEOUT_MS);
+}
+
+export async function probeIngress(url: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: 'GET',
@@ -140,7 +144,7 @@ async function probe(url: string): Promise<boolean> {
   }
 }
 
-function toFetchUrl(uri: string): string {
+export function toFetchUrl(uri: string): string {
   if (/^https?:\/\//i.test(uri)) return uri;
   return `https://${uri}`;
 }

@@ -67,6 +67,11 @@ export interface ApiClient {
   rename(id: string, name: string): Promise<FunctionRecord>;
 
   getDeployment(fnId: string, depId: string): Promise<DeploymentRecord>;
+  // Server-side probe of the function's live ingress. Akash marks state='live'
+  // before the provider's nginx actually serves traffic, so we use this to
+  // gate UI elements (URL bar, routes, "Online" pill) until the upstream is
+  // really ready.
+  getIngressReachable(fnId: string): Promise<{ reachable: boolean }>;
   // Submits a fresh SDL on the same dseq so the provider re-pulls the runner
   // image and restarts the container. Lease, dseq, gseq, oseq, uris stay put.
   updateRunnerImage(fnId: string, depId: string): Promise<DeploymentRecord>;
@@ -377,6 +382,10 @@ class MockApi implements ApiClient {
       createdAt: new Date().toISOString(),
       liveAt: new Date().toISOString(),
     };
+  }
+
+  async getIngressReachable(_fnId: string): Promise<{ reachable: boolean }> {
+    return { reachable: true };
   }
 
   async updateRunnerImage(fnId: string, depId: string): Promise<DeploymentRecord> {
@@ -717,6 +726,10 @@ class LiveApi implements ApiClient {
 
   async getDeployment(fnId: string, depId: string): Promise<DeploymentRecord> {
     return this.req<DeploymentRecord>(`/api/functions/${fnId}/deployments/${depId}`);
+  }
+
+  async getIngressReachable(fnId: string): Promise<{ reachable: boolean }> {
+    return this.req<{ reachable: boolean }>(`/api/functions/${fnId}/ingress-reachable`);
   }
 
   async updateRunnerImage(fnId: string, depId: string): Promise<DeploymentRecord> {

@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { FunctionRecord, ServiceStatus, Session } from '@shared/types';
 import { api } from '../../lib/api';
+import { useReachable } from '../../lib/useReachable';
 import { FnLogo, Icon } from '../icons';
 import { DeploymentsTab } from './tabs/DeploymentsTab';
 import { SourceCodeTab } from './tabs/SourceCodeTab';
@@ -47,7 +48,14 @@ export function ServicePanel({
   const [redeploying, setRedeploying] = useState(false);
   const [editingName, setEditingName] = useState(svc.name);
   const nameInputRef = useRef<HTMLInputElement>(null);
-  const tone = STATUS_TONE[svc.status] ?? STATUS_TONE.pending;
+  // Akash flips state='live' before the provider's nginx is actually serving,
+  // so until the server-side probe says reachable we keep the function in the
+  // "Deploying" tone — otherwise the pill goes green while clicking the URL
+  // still 503s.
+  const ingressReachable = useReachable(svc.id, svc.status === 'online');
+  const effectiveStatus: ServiceStatus =
+    svc.status === 'online' && !ingressReachable ? 'pending' : svc.status;
+  const tone = STATUS_TONE[effectiveStatus] ?? STATUS_TONE.pending;
 
   useEffect(() => {
     setEditingName(svc.name);
@@ -204,15 +212,17 @@ export function ServicePanel({
               {svc.subdomain}
             </div>
           </div>
-          <a
-            href={externalUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="btn btn-subtle btn-sm"
-            style={{ gap: 6, textDecoration: 'none' }}
-          >
-            <Icon name="external" size={12} /> Open URL
-          </a>
+          {ingressReachable && (
+            <a
+              href={externalUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-subtle btn-sm"
+              style={{ gap: 6, textDecoration: 'none' }}
+            >
+              <Icon name="external" size={12} /> Open URL
+            </a>
+          )}
           <button
             onClick={redeploy}
             disabled={redeploying}

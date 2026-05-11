@@ -10,6 +10,7 @@ import { zValidator } from '@hono/zod-validator';
 import type { DeploymentRecord, FunctionRoute } from '@shared/types';
 import { consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
+import { probeIngress, toFetchUrl } from '../akash/reconciler';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
@@ -183,6 +184,36 @@ deployRouter.post('/:id/deployments/:depId/update-image', async (c) => {
   return c.json(toRecord({ ...dep, errorMessage: null }), 202);
 });
 
+// Real ingress reachability. Akash flips state to 'live' when the manifest is
+// accepted, but the provider's nginx still 503s for ~10-30s while the upstream
+// container boots. The browser can't tell 503 from 200 in `no-cors` mode, so
+// we probe server-side and expose a boolean. Frontend polls this until true
+// before showing the URL as ready.
+deployRouter.get('/:id/ingress-reachable', async (c) => {
+  const walletAddress = c.get('walletAddress');
+  const fnId = c.req.param('id');
+
+  const [fn] = await db
+    .select({ id: functions.id })
+    .from(functions)
+    .where(and(eq(functions.id, fnId), eq(functions.walletAddress, walletAddress)))
+    .limit(1);
+  if (!fn) throw new HTTPException(404, { message: 'Function not found' });
+
+  const [dep] = await db
+    .select({ state: deployments.state, uris: deployments.uris })
+    .from(deployments)
+    .where(and(eq(deployments.functionId, fnId), eq(deployments.state, 'live')))
+    .orderBy(desc(deployments.createdAt))
+    .limit(1);
+
+  const uri = dep?.uris?.[0];
+  if (!uri) return c.json({ reachable: false });
+
+  const reachable = await probeIngress(toFetchUrl(uri));
+  return c.json({ reachable });
+});
+
 deployRouter.get('/:id/deployments/:depId', async (c) => {
   const walletAddress = c.get('walletAddress');
   const fnId = c.req.param('id');
@@ -243,6 +274,12 @@ function toRecord(
     closedAt: dep.closedAt?.toISOString(),
   };
 }
+
+// Fallback when the extractor finds no routes in user code (e.g. raw
+// Bun.serve handlers). Exposing a single GET / lets the UI render the routes
+// panel and the user toggle Protected on the root URL; the runner receives
+// the same fallback so the toggle enforces end-to-end.
+export const FALLBACK_ROUTES: FunctionRoute[] = [{ method: 'GET', path: '/' }];
 
 // Stamps each detected route with `auth: 'public' | 'apiKey'` based on the
 // function's protected-routes set. The set holds `"<METHOD> <path>"` keys so

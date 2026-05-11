@@ -7,13 +7,13 @@ import type {
 } from '@shared/types';
 import { Icon } from '../../icons';
 import { api } from '../../../lib/api';
+import { useReachable } from '../../../lib/useReachable';
 import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
 const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
 const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
-const REACHABILITY_POLL_MS = 2000;
 
 function useDeployment(
   fnId: string,
@@ -62,38 +62,6 @@ function useDeployment(
   return { dep, refresh };
 }
 
-// Akash reports `live` as soon as the lease's manifest is accepted, but the
-// ingress can take another 10–30s to actually serve traffic. Probe the URL
-// from the browser until it stops erroring (any HTTP response counts — even
-// 404 means the ingress resolved).
-function useReachable(url: string | null): boolean {
-  const [reachable, setReachable] = useState(false);
-
-  useEffect(() => {
-    setReachable(false);
-    if (!url) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const probe = async () => {
-      try {
-        await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
-        if (!cancelled) setReachable(true);
-      } catch {
-        if (!cancelled) timer = setTimeout(probe, REACHABILITY_POLL_MS);
-      }
-    };
-    void probe();
-
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [url]);
-
-  return reachable;
-}
-
 type StateMeta = {
   label: string;
   pillClass: string;
@@ -107,42 +75,25 @@ function describe(dep: DeploymentRecord | null): StateMeta {
   }
   switch (dep.state) {
     case 'pending':
-      return { label: 'Queued', pillClass: 'pill', body: 'Preparing SDL…', tone: 'neutral' };
+      return { label: 'Preparing', pillClass: 'pill', body: 'Setting up your environment', tone: 'neutral' };
     case 'bidding':
-      return {
-        label: 'Bidding',
-        pillClass: 'pill',
-        body: dep.dseq ? `Waiting for providers · dseq ${dep.dseq}` : 'Waiting for providers…',
-        tone: 'warn',
-      };
+      return { label: 'Reserving', pillClass: 'pill', body: 'Allocating compute resources', tone: 'warn' };
     case 'leased':
-      return {
-        label: 'Provisioning',
-        pillClass: 'pill',
-        body: dep.provider
-          ? `Provider ${truncate(dep.provider)} accepted · booting container`
-          : 'Provider accepted · booting container',
-        tone: 'warn',
-      };
+      return { label: 'Starting', pillClass: 'pill', body: 'Bringing your function online', tone: 'warn' };
     case 'live':
       return { label: 'Active', pillClass: 'pill pill-ok', body: 'ready to receive traffic', tone: 'ok' };
     case 'failed':
       return {
         label: 'Failed',
         pillClass: 'pill',
-        body: dep.errorMessage ?? 'Deploy failed',
+        body: dep.errorMessage ?? "Couldn't start your function",
         tone: 'error',
       };
     case 'closed':
-      return { label: 'Closed', pillClass: 'pill', body: 'Lease closed', tone: 'neutral' };
+      return { label: 'Stopped', pillClass: 'pill', body: 'Function stopped', tone: 'neutral' };
     default:
       return { label: dep.state, pillClass: 'pill', body: '', tone: 'neutral' };
   }
-}
-
-function truncate(addr: string): string {
-  if (addr.length <= 16) return addr;
-  return `${addr.slice(0, 10)}…${addr.slice(-4)}`;
 }
 
 type UpdateState = 'idle' | 'submitting' | 'submitted' | 'error';
@@ -202,7 +153,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
     : null;
   // Only probe once Akash says the lease is live — otherwise we'd just be
   // burning cycles on a URL that doesn't exist yet.
-  const reachable = useReachable(dep?.state === 'live' ? publicUrl : null);
+  const reachable = useReachable(svc.id, dep?.state === 'live');
 
   const toneColor =
     meta.tone === 'ok'
@@ -232,11 +183,18 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   // Show the inner status row only when it adds information beyond the header
   // pill — i.e. transient/error states or "live but ingress not yet probed".
   const showStatusRow = meta.tone !== 'ok' || !reachable;
+  // True whenever something is in motion behind the scenes — drives the
+  // shimmer, animated ellipsis, and spinning icon. Excludes failed (red,
+  // static) and fully-reachable live (status row hidden anyway).
+  const isWorking = meta.tone === 'warn' || meta.tone === 'neutral' || (meta.tone === 'ok' && !reachable);
 
   return (
     <div>
-      {/* URL bar — only shown once Akash assigns a real public URL. */}
-      {publicUrl && (
+      {/* URL bar — only shown once the ingress is actually serving traffic.
+          Akash flips state to 'live' before the upstream container is ready,
+          so we wait for the server-side probe to succeed before exposing the
+          link (otherwise users click through to a 503). */}
+      {publicUrl && reachable && (
         <div
           style={{
             display: 'flex',
@@ -365,7 +323,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
         </div>
       )}
 
-      {publicUrl && dep?.routes && dep.routes.length > 0 && (
+      {publicUrl && reachable && dep?.routes && dep.routes.length > 0 && (
         <RoutesPanel
           url={publicUrl}
           routes={dep.routes}
@@ -403,7 +361,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           >
             {svc.image}
           </div>
-          {dep?.dseq && (
+          {dep?.state === 'live' && dep?.dseq && (
             <a
               href={`https://console.akash.network/deployments/${dep.dseq}`}
               target="_blank"
@@ -431,6 +389,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
 
         {showStatusRow && (
           <div
+            className={isWorking ? 'shimmer-row' : undefined}
             style={{
               marginTop: 12,
               padding: '8px 12px',
@@ -444,24 +403,25 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
             }}
           >
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--fg)' }}>
-              {meta.tone === 'ok' ? (
-                <Icon name="refresh" size={12} color="var(--warn, #f5a524)" className="spin" />
-              ) : meta.tone === 'error' ? (
+              {meta.tone === 'error' ? (
                 <Icon name="x" size={12} color={toneColor} />
+              ) : isWorking ? (
+                <Icon
+                  name="refresh"
+                  size={12}
+                  color={meta.tone === 'ok' ? 'var(--warn, #f5a524)' : toneColor}
+                  className="spin"
+                />
               ) : (
                 <Icon name="box" size={12} color={toneColor} />
               )}
               <span style={{ fontWeight: 500, color: meta.tone === 'ok' ? 'var(--warn, #f5a524)' : toneColor }}>
-                {meta.tone === 'ok' && !reachable ? 'Waiting for ingress' : meta.label}
+                {meta.tone === 'ok' && !reachable ? 'Finishing up' : meta.label}
               </span>
             </span>
             <span style={{ color: 'var(--fg-muted)' }}>·</span>
-            <span style={{ color: 'var(--fg)' }}>
-              {meta.tone === 'ok' && !reachable
-                ? publicUrl
-                  ? 'probing URL until it serves traffic…'
-                  : 'lease is live, URL pending…'
-                : meta.body}
+            <span className={isWorking ? 'dots-anim' : undefined} style={{ color: 'var(--fg)' }}>
+              {meta.tone === 'ok' && !reachable ? 'Finalizing your endpoint' : meta.body}
             </span>
           </div>
         )}
