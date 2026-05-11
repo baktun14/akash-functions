@@ -50,6 +50,16 @@ const KILL_GRACE_MS = 5_000;
 const HEALTH_CHECK_MS = 5_000;
 const HTTP_PROBE_MS = 5_000;
 const HTTP_PROBE_BODY_MAX = 1500;
+// Stderr ring-buffer cap per child. Large enough for a Bun stack trace (~2-3KB
+// typical) plus a few preceding log lines; small enough that the server-side
+// errorMessage column and HealthBody.bodyExcerpt schema (max 2048) won't choke
+// — we trim to the schema cap at report time.
+const STDERR_TAIL_MAX = 4096;
+// Retries for the post-crash fatal health report. The supervisor stays alive
+// after a fatal child exit, so dropping this signal would leave the user with
+// no error in the dashboard — worth a couple of retries on transient blips.
+const FATAL_REPORT_ATTEMPTS = 3;
+const FATAL_REPORT_BACKOFF_MS = 500;
 
 // Boot-time env-fetch retry policy. Three attempts with exponential backoff
 // (1s, 2s, 4s) — total max ~7s before we give up and exit non-zero so Akash
@@ -81,7 +91,7 @@ const POLL_INTERVAL_MS = clampPoll(Number(env.POLL_INTERVAL_MS ?? POLL_DEFAULT_M
 // Reported on every /api/runner/current poll so the dashboard can flag
 // deployments running an outdated runner and offer the in-place update flow.
 // Bump in lockstep with packages/runner/package.json.
-const RUNNER_VERSION = '2.1.0';
+const RUNNER_VERSION = '2.3.0';
 
 if (!FUNCTION_ID || !INITIAL_VERSION_ID || !BACKEND_BASE_URL || !RUNNER_TOKEN) {
   console.error('[boot] missing one of FUNCTION_ID, INITIAL_VERSION_ID, BACKEND_BASE_URL, RUNNER_TOKEN');
@@ -107,9 +117,23 @@ const authHeader = { Authorization: `Bearer ${RUNNER_TOKEN}` };
 type ProbeResult =
   | { kind: 'ok'; status: number }
   | { kind: 'http-error'; status: number; statusText: string; bodyExcerpt: string }
-  | { kind: 'connect-error'; reason: string };
+  | { kind: 'connect-error'; reason: string }
+  // Child process exited unexpectedly — supervisor stays alive and reports the
+  // crash so the dashboard can show the user-code stderr.
+  | { kind: 'child-exit'; exitCode: number; stderrTail: string };
 
 type ChildHandle = ReturnType<typeof Bun.spawn>;
+
+// Per-child captured stderr tail (last STDERR_TAIL_MAX bytes). Used to populate
+// HealthBody.bodyExcerpt when the child exits unexpectedly so the user sees the
+// actual error in the dashboard. WeakMap so the buffer is GC'd with the handle.
+const childStderrTails = new WeakMap<ChildHandle, { append: (chunk: Uint8Array) => void; read: () => string; done: Promise<void> }>();
+
+// Versions known to have crashed in this supervisor's lifetime. `reload` uses
+// this to refuse rolling back to a version that will just crash again — when
+// the user's fix itself crashes, leaving the failure visible is better than
+// silently flipping back to the previous (also broken) version.
+const brokenVersions = new Set<string>();
 
 type RouteEntry = {
   method: string;
@@ -546,23 +570,26 @@ async function reload(newVersionId: string, newVarsRevision?: number): Promise<v
 
     const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
     if (!tcpHealthy) {
-      console.error('[reload] tcp health check failed, rolling back');
+      console.error('[reload] tcp health check failed');
       await reportHealth(newVersionId, { kind: 'connect-error', reason: 'listen timeout' });
       currentEnv = previousEnv;
       currentVarsRevision = previousRevision;
-      await rollbackToVersion(previousVersion);
+      await rollbackOrStayDegraded(previousVersion);
       return;
     }
 
     const probe = await httpProbe(USER_PORT, HTTP_PROBE_MS);
     await reportHealth(newVersionId, probe);
     if (probe.kind !== 'ok') {
-      console.error(`[reload] http probe ${probe.kind === 'http-error' ? `${probe.status} ${probe.statusText}` : `connect ${probe.reason}`}, rolling back`);
+      console.error(`[reload] http probe ${probeSummary(probe)}`);
       currentEnv = previousEnv;
       currentVarsRevision = previousRevision;
-      await rollbackToVersion(previousVersion);
+      await rollbackOrStayDegraded(previousVersion);
       return;
     }
+
+    // Reload succeeded — the version is no longer broken (if it ever was).
+    brokenVersions.delete(newVersionId);
 
     console.log(`[reload] live on ${newVersionId}`);
     await pruneOldVersions(new Set([newVersionId, previousVersion]));
@@ -636,6 +663,24 @@ async function respawnChildWithCurrentEnv(): Promise<void> {
   const restored = spawnChild(CURRENT_LINK);
   currentChild = restored;
   attachExitWatcher(restored);
+}
+
+// Either rollback to the previous version, or — if the previous version is
+// known-broken — leave the supervisor running with no child. The dashboard's
+// errorMessage already reflects the latest failure; thrashing back to a known
+// crashing version would just trigger another fatal-exit report and obscure
+// what the user just tried to fix.
+async function rollbackOrStayDegraded(previousVersion: string): Promise<void> {
+  if (brokenVersions.has(previousVersion)) {
+    console.warn(
+      `[rollback] previous version ${previousVersion} is known-broken, staying degraded`
+    );
+    const broken = currentChild;
+    currentChild = null;
+    if (broken) await terminateChild(broken);
+    return;
+  }
+  await rollbackToVersion(previousVersion);
 }
 
 async function rollbackToVersion(versionId: string): Promise<void> {
@@ -772,12 +817,72 @@ function spawnChild(dir: string): ChildHandle {
   //
   // --preload rewrites Bun.serve port args to PORT so legacy user code with
   // a hardcoded `port: 3000` doesn't collide with the runner on 3000.
-  return Bun.spawn(['bun', '--preload', '/boot/preload.ts', entry], {
+  //
+  // stderr is piped (not inherited) so we can buffer the tail for the post-
+  // crash health report — the reader tees every chunk back to process.stderr
+  // so pod logs look unchanged.
+  const child = Bun.spawn(['bun', '--preload', '/boot/preload.ts', entry], {
     cwd: dir,
     stdout: 'inherit',
-    stderr: 'inherit',
+    stderr: 'pipe',
     env: { ...currentEnv, ...baseEnv, PORT: String(USER_PORT) },
   });
+  attachStderrTail(child);
+  return child;
+}
+
+function attachStderrTail(child: ChildHandle): void {
+  // Ring buffer of the last STDERR_TAIL_MAX bytes. Two Uint8Array halves so the
+  // common case (small total stderr) never copies, while a noisy child can't
+  // unbounded-grow the buffer.
+  let head: Uint8Array = new Uint8Array(0);
+  let tail: Uint8Array = new Uint8Array(0);
+  const append = (chunk: Uint8Array) => {
+    // Tee to our own stderr so pod logs include user-code output unchanged.
+    process.stderr.write(chunk);
+    if (chunk.byteLength >= STDERR_TAIL_MAX) {
+      head = new Uint8Array(0);
+      tail = chunk.slice(chunk.byteLength - STDERR_TAIL_MAX);
+      return;
+    }
+    const combinedLen = tail.byteLength + chunk.byteLength;
+    if (combinedLen <= STDERR_TAIL_MAX) {
+      const merged = new Uint8Array(combinedLen);
+      merged.set(tail, 0);
+      merged.set(chunk, tail.byteLength);
+      tail = merged;
+      return;
+    }
+    // Overflow: roll tail into head, drop overflow from head.
+    head = tail;
+    tail = chunk;
+    const overflow = head.byteLength + tail.byteLength - STDERR_TAIL_MAX;
+    if (overflow > 0) {
+      head = head.slice(overflow);
+    }
+  };
+  const read = (): string => {
+    const merged = new Uint8Array(head.byteLength + tail.byteLength);
+    merged.set(head, 0);
+    merged.set(tail, head.byteLength);
+    return new TextDecoder('utf-8', { fatal: false }).decode(merged);
+  };
+
+  const done = (async () => {
+    const reader = child.stderr instanceof ReadableStream ? child.stderr.getReader() : null;
+    if (!reader) return;
+    try {
+      while (true) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) return;
+        if (value) append(value);
+      }
+    } catch {
+      // Stream errors during shutdown are expected — give up quietly.
+    }
+  })();
+
+  childStderrTails.set(child, { append, read, done });
 }
 
 function attachExitWatcher(child: ChildHandle): void {
@@ -785,8 +890,38 @@ function attachExitWatcher(child: ChildHandle): void {
     const code = await child.exited;
     // If currentChild was nulled by reload/rollback, this exit is expected.
     if (shuttingDown || currentChild !== child) return;
-    console.error(`[child] exited unexpectedly with code ${code}, propagating`);
-    process.exit(code ?? 1);
+
+    // Drain the captured-stderr task to EOF so the tail buffer contains
+    // everything the child wrote — important when the child crashes during
+    // import (the most common case) and only writes a few KB before exiting.
+    const captured = childStderrTails.get(child);
+    if (captured) await captured.done;
+    const stderrTail = captured?.read() ?? '';
+    const exitCode = code ?? 1;
+
+    // Mark this version as known-broken so a subsequent `reload` won't rollback
+    // to it on its own failure (which would crash again forever).
+    brokenVersions.add(currentVersion);
+
+    // Detach from the dead child so the proxy returns 503 for new requests.
+    currentChild = null;
+
+    console.error(
+      `[child] exited with code ${exitCode}, supervisor staying alive for hot-reload`
+    );
+    if (stderrTail) {
+      console.error(`[child] stderr tail (${stderrTail.length} bytes): ${stderrTail}`);
+    }
+
+    // Best-effort with retries — this is the only path that surfaces a fatal
+    // child crash to the user. We `await` here (rather than fire-and-forget)
+    // because the supervisor is no longer racing a process.exit; spending a
+    // second or two on retries is fine.
+    await reportHealthWithRetry(currentVersion, {
+      kind: 'child-exit',
+      exitCode,
+      stderrTail,
+    });
   })();
 }
 
@@ -847,18 +982,7 @@ async function readExcerpt(res: Response, max: number): Promise<string> {
 // Fire-and-forget. Health reporting must never block boot/reload, and a
 // transient backend failure should not affect the running child.
 async function reportHealth(versionId: string, probe: ProbeResult): Promise<void> {
-  const payload =
-    probe.kind === 'ok'
-      ? { ok: true, versionId, status: probe.status }
-      : probe.kind === 'http-error'
-        ? {
-            ok: false,
-            versionId,
-            status: probe.status,
-            statusText: probe.statusText,
-            bodyExcerpt: probe.bodyExcerpt,
-          }
-        : { ok: false, versionId, status: 0, reason: probe.reason };
+  const payload = healthPayload(versionId, probe);
   try {
     const res = await fetch(healthUrl, {
       method: 'POST',
@@ -873,6 +997,72 @@ async function reportHealth(versionId: string, probe: ProbeResult): Promise<void
   }
 }
 
+type HealthPayload =
+  | { ok: true; versionId: string; status: number }
+  | {
+      ok: false;
+      versionId: string;
+      status: number;
+      statusText?: string;
+      bodyExcerpt?: string;
+      reason?: string;
+      fatal?: boolean;
+    };
+
+function healthPayload(versionId: string, probe: ProbeResult): HealthPayload {
+  switch (probe.kind) {
+    case 'ok':
+      return { ok: true, versionId, status: probe.status };
+    case 'http-error':
+      return {
+        ok: false,
+        versionId,
+        status: probe.status,
+        statusText: probe.statusText,
+        bodyExcerpt: probe.bodyExcerpt,
+      };
+    case 'connect-error':
+      return { ok: false, versionId, status: 0, reason: probe.reason };
+    case 'child-exit': {
+      // bodyExcerpt is capped at 2048 server-side; trim here so we don't waste
+      // bytes on the wire (STDERR_TAIL_MAX is 4096 to leave headroom for the
+      // most-recent lines being binary-safe sliced).
+      const excerpt =
+        probe.stderrTail.length > 2048 ? probe.stderrTail.slice(-2048) : probe.stderrTail;
+      return {
+        ok: false,
+        versionId,
+        status: 0,
+        reason: `exited with code ${probe.exitCode}`,
+        bodyExcerpt: excerpt,
+        fatal: true,
+      };
+    }
+  }
+}
+
+// Like reportHealth, but retries a few times. Used after a fatal child exit
+// where the supervisor stays alive — losing this report would mean the user
+// sees no error in the dashboard at all.
+async function reportHealthWithRetry(versionId: string, probe: ProbeResult): Promise<void> {
+  for (let attempt = 1; attempt <= FATAL_REPORT_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(healthUrl, {
+        method: 'POST',
+        headers: { ...authHeader, 'content-type': 'application/json' },
+        body: JSON.stringify(healthPayload(versionId, probe)),
+      });
+      if (res.ok) return;
+      console.warn(`[health] fatal report attempt ${attempt}: ${res.status} ${res.statusText}`);
+    } catch (err) {
+      console.warn(`[health] fatal report attempt ${attempt} failed: ${(err as Error).message}`);
+    }
+    if (attempt < FATAL_REPORT_ATTEMPTS) {
+      await sleep(FATAL_REPORT_BACKOFF_MS * attempt);
+    }
+  }
+}
+
 async function probeAndReport(versionId: string): Promise<void> {
   const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
   if (!tcpHealthy) {
@@ -882,7 +1072,20 @@ async function probeAndReport(versionId: string): Promise<void> {
   const probe = await httpProbe(USER_PORT, HTTP_PROBE_MS);
   await reportHealth(versionId, probe);
   if (probe.kind !== 'ok') {
-    console.warn(`[health] ${probe.kind === 'http-error' ? `${probe.status} ${probe.statusText}` : `connect ${probe.reason}`}`);
+    console.warn(`[health] ${probeSummary(probe)}`);
+  }
+}
+
+function probeSummary(probe: ProbeResult): string {
+  switch (probe.kind) {
+    case 'ok':
+      return `ok ${probe.status}`;
+    case 'http-error':
+      return `${probe.status} ${probe.statusText}`;
+    case 'connect-error':
+      return `connect ${probe.reason}`;
+    case 'child-exit':
+      return `child-exit code=${probe.exitCode}`;
   }
 }
 
