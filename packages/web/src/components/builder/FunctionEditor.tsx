@@ -8,11 +8,12 @@
 // single "Save & deploy" button and surface a "pushing to live…" indicator
 // during the propagation window.
 
-import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
 import { api } from '../../lib/api';
 import { Icon } from '../icons';
 import { CodeEditor } from './CodeEditor';
+import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
 
 type Props = {
   functionId: string;
@@ -22,6 +23,8 @@ type Props = {
   onClose: () => void;
   onSaved: (newVersionId: string) => void;
   onSavedAndDeployed: (newVersionId: string, deployment: DeploymentRecord) => void;
+  /** Agent chat panel — when present, switches the editor to a 3-column grid. */
+  agentSlot?: ReactNode;
 };
 
 const PRIMARY_PATH_CANDIDATES = ['src/index.ts', 'src/index.tsx', 'index.ts', 'index.tsx'];
@@ -44,11 +47,21 @@ export function FunctionEditor({
   onClose,
   onSaved,
   onSavedAndDeployed,
+  agentSlot,
 }: Props): ReactElement {
   const primaryPath = useMemo(() => pickPrimaryPath(initialDetail.source), [initialDetail.source]);
   const initialPrimaryValue = initialDetail.source[primaryPath] ?? '';
   const [source, setSource] = useState<string>(initialPrimaryValue);
   const [message, setMessage] = useState<string>('');
+
+  useRegisterActiveEditor({
+    mode: 'edit',
+    functionId,
+    functionName,
+    primaryPath,
+    currentSource: source,
+    applySource: setSource,
+  });
   const [inflight, setInflight] = useState<'save' | 'deploy' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [liveStatus, setLiveStatus] = useState<
@@ -133,7 +146,10 @@ export function FunctionEditor({
       onClick={requestClose}
       style={{ alignItems: 'stretch', justifyContent: 'stretch', padding: 0 }}
     >
-      <div className="builder" onClick={(e) => e.stopPropagation()}>
+      <div
+        className={agentSlot ? 'builder with-agent' : 'builder'}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="builder-head">
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <Icon name="edit" size={18} color="var(--fg-muted)" />
@@ -334,6 +350,7 @@ export function FunctionEditor({
             )}
           </div>
         </div>
+        {agentSlot && <div className="builder-agent-slot">{agentSlot}</div>}
       </div>
     </div>
   );

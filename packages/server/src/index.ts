@@ -9,6 +9,7 @@ import { startReconciler, stopReconciler } from './akash/reconciler';
 import { env } from './env';
 import { errorHandler } from './middleware/error';
 import { akashMetaRouter } from './routes/akash-meta';
+import { agentRouter } from './routes/agent';
 import { deployRouter } from './routes/deploy';
 import { functionsRouter } from './routes/functions';
 import { keysRouter } from './routes/keys';
@@ -35,6 +36,7 @@ app.route('/api/functions', deployRouter);
 app.route('/api/keys', keysRouter);
 app.route('/api/runner', runnerRouter);
 app.route('/api/usage', usageRouter);
+app.route('/api/agent', agentRouter);
 app.route('/api', akashMetaRouter);
 
 app.onError(errorHandler);
