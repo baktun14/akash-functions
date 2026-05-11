@@ -198,7 +198,7 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
 
       <Section icon="coin" title="Pricing">
         <div className="card" style={{ padding: 14, background: 'var(--bg-elev-2)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
             <PricingTile
               label="Cost"
               value={
@@ -209,19 +209,6 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
               }
               sub={pricingSub}
             />
-            <PricingTile label="Balance" value={<>$5.04</>} sub="credits remaining" />
-            <PricingTile label="Runway" value={<>~30 d</>} sub="at current rate" />
-          </div>
-          <div
-            style={{
-              marginTop: 14,
-              paddingTop: 14,
-              borderTop: '1px solid var(--line)',
-              display: 'flex',
-              justifyContent: 'flex-end',
-            }}
-          >
-            <button className="btn btn-primary btn-sm">Top up</button>
           </div>
         </div>
       </Section>

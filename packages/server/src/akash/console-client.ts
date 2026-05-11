@@ -181,14 +181,6 @@ export const consoleApi = {
     }
   ) => call<LeaseAcceptResp>(apiKey, 'POST', '/leases', args),
 
-  // GET /v1/balances — returns USD-equivalent balances for the API key's wallet.
-  getBalances: (apiKey: string) =>
-    call<{ balance: number; deployments: number; total: number }>(
-      apiKey,
-      'GET',
-      '/balances'
-    ),
-
   // GET /v1/user/me — returns the authenticated user. We need `userId` (the
   // external auth-provider sub) to query /wallets.
   getCurrentUser: (apiKey: string) =>

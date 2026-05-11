@@ -182,12 +182,6 @@ export type DeploymentRecord = {
   closedAt?: string;
 };
 
-export type UsageInfo = {
-  usd: number;
-  act: number;
-  burnRatePerDay: number;
-};
-
 // API request/response shapes
 
 // GPU spec carried in the resources block. Optional — when absent, no GPU is
