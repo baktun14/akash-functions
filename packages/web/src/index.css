@@ -806,10 +806,13 @@
   content: '';
   position: absolute;
   inset: 0;
+  /* Tint relative to current foreground so the sweep is visible in both
+     themes — fixed `rgba(255,255,255,…)` was invisible against the light
+     theme's near-white --bg-elev-2. */
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(255, 255, 255, 0.06) 50%,
+    color-mix(in srgb, var(--fg) 8%, transparent) 50%,
     transparent 100%
   );
   animation: shimmer-sweep 2.4s ease-in-out infinite;
