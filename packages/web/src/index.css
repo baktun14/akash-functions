@@ -657,7 +657,11 @@
   background: var(--bg-elev-1);
   animation: panel-in 220ms var(--ease-out);
   min-height: 0;
-  z-index: 106; /* one above .builder so it sits on top of the modal */
+  /* No explicit z-index — when the builder modal is open, the panel is
+     embedded inside the .builder grid (via agentSlot) and inherits its
+     stacking context. Standalone, we want regular modals (.modal-shell at
+     z-index 100) to dim the panel via their scrim, which only happens if
+     the panel stays below them. */
 }
 .agent-panel-head {
   display: flex; align-items: center; gap: 8px;
