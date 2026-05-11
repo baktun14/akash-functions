@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 
 import type { FunctionRecord, ServiceStatus, Session } from '@shared/types';
 import { api } from '../../lib/api';
 import { useReachable } from '../../lib/useReachable';
+import { sessionDeploys } from '../../lib/sessionDeploys';
 import { FnLogo, Icon } from '../icons';
 import { DeploymentsTab } from './tabs/DeploymentsTab';
 import { SourceCodeTab } from './tabs/SourceCodeTab';
@@ -51,8 +52,9 @@ export function ServicePanel({
   // Akash flips state='live' before the provider's nginx is actually serving,
   // so until the server-side probe says reachable we keep the function in the
   // "Deploying" tone — otherwise the pill goes green while clicking the URL
-  // still 503s.
-  const ingressReachable = useReachable(svc.id, svc.status === 'online');
+  // still 503s. Only probe when a deploy was initiated this session; for
+  // already-live functions loaded from the server we trust `svc.status`.
+  const ingressReachable = useReachable(svc.id, svc.status === 'online' && sessionDeploys.was(svc.id));
   const effectiveStatus: ServiceStatus =
     svc.status === 'online' && !ingressReachable ? 'pending' : svc.status;
   const tone = STATUS_TONE[effectiveStatus] ?? STATUS_TONE.pending;
