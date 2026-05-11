@@ -257,6 +257,11 @@ const HealthBody = z.discriminatedUnion('ok', [
     statusText: z.string().max(128).optional(),
     bodyExcerpt: z.string().max(2048).optional(),
     reason: z.string().max(256).optional(),
+    // Runner only sets this when the user-code child process exited and won't
+    // recover on its own. Distinguishes a working-but-buggy function (yellow
+    // banner, errorMessage only) from a crashed-at-boot function (red banner,
+    // state='failed') and gates the recovery transition on the next ok report.
+    fatal: z.boolean().optional(),
   }),
 ]);
 type HealthInput = z.infer<typeof HealthBody>;
@@ -285,29 +290,52 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
   }
 
   const body = c.req.valid('json');
-  const message = body.ok ? null : formatHealthError(body);
 
-  // Update whichever non-terminal deployment is open for this function. The
-  // runner's versionId is informational — a deployment row carries the lease,
-  // not the version, and the runner hot-reloads new versions onto the same
-  // lease.
-  const updated = await db
-    .update(deployments)
-    .set({ errorMessage: message })
-    .where(
-      and(
-        eq(deployments.functionId, fnId),
-        isNull(deployments.closedAt),
-        ne(deployments.state, 'failed')
+  // Three branches:
+  //   ok        → clear errorMessage AND lift state out of 'failed' if the
+  //               runner just hot-reloaded a fix on top of a crashed child.
+  //   fatal     → child crashed and won't recover until the next reload. Mark
+  //               state='failed' so the dashboard shows the red error banner
+  //               and the reconciler stops probing ingress (which would 503
+  //               and eventually close the row).
+  //   non-fatal → existing behavior: live function responded 5xx on probe,
+  //               yellow "Runtime error on first request" banner.
+  let updated: { id: string }[];
+  if (body.ok) {
+    updated = await db
+      .update(deployments)
+      .set({
+        errorMessage: null,
+        state: sql`CASE WHEN ${deployments.state} = 'failed' THEN 'live' ELSE ${deployments.state} END`,
+      })
+      .where(and(eq(deployments.functionId, fnId), isNull(deployments.closedAt)))
+      .returning({ id: deployments.id });
+  } else if (body.fatal) {
+    updated = await db
+      .update(deployments)
+      .set({ state: 'failed', errorMessage: formatHealthError(body) })
+      .where(and(eq(deployments.functionId, fnId), isNull(deployments.closedAt)))
+      .returning({ id: deployments.id });
+  } else {
+    updated = await db
+      .update(deployments)
+      .set({ errorMessage: formatHealthError(body) })
+      .where(
+        and(
+          eq(deployments.functionId, fnId),
+          isNull(deployments.closedAt),
+          ne(deployments.state, 'failed')
+        )
       )
-    )
-    .returning({ id: deployments.id });
+      .returning({ id: deployments.id });
+  }
 
   if (!body.ok) {
     log.warn('runner reported unhealthy probe', {
       fnId,
       versionId: body.versionId,
       status: body.status,
+      fatal: body.fatal === true,
       updatedRows: updated.length,
     });
   }
