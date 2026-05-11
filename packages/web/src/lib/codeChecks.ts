@@ -1,14 +1,16 @@
 // Lightweight, regex-only sanity checks for function source.
 //
-// The agent occasionally emits code that combines `Bun.serve(...)` with
-// `export default app` — both alone are valid in this runtime, but together
-// they crash at startup with EADDRINUSE on port 3001 because Bun's runtime
-// auto-serves the default export on top of the explicit Bun.serve. We surface
-// the conflict before the user deploys so they can fix it (or ask the agent
-// to fix it).
+// Two patterns we've seen the agent emit that crash at runtime:
+//   1. `Bun.serve(...)` + `export default app` — Bun auto-serves the default
+//      export on top of the explicit Bun.serve, crashing with EADDRINUSE.
+//   2. `c.stream(...)` — Hono's Context has no `.stream` method; the right
+//      streaming API is `streamSSE(c, …)` / `stream(c, …)` from
+//      'hono/streaming'. The handler throws `TypeError: c.stream is not a
+//      function` the first time the route is hit.
+// Both are surfaced as non-blocking warnings before the user deploys.
 
 export type StartupIssue = {
-  kind: 'double-server-start';
+  kind: 'double-server-start' | 'invalid-c-stream';
   message: string;
   /** Pre-canned instruction we hand to the agent when the user clicks
    *  "Quick fix with agent". Includes enough context for the model to
@@ -27,6 +29,19 @@ const DOUBLE_SERVER_MESSAGE =
 const DOUBLE_SERVER_AGENT_PROMPT =
   'The current file has a server-start conflict: it calls Bun.serve(...) AND has an "export default app" (or "export default { fetch }"). Bun auto-serves the default export, which collides with the explicit Bun.serve on port 3001 and crashes the function at startup with EADDRINUSE. Please rewrite the file to remove the "export default" line and keep the Bun.serve({ port: import.meta.env.PORT ?? 3000, fetch: app.fetch }) call. Reply with the full corrected file as one TypeScript code block.';
 
+const INVALID_C_STREAM_MESSAGE =
+  'This file calls `c.stream(…)`, but Hono\'s Context has no `.stream` method. The first request to that route will throw `TypeError: c.stream is not a function`. Use streamSSE(c, …) or stream(c, …) from "hono/streaming" instead — or return a non-streaming `c.json(…)` if streaming isn\'t needed.';
+
+const INVALID_C_STREAM_AGENT_PROMPT =
+  'The current file calls c.stream(...), but Hono\'s Context object has no .stream method — the first request to that route throws TypeError: c.stream is not a function. Please rewrite the file to either (a) use stream(c, async (out) => { ... }) imported from "hono/streaming" if streaming is required, iterating the OpenAI SDK chunks and writing chunk.choices[0].delta.content via out.write(...), or (b) drop streaming entirely and return c.json({ reply: completion.choices[0].message.content }) from a non-streaming chat.completions.create call. Reply with the full corrected file as one TypeScript code block.';
+
+// `c.stream(...)` — flag any call expression on a `c.stream` member. The
+// canonical aliases (c, ctx, context) cover what models pick. We require the
+// `(` immediately after to avoid matching `c.stream` as a property reference
+// (which still wouldn't compile, but a reference-only match would also flag
+// `c.streamMode = …` — too broad).
+const C_STREAM_CALL_RE = /\b(?:c|ctx|context)\.stream\s*\(/;
+
 export function detectStartupIssue(code: string): StartupIssue | null {
   const hasBunServe = /\bBun\.serve\s*\(/.test(code);
   // `export default app` (Hono app, etc.) or `export default { ... fetch ... }`.
@@ -41,6 +56,14 @@ export function detectStartupIssue(code: string): StartupIssue | null {
       kind: 'double-server-start',
       message: DOUBLE_SERVER_MESSAGE,
       agentPrompt: DOUBLE_SERVER_AGENT_PROMPT,
+    };
+  }
+
+  if (C_STREAM_CALL_RE.test(code)) {
+    return {
+      kind: 'invalid-c-stream',
+      message: INVALID_C_STREAM_MESSAGE,
+      agentPrompt: INVALID_C_STREAM_AGENT_PROMPT,
     };
   }
   return null;

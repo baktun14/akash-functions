@@ -166,6 +166,42 @@ functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
   const body = c.req.valid('json');
   const subdomain = mintSubdomain(body.name);
 
+  // Any env vars supplied at create-time need to land in function_variables
+  // (encrypted, runner-visible) — not just function_versions.env_vars, which
+  // is metadata the runner doesn't read. Validate + encrypt outside the
+  // transaction so cipher errors / reserved-key errors don't lock rows.
+  const envEntries = Object.entries(body.envVars ?? {});
+  if (envEntries.length > MAX_VARIABLES_PER_FUNCTION) {
+    throw new HTTPException(400, {
+      message: `Cannot exceed ${MAX_VARIABLES_PER_FUNCTION} variables per function`,
+    });
+  }
+  let totalPlaintext = 0;
+  const encryptedEntries: Array<{
+    key: string;
+    ciphertext: string;
+    iv: string;
+    authTag: string;
+    keyVersion: number;
+  }> = [];
+  for (const [key, value] of envEntries) {
+    const keyError = validateVariableKey(key);
+    if (keyError) throw new HTTPException(400, { message: keyError });
+    totalPlaintext += Buffer.byteLength(value, 'utf8');
+    if (totalPlaintext > MAX_TOTAL_PLAINTEXT_BYTES) {
+      throw new HTTPException(400, {
+        message: `Total variables size would exceed ${MAX_TOTAL_PLAINTEXT_BYTES} bytes`,
+      });
+    }
+    try {
+      const enc = secrets.encrypt(value);
+      encryptedEntries.push({ key, ...enc });
+    } catch (err) {
+      log.error('secrets.encrypt failed during create', { err: String(err) });
+      throw new HTTPException(500, { message: 'Failed to encrypt variable' });
+    }
+  }
+
   const inserted = await db.transaction(async (tx) => {
     const [fn] = await tx
       .insert(functions)
@@ -174,6 +210,8 @@ functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
         walletAddress,
         name: body.name,
         subdomain,
+        // Bump revision so the runner picks up the env on its first poll.
+        ...(encryptedEntries.length > 0 ? { variablesRevision: 1 } : {}),
       })
       .returning();
     if (!fn) throw new HTTPException(500, { message: 'Failed to insert function' });
@@ -187,8 +225,31 @@ functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
       envVars: body.envVars ?? {},
     });
 
+    if (encryptedEntries.length > 0) {
+      const now = new Date();
+      await tx.insert(functionVariables).values(
+        encryptedEntries.map((e) => ({
+          functionId: fn.id,
+          key: e.key,
+          ciphertext: e.ciphertext,
+          iv: e.iv,
+          authTag: e.authTag,
+          keyVersion: e.keyVersion,
+          createdAt: now,
+          updatedAt: now,
+        }))
+      );
+    }
+
     return fn;
   });
+
+  if (encryptedEntries.length > 0) {
+    log.info('function variables seeded on create', {
+      fnId: inserted.id,
+      keys: encryptedEntries.map((e) => e.key),
+    });
+  }
 
   return c.json(toRecord(inserted), 201);
 });

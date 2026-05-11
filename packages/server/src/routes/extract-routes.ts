@@ -35,6 +35,22 @@ const ROUTES_KEY_RE = /\broutes\s*:\s*\{/;
 const PATH_ENTRY_RE = /(['"`])(\/[^'"`]*)\1\s*:\s*(\{)?/g;
 const METHOD_KEY_RE = /\b(GET|POST|PUT|PATCH|DELETE)\s*:/g;
 
+// `await (c.req|req).json()` — covers Hono's `c.req.json()` and Bun.serve's
+// `req.json()`. We only care that the call exists; the LHS of the
+// declaration tells us how the parsed body is used.
+const JSON_CALL_PATTERN = String.raw`await\s+(?:c\.req|req)\.json\s*\(\s*\)`;
+// `const { foo, bar } = await c.req.json()` — captures the keys.
+const DESTRUCTURE_JSON_RE = new RegExp(
+  String.raw`(?:const|let|var)\s*\{\s*([^}]+?)\s*\}\s*=\s*` + JSON_CALL_PATTERN,
+  'g',
+);
+// `const body = await c.req.json()` — captures the alias.
+const ALIAS_JSON_RE = new RegExp(
+  String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*` + JSON_CALL_PATTERN,
+  'g',
+);
+const BODY_METHODS: ReadonlySet<RouteMethod> = new Set(['POST', 'PUT', 'PATCH']);
+
 export function extractRoutes(source: Record<string, string>): FunctionRoute[] | undefined {
   const out: FunctionRoute[] = [];
   const seen = new Set<string>();
@@ -60,7 +76,10 @@ export function extractRoutes(source: Record<string, string>): FunctionRoute[] |
       const path = match[3];
       if (!verb || !path) continue;
       const method = verb.toUpperCase() as RouteMethod;
-      if (push({ method, path })) return out;
+      const body = BODY_METHODS.has(method)
+        ? extractHandlerBodyShape(stripped, match.index + match[0].length)
+        : undefined;
+      if (push(body ? { method, path, body } : { method, path })) return out;
     }
 
     for (const route of extractBunServeRoutes(stripped)) {
@@ -92,7 +111,12 @@ function extractBunServeRoutes(source: string): FunctionRoute[] {
       if (block) {
         const methods = extractMethodKeys(block.content);
         if (methods.length > 0) {
-          for (const method of methods) out.push({ method, path });
+          for (const method of methods) {
+            const shape = BODY_METHODS.has(method)
+              ? bunServeMethodHandlerBodyShape(block.content, method)
+              : undefined;
+            out.push(shape ? { method, path, body: shape } : { method, path });
+          }
         } else {
           out.push({ method: 'GET', path });
         }
@@ -103,6 +127,151 @@ function extractBunServeRoutes(source: string): FunctionRoute[] {
     out.push({ method: 'GET', path });
   }
   return out;
+}
+
+// Returns a `{key: "..."}` object derived from how the handler reads the
+// request body. `startAfterPath` points just past the closing quote of the
+// route path; we advance to the function-body `{`, read the balanced block,
+// and scan it for destructured/aliased `c.req.json()` results.
+function extractHandlerBodyShape(
+  source: string,
+  startAfterPath: number,
+): Record<string, unknown> | undefined {
+  // Advance past whitespace and the `,` separating path from handler.
+  let i = startAfterPath;
+  while (i < source.length && /\s/.test(source[i] ?? '')) i++;
+  if (source[i] !== ',') return undefined;
+  i++;
+  while (i < source.length && /\s/.test(source[i] ?? '')) i++;
+
+  // Find the body brace. Handler shapes we care about:
+  //   async (c) => { ... }, (c) => { ... }, function (c) { ... }, function f(c) { ... }
+  // For all of these the next `{` after the parameter list opens the block.
+  // We search forward but bail if we hit a `;` or `)` outside a balanced
+  // construct, to avoid pulling in unrelated code.
+  const bodyStart = findHandlerBraceIndex(source, i);
+  if (bodyStart < 0) return undefined;
+  const block = readBalancedBlock(source, bodyStart);
+  if (!block) return undefined;
+
+  return bodyKeysFromHandler(block.content);
+}
+
+// Same idea, but the source we're scanning is the Bun.serve `{ GET: ..., POST: ... }`
+// object body, and we want the handler attached to a specific method key.
+function bunServeMethodHandlerBodyShape(
+  objBody: string,
+  method: RouteMethod,
+): Record<string, unknown> | undefined {
+  const keyRe = new RegExp(String.raw`\b${method}\s*:`, 'g');
+  const m = keyRe.exec(objBody);
+  if (!m) return undefined;
+  // After the colon, the value could be a function, arrow, or Response — we
+  // only care about the function-body brace.
+  const bodyStart = findHandlerBraceIndex(objBody, m.index + m[0].length);
+  if (bodyStart < 0) return undefined;
+  const block = readBalancedBlock(objBody, bodyStart);
+  if (!block) return undefined;
+  return bodyKeysFromHandler(block.content);
+}
+
+// Walks forward from `from` looking for the `{` that opens a function body.
+// Skips over the parameter list (if any) via balanced-paren counting, then
+// returns the index of the first `{`. Returns -1 if not found within a
+// reasonable lookahead.
+function findHandlerBraceIndex(src: string, from: number): number {
+  const LOOKAHEAD = 400;
+  const end = Math.min(src.length, from + LOOKAHEAD);
+  let i = from;
+  let parenDepth = 0;
+  while (i < end) {
+    const ch = src[i];
+    if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+    else if (ch === '{' && parenDepth === 0) return i;
+    i++;
+  }
+  return -1;
+}
+
+// Matches `*.completions.create(` — the OpenAI/AkashML chat-completions
+// call. Used to detect when a `messages` body key is the OpenAI chat shape
+// (array of {role, content}) rather than an opaque string.
+const COMPLETIONS_CREATE_RE = /\.completions\.create\s*\(/;
+
+// Collects the body keys referenced inside a handler block. Looks for:
+//   const { a, b: rename } = await c.req.json()  → ['a', 'b']
+//   const body = await c.req.json(); body.prompt  → ['prompt']
+// Returns undefined when no shape can be inferred. Keys that look like the
+// canonical OpenAI `messages` field get an array-of-objects placeholder so
+// the auto-generated curl example is a valid request, not a 400.
+function bodyKeysFromHandler(handler: string): Record<string, unknown> | undefined {
+  const keys = new Set<string>();
+
+  DESTRUCTURE_JSON_RE.lastIndex = 0;
+  let dm: RegExpExecArray | null;
+  while ((dm = DESTRUCTURE_JSON_RE.exec(handler))) {
+    const list = dm[1] ?? '';
+    // `{a, b: rename, ...rest}` — strip rest, take the identifier on the LHS
+    // (key, not local name) of each entry. Renames look like `key: localName`.
+    for (const entry of list.split(',')) {
+      const trimmed = entry.trim();
+      if (!trimmed || trimmed.startsWith('...')) continue;
+      const idMatch = trimmed.match(/^([A-Za-z_$][\w$]*)/);
+      if (idMatch?.[1]) keys.add(idMatch[1]);
+    }
+  }
+
+  ALIAS_JSON_RE.lastIndex = 0;
+  let am: RegExpExecArray | null;
+  while ((am = ALIAS_JSON_RE.exec(handler))) {
+    const alias = am[1];
+    if (!alias) continue;
+    const esc = escapeRegex(alias);
+    // Member-access form: `alias.<key>`.
+    const memberRe = new RegExp(String.raw`\b` + esc + String.raw`\.([A-Za-z_$][\w$]*)`, 'g');
+    let mm: RegExpExecArray | null;
+    while ((mm = memberRe.exec(handler))) {
+      const key = mm[1];
+      if (key) keys.add(key);
+    }
+    // Destructure-from-alias form: `const { a, b } = alias` — common when
+    // code does `const body = await c.req.json(); const { prompt } = body`.
+    const destructureFromAliasRe = new RegExp(
+      String.raw`(?:const|let|var)\s*\{\s*([^}]+?)\s*\}\s*=\s*` + esc + String.raw`\b`,
+      'g',
+    );
+    let dam: RegExpExecArray | null;
+    while ((dam = destructureFromAliasRe.exec(handler))) {
+      const list = dam[1] ?? '';
+      for (const entry of list.split(',')) {
+        const trimmed = entry.trim();
+        if (!trimmed || trimmed.startsWith('...')) continue;
+        const idMatch = trimmed.match(/^([A-Za-z_$][\w$]*)/);
+        if (idMatch?.[1]) keys.add(idMatch[1]);
+      }
+    }
+  }
+
+  if (keys.size === 0) return undefined;
+  const callsCompletions = COMPLETIONS_CREATE_RE.test(handler);
+  const shape: Record<string, unknown> = {};
+  for (const k of keys) {
+    // `messages` forwarded to chat.completions.create is the OpenAI chat
+    // shape — emit a runnable example so the curl tab doesn't suggest a
+    // string. Any other key (or `messages` in a non-completions context)
+    // falls back to the generic `"..."` placeholder.
+    if (k === 'messages' && callsCompletions) {
+      shape[k] = [{ role: 'user', content: 'Hello' }];
+    } else {
+      shape[k] = '...';
+    }
+  }
+  return shape;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function findBunServeRoutesBody(src: string): string | null {

@@ -8,7 +8,7 @@
 // We let the user deploy with 0 matches (providers come online dynamically)
 // but require an explicit confirm so they don't sit in `bidding` by surprise.
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type {
   CodeSample,
   GpuSpec,
@@ -18,9 +18,11 @@ import type {
 import { FnLogo, Icon } from '../icons';
 import { PRESETS, SAMPLES } from '../../data/presets';
 import { ResChip } from './ResChip';
+import { AgentCTACard } from './AgentCTACard';
 import { AkashMLConnect } from './AkashMLConnect';
 import { CodeEditor } from './CodeEditor';
-import { tokensToSource } from '../../lib/api';
+import { api, tokensToSource } from '../../lib/api';
+import { detectEnvVarKeys } from '../../lib/detect-env-vars';
 import { useGpuModels } from '../../lib/use-gpu-models';
 import { useFeasibility } from '../../lib/use-feasibility';
 import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
@@ -31,8 +33,14 @@ type Props = {
    *  back to the preset's template source when absent. */
   initialSource?: string | null;
   onClose: () => void;
-  /** customResources is sent only when the user opened Adjust and edited the form. */
-  onDeploy: (sample: CodeSample, customResources?: ResourceRequest) => void;
+  /** customResources is sent only when the user opened Adjust and edited the form.
+   *  envVars carries any user-supplied secrets the source references (e.g.
+   *  AKASHML_API_KEY) — undefined when there are none to send. */
+  onDeploy: (
+    sample: CodeSample,
+    customResources?: ResourceRequest,
+    envVars?: Record<string, string>,
+  ) => void;
   /** Agent chat panel — when present, the builder shifts to a 3-column grid
    *  with the agent docked on the right. Layout owns the panel; we just host it. */
   agentSlot?: ReactNode;
@@ -109,6 +117,32 @@ export function FunctionBuilder({
     applySource: setSource,
   });
 
+  // Statically detect env-var references in the source. The list updates as
+  // the agent edits the code. Each key gets a row in the form below; missing
+  // values block deploy.
+  const detectedEnvKeys = useMemo(() => detectEnvVarKeys(source), [source]);
+  const needsAkashMLKey = detectedEnvKeys.includes('AKASHML_API_KEY');
+
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+
+  // Pre-fill AKASHML_API_KEY from the stored connection whenever the key is
+  // newly detected and the field is empty. Re-runs when the detection set
+  // changes (agent rewrites the source).
+  useEffect(() => {
+    if (!needsAkashMLKey) return;
+    if (envValues.AKASHML_API_KEY) return;
+    const conn = api.getAkashMLConnection();
+    if (!conn?.key) return;
+    setEnvValues((cur) => ({ ...cur, AKASHML_API_KEY: conn.key }));
+    // envValues intentionally excluded — we only want to seed an empty field
+    // once per detection event, not fight the user's edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsAkashMLKey]);
+
+  // True when at least one detected key has no value. Drives the Deploy
+  // button's disabled state.
+  const missingEnvValues = detectedEnvKeys.some((k) => !envValues[k]?.trim());
+
   // Adjust panel: closed by default so casual users see the preset chips, can
   // open inline to override. customRes === null means "use the preset defaults"
   // and skips both the feasibility call and the customResources payload.
@@ -120,7 +154,7 @@ export function FunctionBuilder({
   const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
   const dirty = source !== templateSource || name !== sample.name;
   const trimmedName = name.trim();
-  const canDeploy = trimmedName.length > 0;
+  const canDeploy = trimmedName.length > 0 && !missingEnvValues;
 
   const effectiveForm = customRes ?? parseDefaultForm(sample);
   const customResourceRequest: ResourceRequest | null = customRes
@@ -163,9 +197,17 @@ export function FunctionBuilder({
       setConfirmingNoMatch(true);
       return;
     }
+    // Filter envValues down to currently-detected keys so a stale value left
+    // behind from a previous source revision doesn't get sent.
+    const envOut: Record<string, string> = {};
+    for (const k of detectedEnvKeys) {
+      const v = envValues[k]?.trim();
+      if (v) envOut[k] = v;
+    }
     onDeploy(
       { ...sample, name: trimmedName, source, prompt },
-      customResourceRequest ?? undefined
+      customResourceRequest ?? undefined,
+      Object.keys(envOut).length > 0 ? envOut : undefined,
     );
   };
 
@@ -287,12 +329,25 @@ export function FunctionBuilder({
             ))}
           </div>
 
-          {sample.needsAkashML && (
+          {(sample.needsAkashML || needsAkashMLKey) && (
             <>
               <div className="eyebrow" style={{ marginTop: 18, marginBottom: 8 }}>
                 Connections
               </div>
               <AkashMLConnect />
+            </>
+          )}
+
+          {detectedEnvKeys.length > 0 && (
+            <>
+              <div className="eyebrow" style={{ marginTop: 18, marginBottom: 8 }}>
+                Environment variables
+              </div>
+              <EnvVarsSection
+                keys={detectedEnvKeys}
+                values={envValues}
+                onChange={(k, v) => setEnvValues((cur) => ({ ...cur, [k]: v }))}
+              />
             </>
           )}
 
@@ -414,48 +469,72 @@ export function FunctionBuilder({
   );
 }
 
-// ─── Agent CTA card ───────────────────────────────────────────────────
+// ─── Env vars section ─────────────────────────────────────────────────
 
-function AgentCTACard({ onOpen }: { onOpen: () => void }) {
+function EnvVarsSection({
+  keys,
+  values,
+  onChange,
+}: {
+  keys: string[];
+  values: Record<string, string>;
+  onChange: (key: string, value: string) => void;
+}) {
   return (
-    <button
-      type="button"
-      onClick={onOpen}
+    <div
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        width: '100%',
-        padding: '14px 14px',
+        padding: '12px 14px',
         background: 'var(--bg-elev-2)',
         border: '1px solid var(--line)',
         borderRadius: 12,
-        color: 'var(--fg)',
-        textAlign: 'left',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        transition: 'border-color 120ms, background 120ms',
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = 'var(--line-strong)';
-        e.currentTarget.style.background = 'var(--bg-elev-3)';
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = 'var(--line)';
-        e.currentTarget.style.background = 'var(--bg-elev-2)';
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
       }}
     >
-      <Icon name="sparkles" size={16} color="var(--accent)" />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 2 }}>
-          Ask Akash Agent
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--fg-muted)', lineHeight: 1.4 }}>
-          Describe a function or refine the scaffold — I’ll write the code.
-        </div>
+      <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', lineHeight: 1.5 }}>
+        Detected in your source. Values are encrypted at rest and injected
+        as <span className="mono" style={{ color: 'var(--fg)' }}>process.env.X</span> at runtime.
       </div>
-      <Icon name="chevronRight" size={14} color="var(--fg-muted)" />
-    </button>
+      {keys.map((k) => {
+        const value = values[k] ?? '';
+        const empty = !value.trim();
+        return (
+          <div key={k} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <label
+              className="mono"
+              style={{
+                fontSize: 11,
+                color: empty ? 'var(--accent-soft)' : 'var(--fg-muted)',
+              }}
+            >
+              {k}
+              {empty && <span style={{ marginLeft: 6 }}>required</span>}
+            </label>
+            <input
+              type="password"
+              value={value}
+              onChange={(e) => onChange(k, e.target.value)}
+              placeholder="paste value"
+              autoComplete="off"
+              spellCheck={false}
+              className="input mono"
+              style={{
+                width: '100%',
+                padding: '6px 10px',
+                fontSize: 12,
+                background: 'var(--bg-elev-3)',
+                border: '1px solid ' + (empty ? 'rgba(255,41,3,0.4)' : 'var(--line)'),
+                borderRadius: 8,
+                color: 'var(--fg)',
+                fontFamily: 'inherit',
+                outline: 'none',
+              }}
+            />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

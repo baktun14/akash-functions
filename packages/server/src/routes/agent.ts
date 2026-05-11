@@ -21,7 +21,10 @@ import { log } from '../lib/log';
 export const agentRouter = new Hono<{ Variables: AuthVars }>();
 agentRouter.use('*', requireAkashKey);
 
-function buildSystemPrompt(context: AgentChatContext): string {
+function buildSystemPrompt(context: AgentChatContext, models: readonly string[]): string {
+  const modelList = models
+    .map((m) => `    - ${m}${m === akashmlApi.defaultModel ? ' (default — prefer this unless asked otherwise)' : ''}`)
+    .join('\n');
   const base =
     'You are an assistant that writes Bun + TypeScript source for the Akash Functions runtime. ' +
     'Guidelines:\n' +
@@ -29,10 +32,12 @@ function buildSystemPrompt(context: AgentChatContext): string {
     '- The entry file is src/index.ts and must start exactly ONE HTTP server. Use the canonical pattern at the bottom of the file: `Bun.serve({ port: import.meta.env.PORT ?? 3000, fetch: app.fetch });`. The runner sets PORT=3001 and the preload auto-rewrites any literal port, so this snippet is correct as-is — never hardcode 3001 yourself.\n' +
     '- NEVER combine `Bun.serve(...)` with `export default app` (or `export default { fetch }`). Bun automatically calls `Bun.serve` on a default export that looks like a server config, so having both causes a second server to bind the same port and crash with `EADDRINUSE: Failed to start server. Is port 3001 in use?`. Pick the `Bun.serve(...)` pattern only — do not also export the app as default.\n' +
     '- `Bun.serve(...)` is synchronous and returns a `Server`, not a Promise — do not `await` it.\n' +
+    '- Hono\'s `Context` (the `c` parameter in handlers) has NO `.stream` method. Calling `c.stream(...)` throws `TypeError: c.stream is not a function` the first time the route fires. To stream a response, import from `"hono/streaming"` — use `stream(c, async (out) => { ... })` for raw chunks or `streamSSE(c, async (out) => { ... })` for Server-Sent Events. For OpenAI SDK streams, iterate the async iterable and write each `chunk.choices[0]?.delta?.content` via `out.write(...)`. If streaming isn\'t strictly required, return `c.json(...)` from a non-streaming `chat.completions.create` (without `stream: true`) — simpler and works everywhere.\n' +
     '- Read env vars via `process.env` (or `Bun.env`); AKASHML_API_KEY is injected when the function needs AkashML.\n' +
     `- AkashML integration: the ONLY correct base URL is "${akashmlApi.base}". Never use any other host (chatapi.akash.network, chat-api.akash.network, api.openai.com, etc.) — those will not work.\n` +
     `- Construct \`new OpenAI({ apiKey: process.env.AKASHML_API_KEY, baseURL: "${akashmlApi.base}" })\` LAZILY inside the request handler (or memoized via a getter) — NEVER at module top level. The OpenAI SDK throws "Missing credentials" during construction when the key is empty/undefined, and at top level that crashes the whole function before any route can respond.\n` +
     `- NEVER write \`process.env.AKASHML_API_KEY || ""\` or any empty-string fallback for credentials — the empty string hits the same SDK validation as undefined and crashes construction. If you want a guard, branch inside the handler: \`if (!process.env.AKASHML_API_KEY) return c.json({ error: "AKASHML_API_KEY not set" }, 500);\`.\n` +
+    `- AkashML models — when calling \`chat.completions.create({ model })\`, use EXACTLY one of these literal IDs:\n${modelList}\n  Never use OpenAI/Anthropic IDs (\`gpt-*\`, \`claude-*\`, \`o1-*\`, \`o3-*\`) — they 404 on AkashML.\n` +
     '- When the user asks for code, emit ONE fenced ```ts code block that is the full file contents — no diffs, no partial snippets. Keep prose outside the block short.\n' +
     '- Do not invent dependencies; stick to hono, croner, openai (for AkashML), and the standard Bun/Node runtime.';
 
@@ -117,7 +122,29 @@ agentRouter.post('/chat', async (c) => {
 
   const context: AgentChatContext = body.context ?? { mode: 'none' };
   const model = body.model ?? akashmlApi.defaultModel;
-  const systemPrompt = buildSystemPrompt(context);
+
+  // Fetch the live AkashML model list so the prompt never lies about what's
+  // available. /v1/models requires auth (we use the user's per-request key)
+  // and is cached for 60s inside the client; on failure we fall back to the
+  // hard-coded list so the chat still streams.
+  let models: readonly string[];
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 2_000);
+    try {
+      models = await akashmlApi.listModels(body.akashmlKey, ac.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err) {
+    log.warn('agent chat model list fetch failed — using fallback', {
+      err: err instanceof Error ? err.message : String(err),
+      fallbackCount: akashmlApi.fallbackModels.length,
+    });
+    models = akashmlApi.fallbackModels;
+  }
+
+  const systemPrompt = buildSystemPrompt(context, models);
 
   return streamSSE(c, async (sse) => {
     const send = (chunk: AgentChatChunk) => sse.writeSSE({ data: JSON.stringify(chunk) });
