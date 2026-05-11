@@ -36,6 +36,11 @@ type Props = {
   /** Agent chat panel — when present, the builder shifts to a 3-column grid
    *  with the agent docked on the right. Layout owns the panel; we just host it. */
   agentSlot?: ReactNode;
+  /** Whether the agent panel is currently open. Controls whether the in-builder
+   *  CTA card is shown (hidden when the panel is already docked). */
+  agentOpen: boolean;
+  /** Opens the agent panel; the Layout docks it into the builder's grid. */
+  onOpenAgent: () => void;
 };
 
 type SizeUnit = 'Mi' | 'Gi';
@@ -79,6 +84,8 @@ export function FunctionBuilder({
   onClose,
   onDeploy,
   agentSlot,
+  agentOpen,
+  onOpenAgent,
 }: Props) {
   const initial: PresetId =
     initialPreset && SAMPLES[initialPreset] ? initialPreset : 'rest';
@@ -86,6 +93,9 @@ export function FunctionBuilder({
   const [source, setSource] = useState<string>(() =>
     initialSource ?? tokensToSource(SAMPLES[initial].code)
   );
+  // `prompt` is no longer user-editable in the builder — the agent panel is the
+  // prompt surface. We still carry the preset's stock prompt through to
+  // `onDeploy` so it lands on the function record as descriptor metadata.
   const [prompt, setPrompt] = useState<string>(SAMPLES[initial].prompt);
   const [name, setName] = useState<string>(SAMPLES[initial].name);
 
@@ -108,8 +118,7 @@ export function FunctionBuilder({
 
   const sample = SAMPLES[preset];
   const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
-  const dirty =
-    source !== templateSource || prompt !== sample.prompt || name !== sample.name;
+  const dirty = source !== templateSource || name !== sample.name;
   const trimmedName = name.trim();
   const canDeploy = trimmedName.length > 0;
 
@@ -226,59 +235,14 @@ export function FunctionBuilder({
         </div>
 
         <div className="builder-prompt scroll">
-          <div className="eyebrow" style={{ marginBottom: 8 }}>Prompt</div>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: 10,
-              padding: '12px 14px',
-              background: 'var(--bg-elev-2)',
-              border: '1px solid var(--line)',
-              borderRadius: 12,
-              minHeight: 56,
-            }}
-          >
-            <Icon
-              name="sparkles"
-              size={14}
-              color="var(--fg-muted)"
-              style={{ marginTop: 2 }}
-            />
-            <textarea
-              className="prompt-area"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              rows={4}
-              placeholder="Describe your function. We'll write the code, pick a provider, and deploy it on Akash."
-              style={{
-                flex: 1,
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--fg)',
-                fontSize: 13.5,
-                resize: 'none',
-                outline: 'none',
-                fontFamily: 'inherit',
-                lineHeight: 1.5,
-                minHeight: 80,
-              }}
-            />
-          </div>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'flex-end',
-              marginTop: 6,
-            }}
-          >
-            <span className="mono" style={{ fontSize: 11, color: 'var(--fg-subtle)' }}>
-              ⌘ Enter to regenerate
-            </span>
-          </div>
+          {!agentOpen && <AgentCTACard onOpen={onOpenAgent} />}
 
-          <div className="eyebrow" style={{ marginTop: 18, marginBottom: 8 }}>Templates</div>
+          <div
+            className="eyebrow"
+            style={{ marginTop: agentOpen ? 0 : 18, marginBottom: 8 }}
+          >
+            Templates
+          </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {PRESETS.map((p) => (
               <button
@@ -447,6 +411,51 @@ export function FunctionBuilder({
         {agentSlot && <div className="builder-agent-slot">{agentSlot}</div>}
       </div>
     </div>
+  );
+}
+
+// ─── Agent CTA card ───────────────────────────────────────────────────
+
+function AgentCTACard({ onOpen }: { onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        width: '100%',
+        padding: '14px 14px',
+        background: 'var(--bg-elev-2)',
+        border: '1px solid var(--line)',
+        borderRadius: 12,
+        color: 'var(--fg)',
+        textAlign: 'left',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'border-color 120ms, background 120ms',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = 'var(--line-strong)';
+        e.currentTarget.style.background = 'var(--bg-elev-3)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = 'var(--line)';
+        e.currentTarget.style.background = 'var(--bg-elev-2)';
+      }}
+    >
+      <Icon name="sparkles" size={16} color="var(--accent)" />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 2 }}>
+          Ask Akash Agent
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--fg-muted)', lineHeight: 1.4 }}>
+          Describe a function or refine the scaffold — I’ll write the code.
+        </div>
+      </div>
+      <Icon name="chevronRight" size={14} color="var(--fg-muted)" />
+    </button>
   );
 }
 

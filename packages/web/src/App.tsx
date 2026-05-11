@@ -279,6 +279,8 @@ function Layout({
                 onClose={() => setBuilderOpen(false)}
                 onDeploy={handleDeploy}
                 agentSlot={builderHostsAgent ? agentPanelEl : null}
+                agentOpen={agentOpen}
+                onOpenAgent={() => setAgentOpen(true)}
               />
             )}
             {editorTarget && (
