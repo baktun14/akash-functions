@@ -14,9 +14,20 @@ type Props = {
   /** Invoked when the user clicks "Use as new function" on a code block while
    *  no editor is currently open. The Layout owns the builder-open flow. */
   onUseAsNewFunction: (code: string) => void;
+  /** When set, the panel auto-sends this string as a user turn on mount/change
+   *  and calls `onPendingPromptConsumed` to clear it. Used by the editor's
+   *  "Quick fix with agent" affordance to dispatch a corrective request without
+   *  the user having to retype it. */
+  pendingPrompt?: string | null;
+  onPendingPromptConsumed?: () => void;
 };
 
-export function AgentPanel({ onClose, onUseAsNewFunction }: Props): ReactElement {
+export function AgentPanel({
+  onClose,
+  onUseAsNewFunction,
+  pendingPrompt,
+  onPendingPromptConsumed,
+}: Props): ReactElement {
   // Re-read the AkashML connection each render so connecting it from the
   // builder reflects here without a remount.
   const [conn, setConn] = useState(() => api.getAkashMLConnection());
@@ -40,6 +51,35 @@ export function AgentPanel({ onClose, onUseAsNewFunction }: Props): ReactElement
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  // Auto-dispatch a prompt requested from outside the panel (e.g. the
+  // FunctionEditor's "Quick fix with agent" button).
+  //
+  // The ref dedupe guards against React StrictMode running this effect twice
+  // on mount with the same captured `pendingPrompt`. Without it, both runs
+  // see the same closure (pendingPrompt non-null, chat.pending=false because
+  // the second run uses the same captured snapshot), and chat.send fires
+  // twice — two SSE streams race to append into the same assistant message
+  // and produce garbled, interleaved output.
+  const consumedPromptRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!pendingPrompt) {
+      consumedPromptRef.current = null;
+      return;
+    }
+    if (consumedPromptRef.current === pendingPrompt) return;
+    consumedPromptRef.current = pendingPrompt;
+
+    if (chat.pending || !conn) {
+      onPendingPromptConsumed?.();
+      return;
+    }
+    void chat.send(pendingPrompt);
+    onPendingPromptConsumed?.();
+    // chat.send / onPendingPromptConsumed change identity on every render;
+    // we intentionally key the effect on the prompt itself plus the ref dedupe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPrompt]);
 
   const submit = () => {
     const trimmed = text.trim();
@@ -176,6 +216,10 @@ export function AgentPanel({ onClose, onUseAsNewFunction }: Props): ReactElement
         messages={chat.messages}
         pending={chat.pending}
         onUseAsNewFunction={onUseAsNewFunction}
+        onQuickFix={(prompt) => {
+          if (chat.pending || !conn) return;
+          void chat.send(prompt);
+        }}
       />
 
       {chat.error && (

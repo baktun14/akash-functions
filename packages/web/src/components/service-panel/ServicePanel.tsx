@@ -114,7 +114,9 @@ export function ServicePanel({
         background: 'var(--bg)',
         display: 'flex',
         flexDirection: 'column',
-        zIndex: 8,
+        // No explicit zIndex: a non-auto value here would make this element a
+        // stacking context, which would trap any descendant .modal-shell at
+        // this layer and let the TopBar (zIndex 10) paint above the scrim.
         overflow: 'hidden',
       }}
     >

@@ -3,8 +3,9 @@
 // overwrites the active editor's source; when no, "Use as new function" opens
 // the builder seeded with this code.
 
-import { useState, type ReactElement } from 'react';
+import { useMemo, useState, type ReactElement } from 'react';
 import { Icon } from '../icons';
+import { detectStartupIssueInFencedBlock } from '../../lib/codeChecks';
 import { useActiveEditor } from './ActiveEditorContext';
 
 type Props = {
@@ -13,12 +14,21 @@ type Props = {
   /** Used by the empty-state path: invoked with the code to open the builder
    *  pre-filled. Layout owns this — the panel doesn't need to know how. */
   onUseAsNewFunction: (code: string) => void;
+  /** When provided, the warning banner shows a "Ask agent to fix" button that
+   *  sends a corrective follow-up to the same conversation. */
+  onQuickFix?: (prompt: string) => void;
 };
 
-export function CodeBlock({ code, lang, onUseAsNewFunction }: Props): ReactElement {
+export function CodeBlock({
+  code,
+  lang,
+  onUseAsNewFunction,
+  onQuickFix,
+}: Props): ReactElement {
   const active = useActiveEditor();
   const [justApplied, setJustApplied] = useState(false);
   const [justCopied, setJustCopied] = useState(false);
+  const issue = useMemo(() => detectStartupIssueInFencedBlock(code, lang), [code, lang]);
 
   const apply = () => {
     if (!active) return;
@@ -86,6 +96,21 @@ export function CodeBlock({ code, lang, onUseAsNewFunction }: Props): ReactEleme
           </button>
         )}
       </div>
+      {issue && (
+        <div className="codeblock-warn" role="alert">
+          <Icon name="info" size={11} />
+          <span style={{ flex: 1, lineHeight: 1.5 }}>{issue.message}</span>
+          {onQuickFix && (
+            <button
+              type="button"
+              onClick={() => onQuickFix(issue.agentPrompt)}
+              className="btn btn-ghost btn-sm codeblock-warn-action"
+            >
+              Ask agent to fix
+            </button>
+          )}
+        </div>
+      )}
       <pre
         className="mono"
         style={{

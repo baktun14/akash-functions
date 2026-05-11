@@ -12,9 +12,15 @@ type Props = {
   messages: AgentChatMessage[];
   pending: boolean;
   onUseAsNewFunction: (code: string) => void;
+  onQuickFix?: (prompt: string) => void;
 };
 
-export function MessageList({ messages, pending, onUseAsNewFunction }: Props): ReactElement {
+export function MessageList({
+  messages,
+  pending,
+  onUseAsNewFunction,
+  onQuickFix,
+}: Props): ReactElement {
   const endRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to the bottom on every new chunk so streaming output stays in
@@ -74,7 +80,14 @@ export function MessageList({ messages, pending, onUseAsNewFunction }: Props): R
         // Don't render the empty trailing placeholder — the TypingIndicator
         // below stands in for it until the first delta arrives.
         if (pending && i === messages.length - 1 && lastAssistantEmpty) return null;
-        return <Message key={i} message={m} onUseAsNewFunction={onUseAsNewFunction} />;
+        return (
+          <Message
+            key={i}
+            message={m}
+            onUseAsNewFunction={onUseAsNewFunction}
+            onQuickFix={onQuickFix}
+          />
+        );
       })}
       {pending && <TypingIndicator />}
       <div ref={endRef} />
@@ -103,9 +116,11 @@ function TypingIndicator() {
 function Message({
   message,
   onUseAsNewFunction,
+  onQuickFix,
 }: {
   message: AgentChatMessage;
   onUseAsNewFunction: (code: string) => void;
+  onQuickFix?: (prompt: string) => void;
 }) {
   if (message.role === 'user') {
     return (
@@ -145,6 +160,7 @@ function Message({
             code={seg.code}
             lang={seg.lang}
             onUseAsNewFunction={onUseAsNewFunction}
+            onQuickFix={onQuickFix}
           />
         )
       )}
