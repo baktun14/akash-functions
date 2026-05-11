@@ -25,7 +25,7 @@ import { apiKeys, deployments, functionVariables, functionVersions, functions } 
 import { secrets } from '../lib/secrets';
 import { verifyToken } from '../lib/signing';
 import { log } from '../lib/log';
-import { decorateRoutesWithAuth } from './deploy';
+import { FALLBACK_ROUTES, decorateRoutesWithAuth } from './deploy';
 import { extractRoutes } from './extract-routes';
 
 export const runnerRouter = new Hono();
@@ -160,7 +160,7 @@ runnerRouter.get('/current/:fnId', async (c) => {
       ).map((row) => row.keyHash)
     : [];
 
-  const detected = extractRoutes(version.source) ?? [];
+  const detected = extractRoutes(version.source) ?? FALLBACK_ROUTES;
   const routes = decorateRoutesWithAuth(detected, fn.protectedRoutes);
 
   c.header('Cache-Control', 'no-store');

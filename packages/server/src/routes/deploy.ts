@@ -211,9 +211,7 @@ deployRouter.get('/:id/deployments/:depId', async (c) => {
     .where(eq(functionVersions.id, dep.versionId))
     .limit(1);
   const detected = version ? extractRoutes(version.source) : undefined;
-  const routes = detected
-    ? decorateRoutesWithAuth(detected, fn.protectedRoutes)
-    : undefined;
+  const routes = decorateRoutesWithAuth(detected ?? FALLBACK_ROUTES, fn.protectedRoutes);
 
   return c.json(toRecord(dep, routes));
 });
@@ -243,6 +241,11 @@ function toRecord(
     closedAt: dep.closedAt?.toISOString(),
   };
 }
+
+// Synthesized fallback when we can't extract any explicit routes from the
+// user's source — every function answers `GET /` by convention, so showing
+// that in the UI is more useful than an empty list.
+export const FALLBACK_ROUTES: FunctionRoute[] = [{ method: 'GET', path: '/' }];
 
 // Stamps each detected route with `auth: 'public' | 'apiKey'` based on the
 // function's protected-routes set. The set holds `"<METHOD> <path>"` keys so
