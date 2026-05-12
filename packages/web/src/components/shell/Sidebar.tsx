@@ -1,4 +1,4 @@
-// Akash Functions sidebar — 232px, akash·red dot wordmark, Deploy CTA, nav.
+// Akash Functions sidebar — 232px, akash·red dot wordmark, nav.
 
 import type { ReactElement } from 'react';
 import { AkashSign, Icon } from '../icons';
@@ -23,10 +23,9 @@ const BOTTOM: NavItem[] = [
 type Props = {
   active: ViewId;
   onSelect: (id: ViewId) => void;
-  onDeploy: () => void;
 };
 
-export function Sidebar({ active, onSelect, onDeploy }: Props): ReactElement {
+export function Sidebar({ active, onSelect }: Props): ReactElement {
   return (
     <aside
       style={{
@@ -36,7 +35,7 @@ export function Sidebar({ active, onSelect, onDeploy }: Props): ReactElement {
         borderRight: '1px solid var(--line)',
         display: 'flex',
         flexDirection: 'column',
-        padding: '14px 12px 12px',
+        padding: '22px 14px 14px',
       }}
     >
       <a
@@ -46,7 +45,7 @@ export function Sidebar({ active, onSelect, onDeploy }: Props): ReactElement {
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          padding: '6px 6px 16px',
+          padding: '6px 6px 28px',
           textDecoration: 'none',
           whiteSpace: 'nowrap',
         }}
@@ -58,25 +57,7 @@ export function Sidebar({ active, onSelect, onDeploy }: Props): ReactElement {
         </span>
       </a>
 
-      <button
-        onClick={onDeploy}
-        className="btn btn-ghost"
-        style={{
-          width: '100%',
-          justifyContent: 'center',
-          padding: '10px 14px',
-          borderRadius: 10,
-          background: 'var(--bg-elev-2)',
-          borderColor: 'var(--line-strong)',
-          gap: 8,
-          marginBottom: 8,
-        }}
-      >
-        <Icon name="rocket" size={14} />
-        <span style={{ fontWeight: 600 }}>Deploy</span>
-      </button>
-
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
         {MAIN.map((it) => (
           <Item key={it.id} it={it} active={active === it.id} onSelect={onSelect} />
         ))}
@@ -84,7 +65,7 @@ export function Sidebar({ active, onSelect, onDeploy }: Props): ReactElement {
 
       <div style={{ flex: 1 }} />
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingTop: 8 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 8 }}>
         {BOTTOM.map((it) => (
           <Item key={it.id} it={it} active={active === it.id} onSelect={onSelect} />
         ))}

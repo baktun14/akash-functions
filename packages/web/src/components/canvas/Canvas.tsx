@@ -59,7 +59,7 @@ export function Canvas({ services, onNewFunction, onRefresh }: Props) {
             <button
               type="button"
               onClick={onNewFunction}
-              className="btn btn-subtle btn-sm"
+              className="btn btn-primary btn-sm"
               style={{ gap: 6 }}
             >
               <Icon name="plus" size={13} /> New function
