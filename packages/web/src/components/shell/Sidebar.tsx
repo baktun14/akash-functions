@@ -35,7 +35,7 @@ export function Sidebar({ active, onSelect }: Props): ReactElement {
         borderRight: '1px solid var(--line)',
         display: 'flex',
         flexDirection: 'column',
-        padding: '22px 14px 14px',
+        padding: '0 14px 14px',
       }}
     >
       <a
@@ -45,7 +45,8 @@ export function Sidebar({ active, onSelect }: Props): ReactElement {
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          padding: '6px 6px 28px',
+          height: 56,
+          padding: '0 6px',
           textDecoration: 'none',
           whiteSpace: 'nowrap',
         }}
@@ -57,7 +58,7 @@ export function Sidebar({ active, onSelect }: Props): ReactElement {
         </span>
       </a>
 
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 18 }}>
         {MAIN.map((it) => (
           <Item key={it.id} it={it} active={active === it.id} onSelect={onSelect} />
         ))}
