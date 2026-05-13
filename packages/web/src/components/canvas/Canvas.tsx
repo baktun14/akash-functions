@@ -14,7 +14,11 @@ type Props = {
 
 type Filter = 'active' | 'all';
 
-const isActive = (s: FunctionRecord) => s.status === 'online' || s.status === 'pending';
+// 'degraded' counts as active — the lease is still paid and the runner may
+// recover any moment. Hiding it would reproduce the original bug where a
+// transient probe failure wiped functions off the dashboard.
+const isActive = (s: FunctionRecord) =>
+  s.status === 'online' || s.status === 'pending' || s.status === 'degraded';
 
 export function Canvas({ services, onNewFunction, onRefresh }: Props) {
   const [filter, setFilter] = useState<Filter>('active');

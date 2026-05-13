@@ -1,6 +1,6 @@
 // /api/functions — CRUD for function records and their version history.
 
-import { and, desc, eq, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, like, notInArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
@@ -97,7 +97,7 @@ functionsRouter.get('/', async (c) => {
     kind: 'function' as const,
     subdomain: dep?.uris?.[0] ?? `${fn.subdomain}.akash-functions.io`,
     image: env.RUNNER_IMAGE,
-    status: dep ? stateToStatus(dep.state) : 'idle',
+    status: dep ? stateToStatus(dep.state, dep.errorMessage) : 'idle',
     latestDeploymentId: dep?.id,
     // Only flag live deployments; functions that are idle/pending/failed/closed
     // either have no runner running or are mid-transition, so an "outdated"
@@ -110,23 +110,23 @@ functionsRouter.get('/', async (c) => {
   // believe is live/leased. The reconciler can't do this (no apiKey outside
   // an authed request), so we piggyback on the user's poll. Updates land in
   // the DB and the frontend's next 3s/30s tick reflects them.
-  void crossCheckAkashStates(akashKey, decorated.map((d) => d.dep));
+  void crossCheckAkashStates(akashKey, walletAddress, decorated.map((d) => d.dep));
 
   return c.json(list);
 });
 
 async function crossCheckAkashStates(
   akashKey: string,
+  walletAddress: string,
   deps: Array<Awaited<ReturnType<typeof latestDeployment>>>
 ): Promise<void> {
   const candidates = deps.filter(
     (d): d is NonNullable<typeof d> & { dseq: string } =>
       !!d && !!d.dseq && (d.state === 'live' || d.state === 'leased')
   );
-  if (candidates.length === 0) return;
 
-  await Promise.allSettled(
-    candidates.map(async (dep) => {
+  await Promise.allSettled([
+    ...candidates.map(async (dep) => {
       try {
         const detail = await consoleApi.getDeployment(akashKey, dep.dseq);
         const deploymentClosed = detail.deployment?.state === 'closed';
@@ -148,8 +148,68 @@ async function crossCheckAkashStates(
           err: String(err),
         });
       }
+    }),
+    rehydrateProbeClosed(akashKey, walletAddress),
+  ]);
+}
+
+// Recovery: rows we wrongly closed from an ingress probe in a prior version
+// of the reconciler. If the on-chain lease is still active, restore them to
+// 'live'. Lets the dashboard self-heal after a transient outbound-network
+// blip on the server, without the user having to redeploy.
+async function rehydrateProbeClosed(akashKey: string, walletAddress: string): Promise<void> {
+  // Scope to this wallet's deployments so one user's poll can't fan out a
+  // Console lookup over every other wallet's history.
+  const wrongfullyClosed = await db
+    .select({
+      id: deployments.id,
+      dseq: deployments.dseq,
     })
-  );
+    .from(deployments)
+    .innerJoin(functions, eq(functions.id, deployments.functionId))
+    .where(and(
+      eq(functions.walletAddress, walletAddress),
+      eq(deployments.state, 'closed'),
+      like(deployments.errorMessage, 'ingress unreachable%')
+    ))
+    .limit(50);
+
+  if (wrongfullyClosed.length === 0) return;
+
+  await Promise.allSettled(wrongfullyClosed.map(async (dep) => {
+    if (!dep.dseq) return;
+    try {
+      const detail = await consoleApi.getDeployment(akashKey, dep.dseq);
+      const deploymentClosed = detail.deployment?.state === 'closed';
+      const allLeasesClosed =
+        Array.isArray(detail.leases) &&
+        detail.leases.length > 0 &&
+        detail.leases.every((l) => l.state === 'closed');
+      if (deploymentClosed || allLeasesClosed) return;
+      const updated = await db
+        .update(deployments)
+        .set({ state: 'live', closedAt: null, errorMessage: null })
+        .where(and(
+          eq(deployments.id, dep.id),
+          eq(deployments.state, 'closed'),
+          like(deployments.errorMessage, 'ingress unreachable%')
+        ))
+        .returning({ id: deployments.id });
+      if (updated.length > 0) {
+        log.info('cross-check rehydrated wrongly-closed deployment', {
+          deploymentId: dep.id,
+          dseq: dep.dseq,
+        });
+      }
+    } catch (err) {
+      if (err instanceof ConsoleApiError && err.status === 404) return;
+      log.warn('rehydrate cross-check failed', {
+        deploymentId: dep.id,
+        dseq: dep.dseq,
+        err: String(err),
+      });
+    }
+  }));
 }
 
 async function markClosedOnChain(deploymentId: string, errorMessage: string): Promise<void> {
@@ -821,10 +881,13 @@ function toRecord(fn: typeof functions.$inferSelect): FunctionRecord {
   };
 }
 
-function stateToStatus(state: string): FunctionRecord['status'] {
+function stateToStatus(state: string, errorMessage: string | null = null): FunctionRecord['status'] {
   switch (state) {
     case 'live':
-      return 'online';
+      // A 'live' row with an errorMessage means the reconciler's ingress probe
+      // is striking out (yellow degraded), or the runner reported a non-fatal
+      // runtime error. The lease is still paid, so we don't want it offline.
+      return errorMessage ? 'degraded' : 'online';
     case 'pending':
     case 'bidding':
     case 'leased':

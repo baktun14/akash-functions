@@ -12,7 +12,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:studio": "drizzle-kit studio",
     "claim-orphans": "tsx scripts/claim-orphans.ts",
-    "backfill-variables": "tsx scripts/backfill-variables.ts"
+    "backfill-variables": "tsx scripts/backfill-variables.ts",
+    "restore-closed-by-probe": "tsx scripts/restore-closed-by-probe.ts"
   },
   "dependencies": {
     "@akash-functions/shared": "*",
