@@ -10,6 +10,16 @@ export const EXPECTED_RUNNER_VERSION = '2.3.0';
 // badge on a function that just came up.
 const FRESH_DEPLOY_GRACE_MS = 60_000;
 
+// A reporting runner that misses ~9 polls (POLL_DEFAULT_MS=10s in
+// packages/runner/boot.ts) is considered stale — almost always means the
+// container can no longer reach BACKEND_BASE_URL (e.g. dev cloudflared tunnel
+// rotated and the SDL still bakes the old hostname).
+export const RUNNER_STALE_MS = 90_000;
+// A never-reported runner is only treated as stale once the deploy has been
+// live past this grace window. Cold-pull on slow networks can legitimately
+// take a minute before the first poll lands.
+export const RUNNER_STALE_GRACE_MS = 5 * 60_000;
+
 export function isRunnerOutdated(
   reported: string | null | undefined,
   liveAt: Date | null | undefined
@@ -21,6 +31,20 @@ export function isRunnerOutdated(
   // window, this is a legacy runner (pre-version-reporting) — flag it.
   if (!liveAt) return false;
   return Date.now() - liveAt.getTime() > FRESH_DEPLOY_GRACE_MS;
+}
+
+// True when a live deployment's runner has gone silent on the poll loop. The
+// canonical recovery is to push a fresh SDL via /update-image so the provider
+// re-pulls with the current BACKEND_BASE_URL.
+export function isRunnerStale(
+  seenAt: Date | null | undefined,
+  liveAt: Date | null | undefined,
+  state: string
+): boolean {
+  if (state !== 'live' || !liveAt) return false;
+  const now = Date.now();
+  if (seenAt) return now - seenAt.getTime() > RUNNER_STALE_MS;
+  return now - liveAt.getTime() > RUNNER_STALE_GRACE_MS;
 }
 
 // Returns -1 / 0 / 1. Unparseable inputs compare equal so we never spuriously

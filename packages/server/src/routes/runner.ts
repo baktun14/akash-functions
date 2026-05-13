@@ -113,10 +113,12 @@ runnerRouter.get('/current/:fnId', async (c) => {
     .limit(1);
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
 
-  // Runner self-reports its version via `?v=…`. Upsert it on the open
-  // deployment row(s) only when it changes — `ne` against NULL evaluates to
-  // NULL in SQL, so use a coalesced compare to match the initial-null case.
-  // Without this guard the row would take a write every ~10s per function.
+  // Runner self-reports its version via `?v=…`. We stamp `runnerSeenAt` on
+  // every poll because it doubles as the liveness signal that drives the
+  // auto-rebind sweep (see isRunnerStale) — gating it behind a version-
+  // changed guard would mean a long-lived deployment never refreshes the
+  // timestamp and looks permanently stranded. One update per ~10s per
+  // deployment is negligible at this scale.
   const reportedVersion = c.req.query('v');
   if (reportedVersion && /^\d+\.\d+\.\d+/.test(reportedVersion)) {
     await db
@@ -125,8 +127,7 @@ runnerRouter.get('/current/:fnId', async (c) => {
       .where(
         and(
           eq(deployments.functionId, fnId),
-          ne(deployments.state, 'closed'),
-          sql`coalesce(${deployments.runnerVersion}, '') <> ${reportedVersion}`
+          ne(deployments.state, 'closed')
         )
       );
   }

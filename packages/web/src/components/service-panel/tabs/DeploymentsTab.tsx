@@ -132,7 +132,11 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
 
   const onUpdateRunner = async () => {
     if (!dep || dep.state !== 'live') return;
-    if (!confirm('Update the runner image? Your function will briefly restart.')) return;
+    const stale = dep.runnerStale;
+    const promptMsg = stale
+      ? 'Rebind to the current backend host? Your function will briefly restart.'
+      : 'Update the runner image? Your function will briefly restart.';
+    if (!confirm(promptMsg)) return;
     setUpdateState('submitting');
     setUpdateError(null);
     try {
@@ -145,6 +149,77 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
       setTimeout(() => setUpdateState('idle'), 6000);
     }
   };
+
+  // Single source of truth for the in-place update button. Only rendered
+  // when there's an actual reason to act — a healthy live deployment shows
+  // nothing, so the button itself is the signal that something needs
+  // attention. Both reasons (stale runner / outdated image) submit the same
+  // physical SDL update; the framing differs because users encounter them
+  // in different ways (broken-now vs. upgrade-nudge).
+  const showActionButton = dep?.state === 'live' && (dep.runnerStale || dep.runnerOutdated);
+  const runnerActionButton = showActionButton ? (() => {
+    const stale = !!dep.runnerStale;
+    const outdated = !!dep.runnerOutdated;
+    const title = stale
+      ? "Runner hasn't reported in a while — the server is already auto-rebinding on its next poll (10-min per-deployment cooldown). Click to force it now and bypass the cooldown."
+      : `Runner ${dep.runnerVersion ?? 'unknown'} → ${dep.expectedRunnerVersion}. Click to update in place.`;
+    const idleIconName: 'arrowUp' | 'refresh' = outdated && !stale ? 'arrowUp' : 'refresh';
+    const idleLabel = stale ? 'Rebind to current host' : 'Update runner ·';
+    return (
+      <button
+        onClick={onUpdateRunner}
+        disabled={updateState === 'submitting'}
+        title={title}
+        style={{
+          marginLeft: 8,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 10px',
+          fontSize: 12,
+          background:
+            updateState === 'submitting' ? 'var(--bg-elev-3)' : 'rgba(245,165,36,0.12)',
+          border:
+            updateState === 'submitting'
+              ? '1px solid var(--line)'
+              : '1px solid rgba(245,165,36,0.45)',
+          borderRadius: 6,
+          color:
+            updateState === 'submitting' ? 'var(--fg-muted)' : 'var(--warn, #f5a524)',
+          cursor: updateState === 'submitting' ? 'not-allowed' : 'pointer',
+          opacity: updateState === 'submitting' ? 0.55 : 1,
+        }}
+      >
+        <Icon
+          name={updateState === 'submitting' ? 'spinner' : idleIconName}
+          size={11}
+          color={updateState === 'submitting' ? 'var(--fg-muted)' : 'var(--warn, #f5a524)'}
+          className={updateState === 'submitting' ? 'spin' : undefined}
+        />
+        {updateState === 'submitting'
+          ? stale
+            ? 'Rebinding…'
+            : 'Updating…'
+          : updateState === 'submitted'
+            ? stale
+              ? 'Rebind submitted'
+              : 'Update submitted'
+            : updateState === 'error'
+              ? stale
+                ? 'Rebind failed'
+                : 'Update failed'
+              : idleLabel}
+        {outdated && !stale && updateState === 'idle' && (
+          <span
+            className="mono"
+            style={{ fontSize: 11, color: 'var(--warn, #f5a524)', fontWeight: 500 }}
+          >
+            {dep.runnerVersion ?? '—'} → {dep.expectedRunnerVersion}
+          </span>
+        )}
+      </button>
+    );
+  })() : null;
 
   const liveUri = dep?.uris?.[0];
   const publicUrl = liveUri
@@ -230,82 +305,7 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
           >
             <Icon name="external" size={13} />
           </a>
-          {dep?.state === 'live' && (
-            <button
-              onClick={onUpdateRunner}
-              disabled={updateState === 'submitting'}
-              title={
-                dep.runnerOutdated
-                  ? `Runner ${dep.runnerVersion ?? 'unknown'} → ${dep.expectedRunnerVersion}. Click to update in place.`
-                  : 'Submit a fresh SDL on the same lease so the provider re-pulls the runner image'
-              }
-              style={{
-                marginLeft: 8,
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '4px 10px',
-                fontSize: 12,
-                background:
-                  updateState === 'submitting'
-                    ? 'var(--bg-elev-3)'
-                    : dep.runnerOutdated
-                      ? 'rgba(245,165,36,0.12)'
-                      : 'var(--bg-elev-3)',
-                border:
-                  updateState === 'submitting'
-                    ? '1px solid var(--line)'
-                    : dep.runnerOutdated
-                      ? '1px solid rgba(245,165,36,0.45)'
-                      : '1px solid var(--line)',
-                borderRadius: 6,
-                color:
-                  updateState === 'submitting'
-                    ? 'var(--fg-muted)'
-                    : dep.runnerOutdated
-                      ? 'var(--warn, #f5a524)'
-                      : 'var(--fg)',
-                cursor: updateState === 'submitting' ? 'not-allowed' : 'pointer',
-                opacity: updateState === 'submitting' ? 0.55 : 1,
-              }}
-            >
-              <Icon
-                name={
-                  updateState === 'submitting'
-                    ? 'spinner'
-                    : dep.runnerOutdated
-                      ? 'arrowUp'
-                      : 'refresh'
-                }
-                size={11}
-                color={
-                  updateState === 'submitting'
-                    ? 'var(--fg-muted)'
-                    : dep.runnerOutdated
-                      ? 'var(--warn, #f5a524)'
-                      : 'var(--fg-muted)'
-                }
-                className={updateState === 'submitting' ? 'spin' : undefined}
-              />
-              {updateState === 'submitting'
-                ? 'Updating…'
-                : updateState === 'submitted'
-                  ? 'Update submitted'
-                  : updateState === 'error'
-                    ? 'Update failed'
-                    : dep.runnerOutdated
-                      ? 'Update runner ·'
-                      : 'Update runner'}
-              {dep.runnerOutdated && updateState === 'idle' && (
-                <span
-                  className="mono"
-                  style={{ fontSize: 11, color: 'var(--warn, #f5a524)', fontWeight: 500 }}
-                >
-                  {dep.runnerVersion ?? '—'} → {dep.expectedRunnerVersion}
-                </span>
-              )}
-            </button>
-          )}
+          {runnerActionButton}
         </div>
       )}
       {updateState === 'error' && updateError && (
@@ -425,6 +425,42 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
             <span className={isWorking ? 'dots-anim' : undefined} style={{ color: 'var(--fg)' }}>
               {meta.tone === 'ok' && !reachable ? 'Finalizing your endpoint' : meta.body}
             </span>
+          </div>
+        )}
+
+        {/* Rebind callout — only shown when the URL bar above is hidden
+            (ingress unreachable or no URL yet) AND the runner has gone silent,
+            so the in-place SDL update button is still reachable in the worst
+            case. Live + reachable already surfaces the same button next to the
+            URL, where it's more discoverable. */}
+        {dep?.state === 'live' && dep.runnerStale && (!publicUrl || !reachable) && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '10px 12px',
+              background: 'rgba(245,165,36,0.06)',
+              border: '1px solid rgba(245,165,36,0.25)',
+              borderRadius: 8,
+              fontSize: 12.5,
+              color: 'var(--fg)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}
+          >
+            <Icon name="refresh" size={12} color="var(--warn, #f5a524)" className="spin" />
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ fontWeight: 500, color: 'var(--warn, #f5a524)', marginBottom: 2 }}>
+                Runner silent — auto-rebinding
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+                The container can't reach the backend — usually means BACKEND_BASE_URL
+                is stale (e.g. dev tunnel rotated). Pushing a fresh SDL on the same
+                lease now; usually back online within ~30s. Click to force it faster.
+              </div>
+            </div>
+            {runnerActionButton}
           </div>
         )}
 

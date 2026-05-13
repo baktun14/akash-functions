@@ -35,6 +35,11 @@ export type FunctionRecord = {
    *  the runner reported a version older than EXPECTED_RUNNER_VERSION (or
    *  never reported and the deployment is past the grace window). */
   runnerOutdated?: boolean;
+  /** Decorated by GET /api/functions when the latest deployment is live but
+   *  the runner has stopped reporting on the poll loop. Distinct from
+   *  `runnerOutdated` — recovery is the same in-place SDL push, but the reason
+   *  the UI surfaces ("rebind to current host") is different. */
+  runnerStale?: boolean;
 };
 
 export type PresetId = 'rest' | 'jsx' | 'cron' | 'gpu';
@@ -177,6 +182,11 @@ export type DeploymentRecord = {
    *  deployment is past the "just came up" grace window). UI uses this to
    *  surface a nudge to click the in-place Update runner image button. */
   runnerOutdated?: boolean;
+  /** True when the runner has gone silent on the poll loop while the deployment
+   *  is still live — almost always means BACKEND_BASE_URL is stale (e.g. dev
+   *  cloudflared tunnel rotated). Recover by pushing a fresh SDL via the same
+   *  in-place /update-image flow. */
+  runnerStale?: boolean;
   createdAt: string;
   liveAt?: string;
   closedAt?: string;
