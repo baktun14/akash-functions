@@ -6,7 +6,14 @@
 // 1. Reachability of state='live' rows. We HTTP GET the first ingress URI
 //    with a 2s timeout. Any HTTP response counts as reachable; connection
 //    refused / DNS / timeout / 5xx counts as a strike. After 3 consecutive
-//    strikes the row is closed with an explanatory errorMessage.
+//    strikes the row is stamped with an errorMessage so the dashboard
+//    surfaces it as 'degraded' (yellow) — but the row stays state='live'.
+//    Probes never close a row: this server's own outbound network blips
+//    (DNS, NAT, brief Wi-Fi drop, sleep/wake) used to permanently nuke
+//    deployments whose Akash lease was still active on-chain. The on-chain
+//    cross-check at GET /api/functions is the only authoritative closer.
+//    If the ingress recovers (probe succeeds), we clear the warning so the
+//    function flips back to 'online'.
 //
 // 2. Stuck deploys. The pipeline (pipeline.ts) is fire-and-forget; if the
 //    server restarts mid-run the row sits forever in pending/bidding/leased.
@@ -19,7 +26,7 @@
 // Akash on-chain state is reconciled separately at GET /api/functions (where
 // we have the user's apiKey). See routes/functions.ts.
 
-import { and, eq, lt, notInArray } from 'drizzle-orm';
+import { and, eq, like, lt, notInArray } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments, type DeploymentRow } from '../db/schema';
 import { log } from '../lib/log';
@@ -81,7 +88,17 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
 
   const reachable = await probe(toFetchUrl(url));
   if (reachable) {
-    failureCounts.delete(row.id);
+    const hadFailures = failureCounts.delete(row.id);
+    if (hadFailures || row.errorMessage?.startsWith('ingress unreachable')) {
+      await db
+        .update(deployments)
+        .set({ errorMessage: null })
+        .where(and(
+          eq(deployments.id, row.id),
+          eq(deployments.state, 'live'),
+          like(deployments.errorMessage, 'ingress unreachable%')
+        ));
+    }
     return;
   }
 
@@ -96,10 +113,9 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
   const errorMessage = `ingress unreachable for ${FAILURES_BEFORE_CLOSE} consecutive probes`;
   await db
     .update(deployments)
-    .set({ state: 'closed', closedAt: new Date(), errorMessage })
-    .where(eq(deployments.id, row.id));
-  failureCounts.delete(row.id);
-  log.info('reconciler closed unreachable deployment', { deploymentId: row.id, url });
+    .set({ errorMessage })
+    .where(and(eq(deployments.id, row.id), eq(deployments.state, 'live')));
+  log.warn('reconciler flagged live deployment as unreachable', { deploymentId: row.id, url });
 }
 
 async function failStuckDeploy(row: DeploymentRow, ageMs: number): Promise<void> {
