@@ -5,7 +5,6 @@ import type {
   Session,
 } from '@shared/types';
 import { Icon } from '../../icons';
-import { Toggle } from '../../ui/Toggle';
 import { api } from '../../../lib/api';
 
 type Props = {
@@ -59,8 +58,6 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
   const memoryLabel = memory ? formatSize(memory) : '—';
   const storageLabel = storage ? formatSize(storage) : '—';
   const gpuLabel = version ? formatGpu(gpu) : '—';
-  const pricingSub =
-    cpu && memory ? `${cpuLabel} vCPU · ${memoryLabel}` : '—';
 
   const runWithLock = (kind: 'close' | 'delete', fn: () => void | Promise<void>) => async () => {
     if (pending) return;
@@ -76,8 +73,6 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
   const handleDelete = onDelete ? runWithLock('delete', onDelete) : undefined;
   return (
     <div>
-      <input className="input" placeholder="Filter settings..." style={{ marginBottom: 24 }} />
-
       <Section icon="keys" title="Authorization">
         <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginBottom: 12 }}>
           Console API key used to create and update this service.
@@ -97,9 +92,6 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
             sk_console_…{(session.key || 'demo').slice(-4)}
           </span>
           <span className="pill pill-ok" style={{ padding: '2px 8px', fontSize: 10 }}>Active</span>
-          <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 12, color: 'var(--fg-subtle)' }}>Last rotated 6 days ago</span>
-          <button className="btn btn-ghost btn-sm">Re-authorize</button>
         </div>
       </Section>
 
@@ -129,24 +121,13 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
           >
             <Icon name="box" size={13} />
           </span>
-          <div>
-            <div className="mono" style={{ fontSize: 12.5 }}>{svc.image}</div>
-            <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', marginTop: 2 }}>
-              Configure auto updates
-            </div>
-          </div>
-          <div style={{ flex: 1 }} />
-          <button style={{ background: 'transparent', border: 'none', color: 'var(--fg-muted)' }}>
-            <Icon name="edit" size={13} />
-          </button>
-          <button className="btn btn-ghost btn-sm">Disconnect</button>
+          <div className="mono" style={{ fontSize: 12.5 }}>{svc.image}</div>
         </div>
       </Section>
 
       <Section icon="network" title="Networking">
-        <div className="eyebrow" style={{ marginBottom: 8 }}>Public networking</div>
         <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginBottom: 10 }}>
-          Access your application over HTTP with the following domains.
+          Access your application over HTTP with the following domain.
         </div>
         <div
           className="card"
@@ -156,76 +137,28 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
             alignItems: 'center',
             gap: 10,
             background: 'var(--bg-elev-2)',
-            marginBottom: 10,
           }}
         >
           <Icon name="globe" size={13} color="var(--fg-muted)" />
           <span className="mono" style={{ fontSize: 12.5 }}>{svc.subdomain}</span>
           <div style={{ flex: 1 }} />
-          {(['copy', 'bolt', 'edit', 'trash'] as const).map((n) => (
-            <button
-              key={n}
-              style={{ background: 'transparent', border: 'none', color: 'var(--fg-muted)' }}
-            >
-              <Icon name={n} size={12} />
-            </button>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-ghost btn-sm">
-            <Icon name="plus" size={12} /> Custom domain
+          <button
+            onClick={() => navigator.clipboard?.writeText(svc.subdomain).catch(() => undefined)}
+            style={{ background: 'transparent', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer' }}
+            title="Copy URL"
+          >
+            <Icon name="copy" size={12} />
           </button>
-          <button className="btn btn-ghost btn-sm">
-            <Icon name="plus" size={12} /> TCP proxy
-          </button>
-        </div>
-
-        <div className="eyebrow" style={{ marginTop: 22, marginBottom: 8 }}>Private networking</div>
-        <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
-          Communicate with this service from within your Akash deployment group.
         </div>
       </Section>
 
       <Section icon="layers" title="Scale">
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <Kv label="Replicas" value="1" mono />
           <Kv label="vCPU per replica" value={cpuLabel} mono />
           <Kv label="Memory" value={memoryLabel} mono />
           <Kv label="Storage" value={storageLabel} mono />
           <Kv label="GPU" value={gpuLabel} mono />
         </div>
-      </Section>
-
-      <Section icon="coin" title="Pricing">
-        <div className="card" style={{ padding: 14, background: 'var(--bg-elev-2)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
-            <PricingTile
-              label="Cost"
-              value={
-                <>
-                  $0.17{' '}
-                  <span style={{ fontSize: 12, color: 'var(--fg-muted)' }}>/day</span>
-                </>
-              }
-              sub={pricingSub}
-            />
-          </div>
-        </div>
-      </Section>
-
-      <Section icon="play" title="Deploy">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <Kv label="Auto-deploy" value="On push to main" />
-          <Kv label="Healthcheck path" value="/api/health" mono />
-          <Kv label="Restart policy" value="On failure" />
-          <Kv label="Watchtower" value="Enabled" />
-        </div>
-      </Section>
-
-      <Section icon="flag" title="Feature flags">
-        <Toggle label="Persistent storage (beta)" checked={false} />
-        <Toggle label="Audited providers only" checked={true} />
-        <Toggle label="GPU pool eligible" checked={false} />
       </Section>
 
       <div className="section-row">
@@ -312,29 +245,6 @@ function Kv({
       <div className={mono ? 'mono' : ''} style={{ fontSize: 13, color: 'var(--fg)' }}>
         {value}
       </div>
-    </div>
-  );
-}
-
-function PricingTile({
-  label,
-  value,
-  sub,
-}: {
-  label: string;
-  value: React.ReactNode;
-  sub: string;
-}) {
-  return (
-    <div>
-      <div className="eyebrow" style={{ marginBottom: 4 }}>{label}</div>
-      <div
-        className="mono"
-        style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em' }}
-      >
-        {value}
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--fg-subtle)' }}>{sub}</div>
     </div>
   );
 }
