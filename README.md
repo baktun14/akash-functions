@@ -112,6 +112,35 @@ Three things must be true before clicking **Deploy** in the UI actually creates 
    ```
    The tunnel must stay up the whole time the deployment is live (providers will re-pull source on container restart).
 
+   > **⚠ Tunnel rotated? Containers will go silent.** `trycloudflare.com`
+   > quick-tunnels are ephemeral — every `cloudflared` restart hands out a
+   > **new random hostname**, but the previous hostname is baked into the SDL
+   > of every existing deployment. When that happens the runner's poll loop
+   > starts logging 502 → 530 → "Unable to connect", and code/env updates
+   > stop reaching the container.
+   >
+   > **Recovery:**
+   > 1. Update `CODE_HOST_BASE` in `.env` to the current tunnel URL.
+   > 2. Restart the server so `env.CODE_HOST_BASE` reloads.
+   > 3. Open the Console UI. The server auto-rebinds stranded deployments in
+   >    the background as soon as it sees the next `GET /api/functions` poll
+   >    — no clicks needed. Per-deployment cooldown of 10 min prevents thrash
+   >    if rebinding alone doesn't cure the silence.
+   > 4. If you want to force a rebind sooner (e.g. you just changed `.env`),
+   >    open the function's **Deployments** tab and click **Rebind to current
+   >    host** — same in-place SDL push, bypasses the cooldown.
+   >
+   > **Avoid the problem entirely:** use a **named cloudflared tunnel** with
+   > a stable Cloudflare-managed hostname instead of the ephemeral quick-
+   > tunnel. Survives `cloudflared` restarts, so your deployments never
+   > strand:
+   > ```bash
+   > cloudflared tunnel create akash-fns-dev
+   > cloudflared tunnel route dns akash-fns-dev dev-fns.your-domain.com
+   > cloudflared tunnel run --url http://localhost:8081 akash-fns-dev
+   > # → CODE_HOST_BASE=https://dev-fns.your-domain.com (stable across restarts)
+   > ```
+
 3. **Your Akash wallet has funds.** The pipeline's default deposit is `5000000uakt` (~5 AKT). Top up the wallet behind your Console API key before deploying.
 
 ## Workspace scripts

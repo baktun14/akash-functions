@@ -8,16 +8,15 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import type { DeploymentRecord, FunctionRoute } from '@shared/types';
-import { consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
 import { probeIngress, toFetchUrl } from '../akash/reconciler';
+import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVersions, functions } from '../db/schema';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
-import { EXPECTED_RUNNER_VERSION, isRunnerOutdated } from '../lib/runner-version';
+import { EXPECTED_RUNNER_VERSION, isRunnerOutdated, isRunnerStale } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
-import { log } from '../lib/log';
 import { extractRoutes } from './extract-routes';
 
 const Body = z.object({
@@ -148,40 +147,11 @@ deployRouter.post('/:id/deployments/:depId/update-image', async (c) => {
     });
   }
 
-  const [version] = await db
-    .select()
-    .from(functionVersions)
-    .where(eq(functionVersions.id, dep.versionId))
-    .limit(1);
-  if (!version) {
-    throw new HTTPException(500, { message: 'Version row missing for deployment' });
+  const result = await rebuildAndUpdateSdl({ akashKey, fnId, dep, reason: 'manual' });
+  if (!result.ok) {
+    throw new HTTPException(result.status as 409 | 500, { message: result.message });
   }
-
-  // Fresh runner token + fresh resolveRunnerImage() pick up the new :latest tag.
-  // The previous token stays valid until expiry, so any in-flight runner→server
-  // calls during the container swap won't 401.
-  const runnerToken = signRunner({ fnId });
-  const sdl = await buildSdl({
-    functionId: fnId,
-    initialVersionId: dep.versionId,
-    runnerToken,
-    resources: version.resources,
-  });
-
-  await consoleApi.updateDeployment(akashKey, dep.dseq, sdl);
-  log.info('runner image update submitted', {
-    fnId,
-    depId,
-    dseq: dep.dseq,
-    versionId: dep.versionId,
-  });
-
-  // Optimistically clear errorMessage. The new container's health probe will
-  // re-write it if the new image breaks anything; otherwise the old text would
-  // sit there during the restart window even though it no longer applies.
-  await db.update(deployments).set({ errorMessage: null }).where(eq(deployments.id, dep.id));
-
-  return c.json(toRecord({ ...dep, errorMessage: null }), 202);
+  return c.json(toRecord(result.deployment), 202);
 });
 
 // Real ingress reachability. Akash flips state to 'live' when the manifest is
@@ -269,6 +239,7 @@ function toRecord(
     runnerSeenAt: dep.runnerSeenAt?.toISOString(),
     expectedRunnerVersion: EXPECTED_RUNNER_VERSION,
     runnerOutdated: isRunnerOutdated(dep.runnerVersion, dep.liveAt),
+    runnerStale: isRunnerStale(dep.runnerSeenAt, dep.liveAt, dep.state),
     createdAt: dep.createdAt.toISOString(),
     liveAt: dep.liveAt?.toISOString(),
     closedAt: dep.closedAt?.toISOString(),

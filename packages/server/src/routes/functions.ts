@@ -17,12 +17,13 @@ import type {
 import { validateVariableKey } from '@shared/reserved-vars';
 import { ConsoleApiError, consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
+import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
 import { deployments, functionVariables, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
 import { secrets } from '../lib/secrets';
-import { isRunnerOutdated } from '../lib/runner-version';
+import { isRunnerOutdated, isRunnerStale } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { log } from '../lib/log';
@@ -104,6 +105,7 @@ functionsRouter.get('/', async (c) => {
     // badge would be noise.
     runnerOutdated:
       dep?.state === 'live' ? isRunnerOutdated(dep.runnerVersion, dep.liveAt) : false,
+    runnerStale: dep ? isRunnerStale(dep.runnerSeenAt, dep.liveAt, dep.state) : false,
   }));
 
   // Fire-and-forget: cross-check on-chain state for any deployment we still
@@ -111,6 +113,14 @@ functionsRouter.get('/', async (c) => {
   // an authed request), so we piggyback on the user's poll. Updates land in
   // the DB and the frontend's next 3s/30s tick reflects them.
   void crossCheckAkashStates(akashKey, walletAddress, decorated.map((d) => d.dep));
+
+  // Same piggyback for auto-rebind: if a live runner has gone silent on the
+  // poll loop (almost always because BACKEND_BASE_URL is stale — e.g. dev
+  // tunnel rotated), submit a fresh SDL on the same lease so the provider
+  // re-pulls with the current env.CODE_HOST_BASE. Cooldown is per-deployment
+  // (see autoRebindStaleRunners) so we never thrash the same lease if rebind
+  // alone doesn't cure the silence.
+  void autoRebindStaleRunners(akashKey, decorated.map((d) => d.dep));
 
   return c.json(list);
 });
@@ -210,6 +220,62 @@ async function rehydrateProbeClosed(akashKey: string, walletAddress: string): Pr
       });
     }
   }));
+}
+
+// Per-deployment cooldown so a deployment we already tried to rebind doesn't
+// get hammered every poll tick if the rebind alone doesn't cure the silence
+// (e.g. the container is genuinely crashing). In-memory: a process restart
+// gives every deployment a fresh window which is fine — the user will only
+// pay one extra Akash tx in the worst case.
+const AUTO_REBIND_COOLDOWN_MS = 10 * 60_000;
+const lastAutoRebindAttempt = new Map<string, number>();
+
+async function autoRebindStaleRunners(
+  akashKey: string,
+  deps: Array<Awaited<ReturnType<typeof latestDeployment>>>
+): Promise<void> {
+  const now = Date.now();
+  const targets = deps.filter((d): d is NonNullable<typeof d> => {
+    if (!d || !d.dseq) return false;
+    if (!isRunnerStale(d.runnerSeenAt, d.liveAt, d.state)) return false;
+    const last = lastAutoRebindAttempt.get(d.id);
+    return !last || now - last >= AUTO_REBIND_COOLDOWN_MS;
+  });
+
+  if (targets.length === 0) return;
+
+  await Promise.allSettled(
+    targets.map(async (dep) => {
+      lastAutoRebindAttempt.set(dep.id, now);
+      try {
+        const outcome = await rebuildAndUpdateSdl({
+          akashKey,
+          fnId: dep.functionId,
+          dep,
+          reason: 'auto-stale',
+        });
+        if (!outcome.ok) {
+          log.warn('auto-rebind skipped', {
+            deploymentId: dep.id,
+            status: outcome.status,
+            message: outcome.message,
+          });
+          return;
+        }
+        log.info('auto-rebind submitted', {
+          deploymentId: dep.id,
+          dseq: dep.dseq,
+          runnerSeenAt: dep.runnerSeenAt?.toISOString(),
+        });
+      } catch (err) {
+        log.warn('auto-rebind failed', {
+          deploymentId: dep.id,
+          dseq: dep.dseq,
+          err: String(err),
+        });
+      }
+    })
+  );
 }
 
 async function markClosedOnChain(deploymentId: string, errorMessage: string): Promise<void> {
