@@ -256,7 +256,6 @@ function Layout({
         <Sidebar
           active={sidebarActive}
           onSelect={(id) => navigate(sidebarIdToPath(id))}
-          onDeploy={() => openBuilder(null)}
         />
 
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
