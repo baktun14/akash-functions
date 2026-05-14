@@ -89,7 +89,13 @@ export const functionVersions = pgTable(
     preset: text('preset').notNull(),
     prompt: text('prompt'),
     message: text('message'),
-    source: jsonb('source').notNull().$type<Record<string, string>>(),
+    // User code is stored AES-256-GCM-encrypted (same envelope as
+    // function_variables). Plaintext is never written; readSource() in
+    // packages/server/src/lib/source.ts is the only path that decrypts.
+    sourceCiphertext: text('source_ciphertext').notNull(),
+    sourceIv: text('source_iv').notNull(),
+    sourceAuthTag: text('source_auth_tag').notNull(),
+    sourceKeyVersion: integer('source_key_version').notNull().default(1),
     resources: jsonb('resources').notNull().$type<{
       cpu: string;
       memory: string;

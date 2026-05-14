@@ -23,6 +23,7 @@ import { zValidator } from '@hono/zod-validator';
 import { db } from '../db/client';
 import { apiKeys, deployments, functionVariables, functionVersions, functions } from '../db/schema';
 import { secrets } from '../lib/secrets';
+import { readSource } from '../lib/source';
 import { verifyToken } from '../lib/signing';
 import { log } from '../lib/log';
 import { decorateRoutesWithAuth } from './deploy';
@@ -63,7 +64,8 @@ runnerRouter.get('/code/:fnId/:versionId', async (c) => {
   // Materialize source files into a tmp dir, then `tar -cz` it.
   const dir = await mkdtemp(path.join(tmpdir(), 'fn-'));
   try {
-    for (const [relPath, contents] of Object.entries(version.source)) {
+    const source = readSource(version);
+    for (const [relPath, contents] of Object.entries(source)) {
       const safeRel = sanitizeRelPath(relPath);
       const target = path.join(dir, safeRel);
       await mkdir(path.dirname(target), { recursive: true });
@@ -136,7 +138,10 @@ runnerRouter.get('/current/:fnId', async (c) => {
     .select({
       id: functionVersions.id,
       createdAt: functionVersions.createdAt,
-      source: functionVersions.source,
+      sourceCiphertext: functionVersions.sourceCiphertext,
+      sourceIv: functionVersions.sourceIv,
+      sourceAuthTag: functionVersions.sourceAuthTag,
+      sourceKeyVersion: functionVersions.sourceKeyVersion,
     })
     .from(functionVersions)
     .where(eq(functionVersions.functionId, fnId))
@@ -161,7 +166,7 @@ runnerRouter.get('/current/:fnId', async (c) => {
       ).map((row) => row.keyHash)
     : [];
 
-  const detected = extractRoutes(version.source) ?? [];
+  const detected = extractRoutes(readSource(version)) ?? [];
   const routes = decorateRoutesWithAuth(detected, fn.protectedRoutes);
 
   c.header('Cache-Control', 'no-store');
