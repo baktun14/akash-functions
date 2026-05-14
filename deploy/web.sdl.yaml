@@ -1,0 +1,41 @@
+# Production SDL for the akash-functions web frontend (nginx-served Vite SPA).
+#
+# No secret env vars — VITE_API_BASE is baked into the JS bundle at build
+# time, so the image itself is the deploy artifact and no runtime env exists.
+# __WEB_IMAGE__ is substituted by deploy-prod.ts / rebind-prod.ts.
+
+version: "2.0"
+
+services:
+  web:
+    image: __WEB_IMAGE__
+    expose:
+      - port: 80
+        as: 80
+        to:
+          - global: true
+
+profiles:
+  compute:
+    web:
+      resources:
+        cpu:
+          units: 0.25
+        memory:
+          size: 256Mi
+        storage:
+          size: 512Mi
+  placement:
+    dcloud:
+      attributes:
+        host: akash
+      pricing:
+        web:
+          denom: uakt
+          amount: 1000
+
+deployment:
+  web:
+    dcloud:
+      profile: web
+      count: 1

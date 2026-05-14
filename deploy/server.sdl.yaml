@@ -1,0 +1,57 @@
+# Production SDL for the akash-functions server (Hono on Bun).
+#
+# The image tag and every env value are substituted at deploy/rebind time by
+# packages/server/scripts/deploy-prod.ts and rebind-prod.ts. Placeholders
+# of the form __TOKEN__ are replaced before the SDL is sent to Akash; any
+# placeholder left in the file will fail the script.
+#
+# count MUST stay 1 — the in-memory reconciler state in
+# packages/server/src/akash/reconciler.ts double-probes if a second replica
+# runs alongside it.
+
+version: "2.0"
+
+services:
+  api:
+    image: __SERVER_IMAGE__
+    expose:
+      - port: 8081
+        as: 80
+        to:
+          - global: true
+    env:
+      - NODE_ENV=production
+      - PORT=8081
+      - DATABASE_URL=__DATABASE_URL__
+      - MASTER_ENCRYPTION_KEY=__MASTER_ENCRYPTION_KEY__
+      - CODE_SIGNING_SECRET=__CODE_SIGNING_SECRET__
+      - AKASH_API_BASE=https://console-api.akash.network/v1
+      - RUNNER_IMAGE=ghcr.io/baktun14/akash-functions-runner:latest
+      - CODE_HOST_BASE=__CODE_HOST_BASE__
+      - DEPLOY_DEPOSIT=5
+      - DEPLOY_PRICING_AMOUNT=1000
+
+profiles:
+  compute:
+    api:
+      resources:
+        cpu:
+          units: 1
+        memory:
+          size: 1Gi
+        storage:
+          size: 2Gi
+  placement:
+    dcloud:
+      attributes:
+        host: akash
+      pricing:
+        api:
+          denom: uakt
+          amount: 10000
+
+deployment:
+  api:
+    dcloud:
+      profile: api
+      count: 1
