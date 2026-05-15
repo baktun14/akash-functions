@@ -38,14 +38,14 @@ const TARGETS: Record<
     imagePlaceholder: '__SERVER_IMAGE__',
     imageRepo: 'ghcr.io/baktun14/akash-functions-server',
     serviceName: 'api',
-    deposit: 5,
+    deposit: 0.5,
   },
   web: {
     sdlPath: 'deploy/web.sdl.yaml',
     imagePlaceholder: '__WEB_IMAGE__',
     imageRepo: 'ghcr.io/baktun14/akash-functions-web',
     serviceName: 'web',
-    deposit: 5,
+    deposit: 0.5,
   },
 };
 
