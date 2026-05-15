@@ -81,9 +81,12 @@ export function ServicePanel({
     nameInputRef.current?.blur();
   };
 
+  // Akash SDLs expose `port: 3000, as: 80` — plain HTTP. Most providers don't
+  // terminate TLS on their global ingress, and the ones that do still serve
+  // HTTP (typically redirecting to HTTPS). HTTP is the safe default.
   const externalUrl = svc.subdomain.startsWith('http')
     ? svc.subdomain
-    : `https://${svc.subdomain}`;
+    : `http://${svc.subdomain}`;
 
   const redeploy = async () => {
     if (redeploying) return;

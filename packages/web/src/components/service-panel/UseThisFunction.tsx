@@ -33,7 +33,7 @@ export function UseThisFunction({
   const [tab, setTab] = useState<Lang>('curl');
   // Prefer the live ingress URL passed in by the parent. The function record's
   // subdomain may still be the placeholder while the list query catches up.
-  const url = (urlOverride ?? `https://${svc.subdomain}`).replace(/\/$/, '');
+  const url = (urlOverride ?? `http://${svc.subdomain}`).replace(/\/$/, '');
   const effectiveRoutes = routes && routes.length > 0 ? routes : DEFAULT_ROUTES;
 
   const samples = buildSamples(url, effectiveRoutes);

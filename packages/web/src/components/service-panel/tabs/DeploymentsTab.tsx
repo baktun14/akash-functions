@@ -222,10 +222,13 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
   })() : null;
 
   const liveUri = dep?.uris?.[0];
+  // Default to http:// — Akash SDLs expose `as: 80` (plain HTTP) and not every
+  // provider terminates TLS on its global ingress. HTTPS-supporting providers
+  // typically redirect HTTP → HTTPS, so an http:// link works for both.
   const publicUrl = liveUri
     ? liveUri.startsWith('http')
       ? liveUri
-      : `https://${liveUri}`
+      : `http://${liveUri}`
     : null;
   // Only probe once Akash says the lease is live AND this deploy was started
   // in the current session — for already-live functions loaded from the
