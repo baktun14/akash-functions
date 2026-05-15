@@ -143,7 +143,7 @@ async function call<T>(
 
 export const consoleApi = {
   // POST /v1/deployments  body: { data: { sdl, deposit } }
-  // deposit is a number in dollars (e.g. 5 = $5 of USDC at current price).
+  // deposit is a number in dollars (e.g. 5 = $5 of AKT at current price).
   createDeployment: (
     apiKey: string,
     args: { sdl: string; deposit: number }
