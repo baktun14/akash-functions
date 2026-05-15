@@ -143,7 +143,24 @@ async function probe(url: string): Promise<boolean> {
   return probeIngress(url, PROBE_TIMEOUT_MS);
 }
 
+// Try HTTPS and HTTP in parallel. Akash providers vary — most audited ones
+// terminate TLS on their global ingress, but plenty serve only plain HTTP and
+// rely on a downstream proxy (Cloudflare / Caddy) for TLS. Probing only
+// HTTPS was making perfectly reachable functions look unreachable, leaving
+// the UI stuck on "Finalizing your endpoint". Promise.any returns as soon as
+// either scheme succeeds; only when both fail do we return false.
 export async function probeIngress(url: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
+  const bare = url.replace(/^https?:\/\//i, '');
+  const candidates = [`https://${bare}`, `http://${bare}`];
+  try {
+    await Promise.any(candidates.map((u) => probeOne(u, timeoutMs)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function probeOne(url: string, timeoutMs: number): Promise<true> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -152,9 +169,8 @@ export async function probeIngress(url: string, timeoutMs = PROBE_TIMEOUT_MS): P
       signal: controller.signal,
       redirect: 'manual',
     });
-    return res.status < 500;
-  } catch {
-    return false;
+    if (res.status >= 500) throw new Error(`status ${res.status}`);
+    return true;
   } finally {
     clearTimeout(timeout);
   }
