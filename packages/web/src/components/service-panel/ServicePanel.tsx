@@ -5,6 +5,7 @@ import type { FunctionRecord, ServiceStatus, Session } from '@shared/types';
 import { api } from '../../lib/api';
 import { useReachable } from '../../lib/useReachable';
 import { sessionDeploys } from '../../lib/sessionDeploys';
+import { ensureHttpScheme } from '../../lib/url';
 import { FnLogo, Icon } from '../icons';
 import { DeploymentsTab } from './tabs/DeploymentsTab';
 import { SourceCodeTab } from './tabs/SourceCodeTab';
@@ -81,12 +82,7 @@ export function ServicePanel({
     nameInputRef.current?.blur();
   };
 
-  // Akash SDLs expose `port: 3000, as: 80` — plain HTTP. Most providers don't
-  // terminate TLS on their global ingress, and the ones that do still serve
-  // HTTP (typically redirecting to HTTPS). HTTP is the safe default.
-  const externalUrl = svc.subdomain.startsWith('http')
-    ? svc.subdomain
-    : `http://${svc.subdomain}`;
+  const externalUrl = ensureHttpScheme(svc.subdomain);
 
   const redeploy = async () => {
     if (redeploying) return;
