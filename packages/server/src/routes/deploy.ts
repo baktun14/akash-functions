@@ -17,6 +17,7 @@ import { deployments, functionVersions, functions } from '../db/schema';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
 import { EXPECTED_RUNNER_VERSION, isRunnerOutdated, isRunnerStale } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
+import { readSource } from '../lib/source';
 import { extractRoutes } from './extract-routes';
 
 const Body = z.object({
@@ -207,11 +208,16 @@ deployRouter.get('/:id/deployments/:depId', async (c) => {
   // (rather than at write time) means edits propagate as soon as a new version
   // is created — no schema change, no migration, no runner round-trip.
   const [version] = await db
-    .select({ source: functionVersions.source })
+    .select({
+      sourceCiphertext: functionVersions.sourceCiphertext,
+      sourceIv: functionVersions.sourceIv,
+      sourceAuthTag: functionVersions.sourceAuthTag,
+      sourceKeyVersion: functionVersions.sourceKeyVersion,
+    })
     .from(functionVersions)
     .where(eq(functionVersions.id, dep.versionId))
     .limit(1);
-  const detected = version ? extractRoutes(version.source) : undefined;
+  const detected = version ? extractRoutes(readSource(version)) : undefined;
   const routes = detected
     ? decorateRoutesWithAuth(detected, fn.protectedRoutes)
     : undefined;

@@ -23,6 +23,7 @@ import { db } from '../db/client';
 import { deployments, functionVariables, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
 import { secrets } from '../lib/secrets';
+import { encryptedSourceColumns, readSource } from '../lib/source';
 import { isRunnerOutdated, isRunnerStale } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
 import { type AuthVars, requireAkashKey } from '../middleware/auth';
@@ -346,7 +347,7 @@ functionsRouter.post('/', zValidator('json', CreateBody), async (c) => {
       functionId: fn.id,
       preset: body.preset,
       prompt: body.prompt ?? null,
-      source: body.source,
+      ...encryptedSourceColumns(body.source),
       resources: body.resources,
       envVars: body.envVars ?? {},
     });
@@ -421,7 +422,7 @@ functionsRouter.put('/:id/code', zValidator('json', UpdateCodeBody), async (c) =
       preset: latest?.preset ?? 'rest',
       prompt: latest?.prompt ?? null,
       message: body.message ?? null,
-      source: body.source,
+      ...encryptedSourceColumns(body.source),
       resources: body.resources ?? latest?.resources ?? { cpu: '0.5', memory: '512Mi', storage: '1Gi' },
       envVars: body.envVars ?? latest?.envVars ?? {},
     })
@@ -502,7 +503,7 @@ functionsRouter.get('/:id/versions/:versionId', async (c) => {
     preset: v.preset as PresetId,
     isLatest: latest?.id === v.id,
     deploymentCount: count,
-    source: v.source,
+    source: readSource(v),
     resources: v.resources,
     envVars: v.envVars,
   };
@@ -535,7 +536,7 @@ functionsRouter.post('/:id/versions/:versionId/restore', zValidator('json', Rest
       preset: target.preset,
       prompt: target.prompt,
       message: body.message ?? defaultMessage,
-      source: target.source,
+      ...encryptedSourceColumns(readSource(target)),
       resources: target.resources,
       envVars: target.envVars,
     })
@@ -586,7 +587,7 @@ functionsRouter.post('/:id/clone', async (c) => {
         functionId: fn.id,
         preset: latest.preset,
         prompt: latest.prompt,
-        source: latest.source,
+        ...encryptedSourceColumns(readSource(latest)),
         resources: latest.resources,
         envVars: latest.envVars,
       })
