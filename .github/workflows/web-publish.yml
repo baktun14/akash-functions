@@ -1,0 +1,178 @@
+name: Publish web image
+
+# On main: conventional-commits release for `packages/web`. Computes web-v*
+# tag, builds the static SPA with VITE_API_BASE baked in, pushes the nginx
+# image to GHCR, then rebinds the Akash web lease so the next request to
+# app.<domain> serves the new bundle.
+#
+# On PRs: build only, no push, no rebind.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/web/**'
+      - 'packages/shared/**'
+      - 'packages/releaser/**'
+      - 'deploy/web.sdl.yaml'
+      - '.github/workflows/web-publish.yml'
+  pull_request:
+    paths:
+      - 'packages/web/**'
+      - 'packages/shared/**'
+      - 'packages/releaser/**'
+      - 'deploy/web.sdl.yaml'
+      - '.github/workflows/web-publish.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/baktun14/akash-functions-web
+
+jobs:
+  release:
+    name: Compute next version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install releaser deps
+        run: npm install --workspace packages/releaser --no-audit --no-fund
+
+      - name: Compute next version from conventional commits
+        id: bump
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          analysis=$(node ./packages/releaser/recommended-bump.js \
+            --tag-prefix=web-v \
+            --path packages/web \
+            --repo-url "https://github.com/$GITHUB_REPOSITORY" \
+            --target-sha "$TARGET_SHA")
+          echo "$analysis" | jq
+
+          err=$(echo "$analysis" | jq -r '.error // empty')
+          if [ -n "$err" ]; then
+            echo "No releasable change: $err"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(echo "$analysis" | jq -r '.nextVersion')
+          tag=$(echo "$analysis" | jq -r '.nextTag')
+          changelog=$(echo "$analysis" | jq -r '.changelog')
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            echo "$changelog"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        if: steps.bump.outputs.tag != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.bump.outputs.tag }}
+          RELEASE_CHANGELOG: ${{ steps.bump.outputs.changelog }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            --notes "$RELEASE_CHANGELOG"
+
+  build:
+    name: Build web image
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: |
+      always() &&
+      (needs.release.result == 'skipped' ||
+       needs.release.result == 'success')
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ needs.release.outputs.version != '' }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: packages/web/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          build-args: |
+            VITE_API_BASE=${{ vars.PROD_API_BASE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  rebind:
+    name: Rebind Akash web deployment
+    needs: [release, build]
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Rebind
+        env:
+          AKASH_API_KEY: ${{ secrets.AKASH_API_KEY }}
+        run: |
+          npm run rebind-prod -w server -- \
+            --target=web \
+            --tag=${{ needs.release.outputs.version }} \
+            --dseq=${{ secrets.AKASH_WEB_DSEQ }}

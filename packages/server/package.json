@@ -13,6 +13,8 @@
     "db:studio": "drizzle-kit studio",
     "claim-orphans": "tsx scripts/claim-orphans.ts",
     "backfill-variables": "tsx scripts/backfill-variables.ts",
+    "deploy-prod": "tsx scripts/deploy-prod.ts",
+    "rebind-prod": "tsx scripts/rebind-prod.ts",
     "restore-closed-by-probe": "tsx scripts/restore-closed-by-probe.ts"
   },
   "dependencies": {
