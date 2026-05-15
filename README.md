@@ -90,7 +90,7 @@ explore the UI without a backend or a real Akash key. Set
 | `RUNNER_IMAGE` | `ghcr.io/baktun14/akash-functions-runner:1.0.0` | Docker image SDL points at |
 | `CODE_SIGNING_SECRET` | dev placeholder | HMAC secret for runner code-fetch tokens |
 | `CODE_HOST_BASE` | `http://host.docker.internal:8081` | Public host the runner uses to fetch source. **Must be reachable from Akash provider containers** — for local dev, run a tunnel (see below). |
-| `DEPLOY_DEPOSIT` | `5000000uakt` | Initial escrow deposit |
+| `DEPLOY_DEPOSIT` | `0.5` | Initial escrow deposit (USD; Console API converts to USDC) |
 | `DEPLOY_PRICING_AMOUNT` | `1000` | uakt/block in the SDL pricing block |
 | `VITE_API_BASE` | `http://localhost:8081` | Frontend → backend URL |
 | `VITE_API_MODE` | `live` | `live` (real backend + Akash) or `mock` (offline localStorage-only) |
@@ -141,7 +141,7 @@ Three things must be true before clicking **Deploy** in the UI actually creates 
    > # → CODE_HOST_BASE=https://dev-fns.your-domain.com (stable across restarts)
    > ```
 
-3. **Your Akash wallet has funds.** The pipeline's default deposit is `5000000uakt` (~5 AKT). Top up the wallet behind your Console API key before deploying.
+3. **Your Akash wallet has funds.** The pipeline's default deposit is $0.50 (USDC). Top up the wallet behind your Console API key before deploying.
 
 ## Workspace scripts
 
