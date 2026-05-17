@@ -91,6 +91,20 @@ jobs:
             --title "$RELEASE_TAG" \
             --notes "$RELEASE_CHANGELOG"
 
+      # Marker artifact for server-publish's workflow_run handler. Its mere
+      # presence signals "a runner release was cut; you should rebind prod."
+      # Absent on no-release runs (e.g. docs-only commits) so server-publish
+      # cleanly skips the rebind instead of restarting prod for nothing.
+      - name: Write release marker
+        if: steps.bump.outputs.tag != ''
+        run: echo "${{ steps.bump.outputs.tag }}" > runner-released.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.bump.outputs.tag != ''
+        with:
+          name: runner-released
+          path: runner-released.txt
+          retention-days: 1
+
   build:
     name: Build runner image
     runs-on: ubuntu-latest

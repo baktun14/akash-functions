@@ -38,6 +38,31 @@ env:
   IMAGE: ghcr.io/baktun14/akash-functions-server
 
 jobs:
+  guard_runner_released:
+    name: Was a runner release cut
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.check.outputs.released }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          # runner-publish uploads a `runner-released` artifact only when it
+          # actually cut a new release. Absent = no-release run (e.g. docs
+          # touch in packages/runner/), nothing to rebind.
+          count=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "runner-released")] | length')
+          if [ "$count" -gt 0 ]; then
+            echo "Runner release detected; will rebind"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release artifact; skipping rebind"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
   release:
     name: Compute next version
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -158,19 +183,21 @@ jobs:
 
   migrate-and-rebind:
     name: Migrate Neon + rebind Akash
-    needs: [release, build]
+    needs: [release, build, guard_runner_released]
     # Rebind on every push to main — even when no new version was cut
     # (e.g. SDL-only changes). In that case `Resolve rebind tag` falls back
     # to the most recent server-v* release so we still ship the new SDL.
-    # Also runs when runner-publish completes successfully on main so prod
-    # picks up new runner tags without a server commit (build job is skipped
-    # in that case).
+    # Also runs when runner-publish completes successfully on main AND
+    # actually cut a new release (guarded by the runner-released artifact)
+    # so prod picks up new runner tags without a server commit. The build
+    # job is skipped on that path.
     if: |
       always() &&
       (needs.build.result == 'success' || needs.build.result == 'skipped') &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
        (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success'))
+        github.event.workflow_run.conclusion == 'success' &&
+        needs.guard_runner_released.outputs.released == 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
