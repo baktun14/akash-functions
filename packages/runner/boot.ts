@@ -829,13 +829,20 @@ function spawnChild(dir: string): ChildHandle {
     throw new Error(`no entry point found in ${dir}; tried ${ENTRY_CANDIDATES.join(', ')}`);
   }
   console.log(`[spawn] bun --preload /boot/preload.ts ${entry} on port ${USER_PORT}`);
-  // Merge order matters: user vars first, then SDL-injected baseEnv, then
-  // PORT. Later spreads win, so SDL system vars (FUNCTION_ID, RUNNER_TOKEN,
+  // Merge order matters: NODE_ENV default first (overridable by the user via
+  // function_variables), then user vars, then SDL-injected baseEnv, then PORT.
+  // Later spreads win, so SDL system vars (FUNCTION_ID, RUNNER_TOKEN,
   // BACKEND_BASE_URL, …) and PORT cannot be shadowed by anything a user
   // managed to slip into function_variables. This is defense-in-depth on top
   // of the API/DB-layer reserved-key check. PORT is rewritten to USER_PORT so
   // user code listens on the internal port; the runner's proxy on
   // EXTERNAL_PORT is the only thing the outside world reaches.
+  //
+  // NODE_ENV defaults to "production" because Bun.serve enables dev-mode hot
+  // reload (and a fsnotify watcher) otherwise — on Akash providers with low
+  // fs.inotify.max_user_instances limits that prints "failed to create
+  // fsnotify watcher: too many open files" on every cold start. The runner
+  // owns reloads at version boundaries, so dev-mode watching is pure cost.
   //
   // --preload rewrites Bun.serve port args to PORT so legacy user code with
   // a hardcoded `port: 3000` doesn't collide with the runner on 3000.
@@ -847,7 +854,7 @@ function spawnChild(dir: string): ChildHandle {
     cwd: dir,
     stdout: 'inherit',
     stderr: 'pipe',
-    env: { ...currentEnv, ...baseEnv, PORT: String(USER_PORT) },
+    env: { NODE_ENV: 'production', ...currentEnv, ...baseEnv, PORT: String(USER_PORT) },
   });
   attachStderrTail(child);
   return child;
