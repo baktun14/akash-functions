@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
-import { api } from '../../lib/api';
+import { api, pickEntryPath } from '../../lib/api';
 import { detectStartupIssue } from '../../lib/codeChecks';
 import { Icon } from '../icons';
 import { AgentCTACard } from './AgentCTACard';
@@ -103,10 +103,15 @@ export function FunctionEditor({
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const buildSourceMap = (): Record<string, string> => ({
-    ...initialDetail.source,
-    [primaryPath]: source,
-  });
+  // Route to .tsx when source contains JSX; .ts otherwise. Drop the prior
+  // entry key when the extension flips so we don't ship both index.ts and
+  // index.tsx (the runner's pickEntry would resolve to whichever sorts first).
+  const buildSourceMap = (): Record<string, string> => {
+    const target = pickEntryPath(source);
+    const rest = { ...initialDetail.source };
+    delete rest[primaryPath];
+    return { ...rest, [target]: source };
+  };
 
   const handleSave = async () => {
     if (inflight) return;
