@@ -81,7 +81,21 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
     });
   }
 
-  // Persist deployment row first so the frontend has something to poll.
+  // Build SDL before inserting the deployment row — buildSdl resolves the
+  // runner image against GitHub releases and can throw on rate-limit hiccups.
+  // Inserting first would leave an orphan 'pending' row that the 409 check
+  // above then rejects on the user's retry. User env vars (e.g.
+  // AKASHML_API_KEY) flow through /api/runner/env, not the SDL — the SDL is
+  // semi-public (providers see it) and unsuitable for secrets.
+  const runnerToken = signRunner({ fnId: fn.id });
+  const sdl = await buildSdl({
+    functionId: fn.id,
+    initialVersionId: version.id,
+    runnerToken,
+    resources: version.resources,
+  });
+
+  // Persist deployment row so the frontend has something to poll.
   const [dep] = await db
     .insert(deployments)
     .values({
@@ -91,19 +105,6 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
     })
     .returning();
   if (!dep) throw new HTTPException(500, { message: 'Failed to record deployment' });
-
-  // Build SDL with a long-lived runner token. The runner uses it both for the
-  // first code fetch and for the poll loop that picks up new versions. User
-  // env vars (including AKASHML_API_KEY) flow through /api/runner/env, not
-  // the SDL — the SDL is semi-public (providers see it) and unsuitable for
-  // secrets.
-  const runnerToken = signRunner({ fnId: fn.id });
-  const sdl = await buildSdl({
-    functionId: fn.id,
-    initialVersionId: version.id,
-    runnerToken,
-    resources: version.resources,
-  });
 
   // Fire-and-forget the pipeline. The frontend polls /:id/deployments/:depId.
   // serviceName must match the SDL's `services.<name>` key — we use 'fn'.

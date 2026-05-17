@@ -6,11 +6,12 @@
 // that explicit version when emitting the SDL.
 
 import { env } from '../env';
+import { log } from '../lib/log';
 
 const RELEASES_URL =
   'https://api.github.com/repos/baktun14/akash-functions/releases?per_page=20';
 const TAG_PREFIX = 'runner-v';
-const CACHE_TTL_MS = 5 * 60_000;
+const CACHE_TTL_MS = 60 * 60_000;
 
 let cached: { resolved: string; at: number } | null = null;
 let inflight: Promise<string> | null = null;
@@ -28,6 +29,19 @@ export async function resolveRunnerImage(): Promise<string> {
       cached = { resolved, at: Date.now() };
       return resolved;
     })
+    .catch((err) => {
+      // Akash providers share egress IPs, so unauthenticated GitHub's
+      // 60-req/hr/IP quota burns instantly. If we have a previously-resolved
+      // value, serve it stale rather than failing the user's deploy.
+      if (cached) {
+        log.warn('runner-image: lookup failed, serving stale cache', {
+          err: String(err),
+          resolved: cached.resolved,
+        });
+        return cached.resolved;
+      }
+      throw err;
+    })
     .finally(() => {
       inflight = null;
     });
@@ -36,9 +50,17 @@ export async function resolveRunnerImage(): Promise<string> {
 }
 
 async function lookup(spec: string): Promise<string> {
-  const res = await fetch(RELEASES_URL, {
-    headers: { Accept: 'application/vnd.github+json' },
-  });
+  // GitHub rejects requests without a User-Agent with 403, and unauthenticated
+  // calls are capped at 60/hr/IP. A token (if available) lifts the cap to
+  // 5000/hr — useful in prod where many providers share egress.
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'akash-functions-server',
+  };
+  if (process.env.GITHUB_TOKEN) {
+    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+  const res = await fetch(RELEASES_URL, { headers });
   if (!res.ok) {
     throw new Error(`runner-image: GitHub releases query failed (${res.status})`);
   }
