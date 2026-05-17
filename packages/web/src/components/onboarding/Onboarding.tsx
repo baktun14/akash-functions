@@ -5,6 +5,7 @@ import type { Session } from '@shared/types';
 import { AkashSign, Icon } from '../icons';
 import { AsyncButton } from '../ui/AsyncButton';
 import { api } from '../../lib/api';
+import { OnboardingDemo } from './OnboardingDemo';
 
 type Props = {
   onConnect: (session: Session) => void;
@@ -62,7 +63,6 @@ export function Onboarding({ onConnect }: Props) {
           padding: '40px 48px',
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'space-between',
           color: '#fff',
           borderRight: '1px solid #1F1F26',
         }}
@@ -86,6 +86,7 @@ export function Onboarding({ onConnect }: Props) {
               letterSpacing: '-0.025em',
               fontWeight: 700,
               margin: '0 0 24px',
+              color: '#fff',
             }}
           >
             Describe a function.<br />
@@ -110,16 +111,11 @@ export function Onboarding({ onConnect }: Props) {
               margin: 0,
             }}
           >
-            One prompt → one container → one provider on the open cloud. We write the code, the
-            network bids on it, you pay for blocks consumed.
+            Describe the function you want. We write the code, deploy it, and give you a URL.
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: 32, fontSize: 12 }}>
-          <span className="eyebrow" style={{ color: '#fff' }}>Mainnet · v0.38</span>
-          <span className="eyebrow" style={{ color: '#fff' }}>342 providers</span>
-          <span className="eyebrow" style={{ color: '#fff' }}>~2.1s bid window</span>
-        </div>
+        <OnboardingDemo />
       </div>
 
       {/* Right: form */}
@@ -164,17 +160,18 @@ export function Onboarding({ onConnect }: Props) {
               <span className="num">01</span>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
-                  Open{' '}
+                  Open the API Keys page on{' '}
                   <span className="mono" style={{ color: 'var(--fg)' }}>
                     console.akash.network
-                  </span>{' '}
-                  → Settings → API Keys.
+                  </span>
+                  .
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
                   Or click{' '}
                   <a
-                    href="#"
-                    onClick={(e) => e.preventDefault()}
+                    href="https://console.akash.network/user/api-keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
                     style={{
                       color: 'var(--fg)',
                       textDecoration: 'underline',
@@ -194,11 +191,7 @@ export function Onboarding({ onConnect }: Props) {
                   <span className="mono">Akash Functions</span>.
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
-                  Scope to{' '}
-                  <span className="mono" style={{ color: 'var(--fg)' }}>
-                    Deployments: read/write
-                  </span>
-                  . That's all we need.
+                  We only use it to create and manage your deployments.
                 </div>
               </div>
             </li>
@@ -263,12 +256,9 @@ export function Onboarding({ onConnect }: Props) {
                   lineHeight: 1.55,
                 }}
               >
-                A{' '}
-                <span className="mono" style={{ color: 'var(--fg)' }}>
-                  Deployments: read/write
-                </span>{' '}
-                key can create, update, and close deployments on your account. It cannot move funds
-                or change wallet settings. Revoke any time at{' '}
+                We use this key only to create, update, and close deployments on your behalf.
+                Console API keys don't support scopes yet, so technically the key grants full
+                account access — revoke any time at{' '}
                 <span className="mono" style={{ color: 'var(--fg)' }}>
                   console.akash.network → API Keys
                 </span>
@@ -318,10 +308,10 @@ export function Onboarding({ onConnect }: Props) {
                 Validate &amp; Continue <Icon name="arrowRight" size={14} />
               </AsyncButton>
               <a
-                href="#"
-                onClick={(e) => e.preventDefault()}
+                href="https://console.akash.network/user/api-keys"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="btn btn-ghost btn-lg"
-                rel="noreferrer"
               >
                 Get a key <Icon name="external" size={13} />
               </a>
@@ -361,7 +351,7 @@ export function Onboarding({ onConnect }: Props) {
                 <Icon name="lock" size={12} /> Forwarded over TLS
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Icon name="check" size={12} /> Deployments scope
+                <Icon name="check" size={12} /> Used for deployments
               </span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Icon name="refresh" size={12} /> Revoke any time
