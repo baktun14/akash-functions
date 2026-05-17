@@ -4,7 +4,7 @@
 // available outside an authed request):
 //
 // 1. Reachability of state='live' rows. We HTTP GET the first ingress URI
-//    with a 2s timeout. Any HTTP response counts as reachable; connection
+//    with a 5s timeout. Any HTTP response counts as reachable; connection
 //    refused / DNS / timeout / 5xx counts as a strike. After 3 consecutive
 //    strikes the row is stamped with an errorMessage so the dashboard
 //    surfaces it as 'degraded' (yellow) — but the row stays state='live'.
@@ -14,6 +14,16 @@
 //    cross-check at GET /api/functions is the only authoritative closer.
 //    If the ingress recovers (probe succeeds), we clear the warning so the
 //    function flips back to 'online'.
+//
+//    The probe is a single signal and an unreliable one — cross-provider
+//    outbound HTTP from this server to a random `*.ingress.<provider>` host
+//    can fail for reasons that say nothing about the user's deployment
+//    (peering, transient TLS, slow first response). So we cross-check
+//    against `runnerSeenAt`: if the runner has polled `/api/runner/current`
+//    within RUNNER_FRESH_MS, we skip the stamp and heal any existing
+//    'ingress unreachable' warning. The runner is the better signal — it
+//    runs inside the deployment and only stops polling if the lease is
+//    actually gone.
 //
 // 2. Stuck deploys. The pipeline (pipeline.ts) is fire-and-forget; if the
 //    server restarts mid-run the row sits forever in pending/bidding/leased.
@@ -32,9 +42,14 @@ import { deployments, type DeploymentRow } from '../db/schema';
 import { log } from '../lib/log';
 
 const TICK_MS = 60_000;
-const PROBE_TIMEOUT_MS = 2_000;
+const PROBE_TIMEOUT_MS = 5_000;
 const FAILURES_BEFORE_CLOSE = 3;
 const STUCK_DEPLOY_TIMEOUT_MS = 10 * 60_000;
+// Runner polls /current every 10s by default and the API stamps runnerSeenAt
+// on every successful poll. 90s = roughly 9 poll windows — long enough that a
+// brief blip doesn't flip the gate, short enough that a lease that's actually
+// gone (runner stopped) crosses the threshold within ~2 reconciler ticks.
+const RUNNER_FRESH_MS = 90_000;
 
 const failureCounts = new Map<string, number>();
 
@@ -90,16 +105,24 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
   if (reachable) {
     const hadFailures = failureCounts.delete(row.id);
     if (hadFailures || row.errorMessage?.startsWith('ingress unreachable')) {
-      await db
-        .update(deployments)
-        .set({ errorMessage: null })
-        .where(and(
-          eq(deployments.id, row.id),
-          eq(deployments.state, 'live'),
-          like(deployments.errorMessage, 'ingress unreachable%')
-        ));
+      await clearIngressErrorMessage(row.id);
     }
     return;
+  }
+
+  const runnerFresh = isRunnerFresh(row.runnerSeenAt);
+
+  // The runner is still polling but the probe couldn't reach the ingress.
+  // Heal any prior stamp first — without this, a deployment marked Degraded
+  // by an earlier flaky probe would stay yellow until a probe finally
+  // succeeded, which may never happen on a persistent peering glitch.
+  if (runnerFresh && row.errorMessage?.startsWith('ingress unreachable')) {
+    await clearIngressErrorMessage(row.id);
+    log.info('cleared stale ingress-unreachable stamp: runner still reporting', {
+      deploymentId: row.id,
+      url,
+      runnerSeenAt: row.runnerSeenAt,
+    });
   }
 
   const next = (failureCounts.get(row.id) ?? 0) + 1;
@@ -110,12 +133,47 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
     return;
   }
 
+  // Strike threshold reached. If the runner is still polling, the most
+  // plausible explanation is that this server can't reach the provider's
+  // ingress even though end-user traffic still flows. Skip the stamp; the
+  // next tick re-evaluates, and the moment the runner actually goes silent
+  // (~2 ticks past RUNNER_FRESH_MS) we'll stamp normally.
+  if (runnerFresh) {
+    log.warn('skipping ingress-unreachable stamp: runner still reporting', {
+      deploymentId: row.id,
+      url,
+      runnerSeenAt: row.runnerSeenAt,
+      strike: next,
+    });
+    return;
+  }
+
   const errorMessage = `ingress unreachable for ${FAILURES_BEFORE_CLOSE} consecutive probes`;
   await db
     .update(deployments)
     .set({ errorMessage })
     .where(and(eq(deployments.id, row.id), eq(deployments.state, 'live')));
-  log.warn('reconciler flagged live deployment as unreachable', { deploymentId: row.id, url });
+  log.warn('reconciler flagged live deployment as unreachable', {
+    deploymentId: row.id,
+    url,
+    runnerSeenAt: row.runnerSeenAt,
+  });
+}
+
+function isRunnerFresh(runnerSeenAt: Date | null): boolean {
+  if (!runnerSeenAt) return false;
+  return Date.now() - runnerSeenAt.getTime() < RUNNER_FRESH_MS;
+}
+
+async function clearIngressErrorMessage(deploymentId: string): Promise<void> {
+  await db
+    .update(deployments)
+    .set({ errorMessage: null })
+    .where(and(
+      eq(deployments.id, deploymentId),
+      eq(deployments.state, 'live'),
+      like(deployments.errorMessage, 'ingress unreachable%')
+    ));
 }
 
 async function failStuckDeploy(row: DeploymentRow, ageMs: number): Promise<void> {
@@ -168,6 +226,9 @@ async function probeOne(url: string, timeoutMs: number): Promise<true> {
       method: 'GET',
       signal: controller.signal,
       redirect: 'manual',
+      // Some provider middlebox stacks refuse requests with an empty or
+      // default fetch UA. Identifying the probe is also useful in pod logs.
+      headers: { 'user-agent': 'akash-functions-reconciler/1.0' },
     });
     if (res.status >= 500) throw new Error(`status ${res.status}`);
     return true;
