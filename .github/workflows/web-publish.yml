@@ -150,10 +150,11 @@ jobs:
   rebind:
     name: Rebind Akash web deployment
     needs: [release, build]
+    # Rebind on every push to main — even when no new version was cut
+    # (e.g. SDL-only changes). Falls back to the latest web-v* release.
     if: |
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      needs.release.outputs.version != ''
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -168,11 +169,32 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      - name: Resolve rebind tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -n "$NEW_VERSION" ]; then
+            echo "Using newly-cut version: $NEW_VERSION"
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(gh release list --limit 50 --json tagName --jq \
+            '[.[] | select(.tagName | startswith("web-v"))][0].tagName' \
+            | sed 's/^web-v//')
+          if [ -z "$latest" ]; then
+            echo "::error::No web-v* release exists yet — cannot rebind"
+            exit 1
+          fi
+          echo "No new release this push; rebinding latest web-v$latest"
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
+
       - name: Rebind
         env:
           AKASH_API_KEY: ${{ secrets.AKASH_API_KEY }}
         run: |
           npm run rebind-prod -w server -- \
             --target=web \
-            --tag=${{ needs.release.outputs.version }} \
+            --tag=${{ steps.tag.outputs.version }} \
             --dseq=${{ secrets.AKASH_WEB_DSEQ }}
