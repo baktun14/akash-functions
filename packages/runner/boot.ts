@@ -34,7 +34,7 @@
 
 import { connect } from 'node:net';
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, symlink } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { relative } from 'node:path';
 
@@ -195,6 +195,7 @@ await rm(initialDir, { recursive: true, force: true });
 const [, initialEnvFetch] = await Promise.all([
   (async () => {
     await fetchAndExtract(INITIAL_VERSION_ID, initialDir);
+    await ensureJsxTsconfig(initialDir);
     await bunInstallIfNeeded(initialDir);
     await swapCurrentSymlink(initialDir);
   })(),
@@ -536,6 +537,7 @@ async function reload(newVersionId: string, newVarsRevision?: number): Promise<v
     const newDir = versionDir(newVersionId);
     await rm(newDir, { recursive: true, force: true });
     await fetchAndExtract(newVersionId, newDir);
+    await ensureJsxTsconfig(newDir);
 
     if (await packageJsonChanged(versionDir(previousVersion), newDir)) {
       await bunInstall(newDir);
@@ -735,6 +737,26 @@ async function bunInstallIfNeeded(dir: string): Promise<void> {
   const pkg = Bun.file(`${dir}/package.json`);
   if (!(await pkg.exists())) return;
   await bunInstall(dir);
+}
+
+// Bun defaults `jsxImportSource` to "react" for .tsx with no tsconfig.json
+// next to it, then auto-installs React 19 and crashes on the first JSX call
+// (its `ReactSharedInternals` isn't reachable when only the dev-runtime entry
+// got loaded). This platform is Bun + Hono, so write a default tsconfig that
+// points JSX at hono/jsx. A user-shipped tsconfig wins.
+async function ensureJsxTsconfig(dir: string): Promise<void> {
+  if (existsSync(`${dir}/tsconfig.json`)) return;
+  const hasTsxEntry = ENTRY_CANDIDATES.some(
+    (rel) => rel.endsWith('.tsx') && existsSync(`${dir}${rel}`),
+  );
+  if (!hasTsxEntry) return;
+  await writeFile(
+    `${dir}/tsconfig.json`,
+    JSON.stringify({
+      compilerOptions: { jsx: 'react-jsx', jsxImportSource: 'hono/jsx' },
+    }),
+    'utf8',
+  );
 }
 
 async function bunInstall(dir: string): Promise<void> {
