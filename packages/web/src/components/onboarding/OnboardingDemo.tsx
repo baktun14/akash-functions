@@ -15,10 +15,10 @@ app.get('/', (c) =>
 Bun.serve({ fetch: app.fetch });`;
 
 const STEPS: { text: string; tone?: 'live' }[] = [
-  { text: '→ packaging' },
-  { text: '→ uploading' },
-  { text: '→ starting' },
-  { text: '✓ live → https://greet-fn.akash.network', tone: 'live' },
+  { text: 'Packaging…' },
+  { text: 'Uploading…' },
+  { text: 'Starting…' },
+  { text: '✓ Live at https://greet-fn.provider.cloud', tone: 'live' },
 ];
 
 const PROMPT = '$ deploy greet.ts';
