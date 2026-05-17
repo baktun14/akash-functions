@@ -13,7 +13,23 @@ try {
 
 const Schema = z.object({
   PORT: z.coerce.number().default(8081),
-  DATABASE_URL: z.string().default('postgres://baktun14@localhost:5433/akash_functions'),
+  DATABASE_URL: z
+    .string()
+    .default('postgres://baktun14@localhost:5433/akash_functions')
+    .refine(
+      (s) => {
+        try {
+          const u = new URL(s);
+          return (
+            (u.protocol === 'postgres:' || u.protocol === 'postgresql:') &&
+            u.hostname.length > 0
+          );
+        } catch {
+          return false;
+        }
+      },
+      { message: 'DATABASE_URL must be a postgres:// URL with a non-empty hostname' }
+    ),
   AKASH_API_BASE: z.string().default('https://console-api.akash.network/v1'),
   // `:latest` is resolved to a concrete `:X.Y.Z` at SDL build time (Akash
   // rejects floating tags). See packages/server/src/akash/runner-image.ts.
