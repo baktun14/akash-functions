@@ -12,6 +12,10 @@ services:
     expose:
       - port: 80
         as: 80
+        # See deploy/server.sdl.yaml for context — tells the provider's
+        # ingress to also route the user-facing hostname to this pod.
+        accept:
+          - functions.akash.network
         to:
           - global: true
 
