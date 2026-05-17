@@ -7,6 +7,7 @@ import { useReachable } from '../../lib/useReachable';
 import { sessionDeploys } from '../../lib/sessionDeploys';
 import { ensureHttpScheme } from '../../lib/url';
 import { FnLogo, Icon } from '../icons';
+import { AsyncButton } from '../ui/AsyncButton';
 import { DeploymentsTab } from './tabs/DeploymentsTab';
 import { SourceCodeTab } from './tabs/SourceCodeTab';
 import { HistoryTab } from './tabs/HistoryTab';
@@ -49,6 +50,7 @@ export function ServicePanel({
   const [underline, setUnderline] = useState({ left: 0, width: 0 });
   const [redeploying, setRedeploying] = useState(false);
   const [editingName, setEditingName] = useState(svc.name);
+  const [renaming, setRenaming] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   // Akash flips state='live' before the provider's nginx is actually serving,
   // so until the server-side probe says reachable we keep the function in the
@@ -64,7 +66,7 @@ export function ServicePanel({
     setEditingName(svc.name);
   }, [svc.name]);
 
-  const commitName = () => {
+  const commitName = async () => {
     const trimmed = editingName.trim();
     if (!trimmed) {
       setEditingName(svc.name);
@@ -74,7 +76,13 @@ export function ServicePanel({
       setEditingName(svc.name);
       return;
     }
-    onRename?.(trimmed);
+    if (!onRename || renaming) return;
+    setRenaming(true);
+    try {
+      await onRename(trimmed);
+    } finally {
+      setRenaming(false);
+    }
   };
 
   const cancelName = () => {
@@ -176,7 +184,7 @@ export function ServicePanel({
                 maxLength={60}
                 spellCheck={false}
                 aria-label="Function name"
-                disabled={!onRename}
+                disabled={!onRename || renaming}
                 size={Math.max(editingName.length, 8)}
                 className="service-name-input"
                 style={{
@@ -192,8 +200,17 @@ export function ServicePanel({
                   outline: 'none',
                   fontFamily: 'inherit',
                   minWidth: 0,
+                  opacity: renaming ? 0.6 : 1,
                 }}
               />
+              {renaming && (
+                <Icon
+                  name="spinner"
+                  size={14}
+                  className="spin"
+                  color="var(--fg-muted)"
+                />
+              )}
               <span
                 style={{
                   display: 'inline-flex',
@@ -226,15 +243,16 @@ export function ServicePanel({
               <Icon name="external" size={12} /> Open URL
             </a>
           )}
-          <button
+          <AsyncButton
             onClick={redeploy}
-            disabled={redeploying}
+            loading={redeploying}
+            loadingText="Redeploying…"
             className="btn btn-subtle btn-sm"
             style={{ gap: 6, opacity: redeploying ? 0.6 : 1 }}
           >
-            <Icon name={redeploying ? 'box' : 'play'} size={11} />
-            {redeploying ? 'Redeploying…' : 'Redeploy'}
-          </button>
+            <Icon name="play" size={11} />
+            Redeploy
+          </AsyncButton>
         </div>
 
         <div style={{ position: 'relative', display: 'flex', gap: 30 }}>

@@ -21,6 +21,7 @@ import { ResChip } from './ResChip';
 import { AgentCTACard } from './AgentCTACard';
 import { AkashMLConnect } from './AkashMLConnect';
 import { CodeEditor } from './CodeEditor';
+import { AsyncButton } from '../ui/AsyncButton';
 import { api, tokensToSource } from '../../lib/api';
 import { detectEnvVarKeys } from '../../lib/detect-env-vars';
 import { useGpuModels } from '../../lib/use-gpu-models';
@@ -40,7 +41,7 @@ type Props = {
     sample: CodeSample,
     customResources?: ResourceRequest,
     envVars?: Record<string, string>,
-  ) => void;
+  ) => Promise<void>;
   /** Agent chat panel — when present, the builder shifts to a 3-column grid
    *  with the agent docked on the right. Layout owns the panel; we just host it. */
   agentSlot?: ReactNode;
@@ -149,6 +150,7 @@ export function FunctionBuilder({
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [customRes, setCustomRes] = useState<ResourceForm | null>(null);
   const [confirmingNoMatch, setConfirmingNoMatch] = useState(false);
+  const [deploying, setDeploying] = useState(false);
 
   const sample = SAMPLES[preset];
   const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
@@ -183,8 +185,8 @@ export function FunctionBuilder({
     setConfirmingNoMatch(false);
   };
 
-  const onDeployClick = () => {
-    if (!canDeploy) return;
+  const onDeployClick = async () => {
+    if (!canDeploy || deploying) return;
     // If the user customized resources AND 0 providers match, require a
     // second click before we submit. Otherwise the bid pool will be empty
     // and the deployment sits in `bidding` until something comes online.
@@ -204,14 +206,20 @@ export function FunctionBuilder({
       const v = envValues[k]?.trim();
       if (v) envOut[k] = v;
     }
-    onDeploy(
-      { ...sample, name: trimmedName, source, prompt },
-      customResourceRequest ?? undefined,
-      Object.keys(envOut).length > 0 ? envOut : undefined,
-    );
+    setDeploying(true);
+    try {
+      await onDeploy(
+        { ...sample, name: trimmedName, source, prompt },
+        customResourceRequest ?? undefined,
+        Object.keys(envOut).length > 0 ? envOut : undefined,
+      );
+    } finally {
+      setDeploying(false);
+    }
   };
 
   const requestClose = () => {
+    if (deploying) return;
     if (dirty && !confirm('Discard unsaved changes?')) return;
     onClose();
   };
@@ -432,22 +440,25 @@ export function FunctionBuilder({
 
           <div style={{ flex: 1, minHeight: 18 }} />
 
-          <button
+          <AsyncButton
             className="btn btn-primary"
             onClick={onDeployClick}
             disabled={!canDeploy}
+            loading={deploying}
+            loadingText="Deploying…"
+            spinnerSize={12}
             style={{
               width: '100%',
               marginTop: 18,
               justifyContent: 'center',
               opacity: canDeploy ? 1 : 0.5,
-              cursor: canDeploy ? 'pointer' : 'not-allowed',
+              cursor: canDeploy && !deploying ? 'pointer' : 'not-allowed',
               background: confirmingNoMatch ? 'var(--accent-soft)' : undefined,
             }}
           >
             <Icon name="play" size={12} color="#0A0A0F" />
             {confirmingNoMatch ? 'Deploy anyway' : 'Deploy function'}
-          </button>
+          </AsyncButton>
           {confirmingNoMatch && (
             <div
               style={{

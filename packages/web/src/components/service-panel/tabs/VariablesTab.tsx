@@ -3,6 +3,7 @@ import type { FunctionRecord, FunctionVariableSummary } from '@shared/types';
 import { validateVariableKey } from '@shared/reserved-vars';
 import { api } from '../../../lib/api';
 import { Icon } from '../../icons';
+import { AsyncButton } from '../../ui/AsyncButton';
 
 type LoadState =
   | { status: 'loading' }
@@ -369,9 +370,15 @@ function VariableEditor({
         <button className="btn btn-ghost btn-sm" onClick={onClose} disabled={submitting}>
           Cancel
         </button>
-        <button className="btn btn-primary btn-sm" onClick={submit} disabled={!canSubmit}>
-          {submitting ? 'Saving…' : mode.kind === 'edit' ? 'Replace' : 'Save'}
-        </button>
+        <AsyncButton
+          className="btn btn-primary btn-sm"
+          onClick={submit}
+          disabled={!canSubmit}
+          loading={submitting}
+          loadingText="Saving…"
+        >
+          {mode.kind === 'edit' ? 'Replace' : 'Save'}
+        </AsyncButton>
       </div>
     </ModalShell>
   );
@@ -425,9 +432,14 @@ function ConfirmDelete({
         <button className="btn btn-ghost btn-sm" onClick={onCancel} disabled={submitting}>
           Cancel
         </button>
-        <button className="btn btn-primary btn-sm" onClick={submit} disabled={submitting}>
-          {submitting ? 'Deleting…' : 'Delete'}
-        </button>
+        <AsyncButton
+          className="btn btn-primary btn-sm"
+          onClick={submit}
+          loading={submitting}
+          loadingText="Deleting…"
+        >
+          Delete
+        </AsyncButton>
       </div>
     </ModalShell>
   );

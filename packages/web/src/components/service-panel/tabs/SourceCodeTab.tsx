@@ -9,6 +9,7 @@ import type { FunctionRecord, FunctionVersionDetail } from '@shared/types';
 import { useLayout } from '../../../App';
 import { api } from '../../../lib/api';
 import { Icon } from '../../icons';
+import { AsyncButton } from '../../ui/AsyncButton';
 import { CodeEditor } from '../../builder/CodeEditor';
 
 type Props = { svc: FunctionRecord };
@@ -35,7 +36,7 @@ function relativeTime(iso: string): string {
 }
 
 export function SourceCodeTab({ svc }: Props): ReactElement {
-  const { openEditor, versionRev } = useLayout();
+  const { openEditor, editorLoading, versionRev } = useLayout();
   const [detail, setDetail] = useState<FunctionVersionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -101,14 +102,16 @@ export function SourceCodeTab({ svc }: Props): ReactElement {
             {detail.message ? ` · "${detail.message}"` : ''}
           </span>
         )}
-        <button
+        <AsyncButton
           className="btn btn-subtle btn-sm"
           onClick={() => openEditor(svc.id)}
           disabled={loading || !!error}
+          loading={editorLoading}
+          loadingText="Opening…"
           style={{ opacity: loading || error ? 0.5 : 1 }}
         >
           <Icon name="edit" size={12} /> Edit in builder
-        </button>
+        </AsyncButton>
       </div>
 
       {loading && (

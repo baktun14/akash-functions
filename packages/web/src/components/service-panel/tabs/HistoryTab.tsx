@@ -12,6 +12,7 @@ import type { FunctionRecord, FunctionVersionDetail, FunctionVersionSummary } fr
 import { useLayout } from '../../../App';
 import { api } from '../../../lib/api';
 import { Icon } from '../../icons';
+import { AsyncButton } from '../../ui/AsyncButton';
 import { CodeEditor } from '../../builder/CodeEditor';
 
 type Props = { svc: FunctionRecord };
@@ -45,7 +46,7 @@ export function HistoryTab({ svc }: Props): ReactElement {
   const [selected, setSelected] = useState<FunctionVersionDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedLoading, setSelectedLoading] = useState(false);
-  const [busyVersionId, setBusyVersionId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<{ versionId: string; kind: 'restore' | 'deploy' } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [localBumpRev, setLocalBumpRev] = useState(0);
 
@@ -94,9 +95,9 @@ export function HistoryTab({ svc }: Props): ReactElement {
   };
 
   const handleRestore = async (versionId: string) => {
-    if (busyVersionId) return;
+    if (busy) return;
     if (!confirm('Create a new version from this snapshot? History will be preserved.')) return;
-    setBusyVersionId(versionId);
+    setBusy({ versionId, kind: 'restore' });
     setActionError(null);
     try {
       await api.restoreVersion(svc.id, versionId);
@@ -104,17 +105,17 @@ export function HistoryTab({ svc }: Props): ReactElement {
     } catch (err) {
       setActionError(`Restore failed: ${(err as Error).message}`);
     } finally {
-      setBusyVersionId(null);
+      setBusy(null);
     }
   };
 
   const handleDeploy = async (versionId: string) => {
-    if (busyVersionId) return;
+    if (busy) return;
     if (hasActiveDeployment) {
       setActionError('Close the active deployment first (Settings tab) before deploying another version.');
       return;
     }
-    setBusyVersionId(versionId);
+    setBusy({ versionId, kind: 'deploy' });
     setActionError(null);
     try {
       const dep = await api.deployVersion(svc.id, versionId);
@@ -127,7 +128,7 @@ export function HistoryTab({ svc }: Props): ReactElement {
     } catch (err) {
       setActionError(`Deploy failed: ${(err as Error).message}`);
     } finally {
-      setBusyVersionId(null);
+      setBusy(null);
     }
   };
 
@@ -223,7 +224,10 @@ export function HistoryTab({ svc }: Props): ReactElement {
           />
           {versions.map((v) => {
             const expanded = selectedId === v.id;
-            const busy = busyVersionId === v.id;
+            const isRowBusy = busy?.versionId === v.id;
+            const restoringHere = isRowBusy && busy?.kind === 'restore';
+            const deployingHere = isRowBusy && busy?.kind === 'deploy';
+            const otherRowBusy = !!busy && !isRowBusy;
             return (
               <div key={v.id} style={{ position: 'relative', zIndex: 1 }}>
                 <div
@@ -312,10 +316,12 @@ export function HistoryTab({ svc }: Props): ReactElement {
                       <Icon name={expanded ? 'chevronUp' : 'eye'} size={11} />
                       {expanded ? 'Hide' : 'View'}
                     </button>
-                    <button
+                    <AsyncButton
                       className="btn btn-ghost btn-sm"
                       onClick={() => handleRestore(v.id)}
-                      disabled={busy || v.isLatest}
+                      disabled={otherRowBusy || deployingHere || v.isLatest}
+                      loading={restoringHere}
+                      loadingText="Restoring…"
                       title={v.isLatest ? 'Already the latest version' : undefined}
                       style={{
                         padding: '4px 10px',
@@ -324,12 +330,14 @@ export function HistoryTab({ svc }: Props): ReactElement {
                       }}
                     >
                       <Icon name="refresh" size={11} />
-                      {busy && busyVersionId === v.id ? 'Restoring…' : 'Restore'}
-                    </button>
-                    <button
+                      Restore
+                    </AsyncButton>
+                    <AsyncButton
                       className="btn btn-ghost btn-sm"
                       onClick={() => handleDeploy(v.id)}
-                      disabled={busy || hasActiveDeployment}
+                      disabled={otherRowBusy || restoringHere || hasActiveDeployment}
+                      loading={deployingHere}
+                      loadingText="Deploying…"
                       title={
                         hasActiveDeployment
                           ? 'Close the active deployment (Settings) before deploying another version'
@@ -342,8 +350,8 @@ export function HistoryTab({ svc }: Props): ReactElement {
                       }}
                     >
                       <Icon name="play" size={11} />
-                      {busy && busyVersionId === v.id ? 'Deploying…' : 'Deploy'}
-                    </button>
+                      Deploy
+                    </AsyncButton>
                   </div>
                 </div>
                 {expanded && (

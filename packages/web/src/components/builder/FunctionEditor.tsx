@@ -13,6 +13,7 @@ import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
 import { api, pickEntryPath } from '../../lib/api';
 import { detectStartupIssue } from '../../lib/codeChecks';
 import { Icon } from '../icons';
+import { AsyncButton } from '../ui/AsyncButton';
 import { AgentCTACard } from './AgentCTACard';
 import { CodeEditor } from './CodeEditor';
 import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
@@ -356,10 +357,13 @@ export function FunctionEditor({
               Cancel
             </button>
             {hasActiveDeployment ? (
-              <button
+              <AsyncButton
                 className="btn btn-primary"
                 onClick={handleSave}
-                disabled={!!inflight || !dirty}
+                disabled={!dirty}
+                loading={inflight === 'save'}
+                loadingText="Saving…"
+                spinnerSize={12}
                 style={{
                   width: '100%',
                   justifyContent: 'center',
@@ -368,28 +372,34 @@ export function FunctionEditor({
                 title="Save a new version. The running pod will hot-reload it within ~10s."
               >
                 <Icon name="play" size={12} color="#0A0A0F" />
-                {inflight === 'save' ? 'Saving…' : 'Save & deploy'}
-              </button>
+                Save & deploy
+              </AsyncButton>
             ) : (
               <>
-                <button
+                <AsyncButton
                   className="btn btn-subtle"
                   onClick={handleSave}
                   disabled={!!inflight || !dirty}
+                  loading={inflight === 'save'}
+                  loadingText="Saving…"
+                  spinnerSize={12}
                   style={{ width: '100%', justifyContent: 'center', opacity: !dirty ? 0.5 : 1 }}
                 >
                   <Icon name="check" size={12} />
-                  {inflight === 'save' ? 'Saving…' : 'Save'}
-                </button>
-                <button
+                  Save
+                </AsyncButton>
+                <AsyncButton
                   className="btn btn-primary"
                   onClick={handleSaveAndDeploy}
                   disabled={!!inflight}
+                  loading={inflight === 'deploy'}
+                  loadingText="Deploying…"
+                  spinnerSize={12}
                   style={{ width: '100%', justifyContent: 'center' }}
                 >
                   <Icon name="play" size={12} color="#0A0A0F" />
-                  {inflight === 'deploy' ? 'Deploying…' : 'Save & Deploy'}
-                </button>
+                  Save & Deploy
+                </AsyncButton>
               </>
             )}
           </div>

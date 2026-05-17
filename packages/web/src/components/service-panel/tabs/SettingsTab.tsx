@@ -5,6 +5,7 @@ import type {
   Session,
 } from '@shared/types';
 import { Icon } from '../../icons';
+import { AsyncButton } from '../../ui/AsyncButton';
 import { api } from '../../../lib/api';
 
 type Props = {
@@ -180,9 +181,11 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
             too).
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <button
+            <AsyncButton
               onClick={handleCloseDeployment}
-              disabled={!!pending || !handleCloseDeployment || !hasActiveDeployment}
+              disabled={pending === 'delete' || !handleCloseDeployment || !hasActiveDeployment}
+              loading={pending === 'close'}
+              loadingText="Closing…"
               className="btn btn-subtle btn-sm"
               style={{ opacity: pending === 'close' ? 0.6 : 1 }}
               title={
@@ -191,16 +194,18 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
                   : 'No active deployment to close'
               }
             >
-              {pending === 'close' ? 'Closing…' : 'Close deployment'}
-            </button>
-            <button
+              Close deployment
+            </AsyncButton>
+            <AsyncButton
               onClick={handleDelete}
-              disabled={!!pending || !handleDelete}
+              disabled={pending === 'close' || !handleDelete}
+              loading={pending === 'delete'}
+              loadingText="Deleting…"
               className="btn btn-danger btn-sm"
               style={{ opacity: pending === 'delete' ? 0.6 : 1 }}
             >
-              {pending === 'delete' ? 'Deleting…' : 'Delete function'}
-            </button>
+              Delete function
+            </AsyncButton>
           </div>
         </div>
       </div>
