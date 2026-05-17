@@ -148,10 +148,12 @@ jobs:
   migrate-and-rebind:
     name: Migrate Neon + rebind Akash
     needs: [release, build]
+    # Rebind on every push to main — even when no new version was cut
+    # (e.g. SDL-only changes). In that case `Resolve rebind tag` falls back
+    # to the most recent server-v* release so we still ship the new SDL.
     if: |
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      needs.release.outputs.version != ''
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -165,6 +167,27 @@ jobs:
 
       - name: Install
         run: npm ci --no-audit --no-fund
+
+      - name: Resolve rebind tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -n "$NEW_VERSION" ]; then
+            echo "Using newly-cut version: $NEW_VERSION"
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(gh release list --limit 50 --json tagName --jq \
+            '[.[] | select(.tagName | startswith("server-v"))][0].tagName' \
+            | sed 's/^server-v//')
+          if [ -z "$latest" ]; then
+            echo "::error::No server-v* release exists yet — cannot rebind"
+            exit 1
+          fi
+          echo "No new release this push; rebinding latest server-v$latest"
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
 
       - name: Migrate Neon
         env:
@@ -181,5 +204,5 @@ jobs:
         run: |
           npm run rebind-prod -w server -- \
             --target=server \
-            --tag=${{ needs.release.outputs.version }} \
+            --tag=${{ steps.tag.outputs.version }} \
             --dseq=${{ secrets.AKASH_SERVER_DSEQ }}
