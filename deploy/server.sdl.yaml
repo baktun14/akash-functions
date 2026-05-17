@@ -34,7 +34,7 @@ services:
       - AKASH_API_BASE=https://console-api.akash.network/v1
       - RUNNER_IMAGE=ghcr.io/baktun14/akash-functions-runner:latest
       - CODE_HOST_BASE=__CODE_HOST_BASE__
-      - DEPLOY_DEPOSIT=5
+      - DEPLOY_DEPOSIT=0.5
       - DEPLOY_PRICING_AMOUNT=1000
 
 profiles:
