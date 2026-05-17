@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from 'react';
 import type { Session } from '@shared/types';
 import { AkashSign, Icon } from '../icons';
+import { AsyncButton } from '../ui/AsyncButton';
 import { api } from '../../lib/api';
 
 type Props = {
@@ -28,8 +29,14 @@ export function Onboarding({ onConnect }: Props) {
   };
 
   const skip = async () => {
-    const session = await api.connectSample();
-    onConnect(session);
+    if (loading) return;
+    setLoading(true);
+    try {
+      const session = await api.connectSample();
+      onConnect(session);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -300,25 +307,16 @@ export function Onboarding({ onConnect }: Props) {
             </div>
 
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button
+              <AsyncButton
                 type="submit"
-                disabled={!key.trim() || loading}
+                disabled={!key.trim()}
+                loading={loading}
+                loadingText="Validating…"
+                spinnerSize={14}
                 className="btn btn-primary btn-lg"
               >
-                {loading ? (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 24 24" className="spin">
-                      <circle cx="12" cy="12" r="9" stroke="rgba(0,0,0,0.15)" strokeWidth="3" fill="none" />
-                      <path d="M21 12a9 9 0 0 0-9-9" stroke="#0A0A0F" strokeWidth="3" fill="none" strokeLinecap="round" />
-                    </svg>
-                    Validating…
-                  </>
-                ) : (
-                  <>
-                    Validate &amp; Continue <Icon name="arrowRight" size={14} />
-                  </>
-                )}
-              </button>
+                Validate &amp; Continue <Icon name="arrowRight" size={14} />
+              </AsyncButton>
               <a
                 href="#"
                 onClick={(e) => e.preventDefault()}
@@ -330,6 +328,7 @@ export function Onboarding({ onConnect }: Props) {
               <button
                 type="button"
                 onClick={skip}
+                disabled={loading}
                 style={{
                   marginLeft: 'auto',
                   padding: '8px 4px',
@@ -339,6 +338,8 @@ export function Onboarding({ onConnect }: Props) {
                   fontSize: 13,
                   textDecoration: 'underline',
                   textUnderlineOffset: 3,
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  opacity: loading ? 0.5 : 1,
                 }}
               >
                 Skip — explore with sample data

@@ -5,6 +5,7 @@
 import { useEffect, useState, type FormEvent, type ReactElement } from 'react';
 import type { ApiKeyRecord, CreateApiKeyResponse } from '@shared/types';
 import { Icon } from '../components/icons';
+import { AsyncButton } from '../components/ui/AsyncButton';
 import { api } from '../lib/api';
 
 export function ApiKeysPage(): ReactElement {
@@ -117,15 +118,18 @@ export function ApiKeysPage(): ReactElement {
               outline: 'none',
             }}
           />
-          <button
+          <AsyncButton
             type="submit"
             className="btn btn-primary btn-sm"
-            disabled={creating || !name.trim()}
+            disabled={!name.trim()}
+            loading={creating}
+            loadingText="Creating…"
+            spinnerSize={13}
             style={{ gap: 6 }}
           >
             <Icon name="plus" size={13} />
-            {creating ? 'Creating…' : 'New API key'}
-          </button>
+            New API key
+          </AsyncButton>
         </form>
 
         {error && (
@@ -251,16 +255,17 @@ function KeysList({
             {formatDate(k.createdAt)}
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button
+            <AsyncButton
               type="button"
               className="btn btn-ghost btn-sm"
               onClick={() => onDelete(k.id)}
-              disabled={pendingDelete === k.id}
+              loading={pendingDelete === k.id}
+              spinnerSize={13}
               title="Revoke key"
               style={{ padding: '4px 8px' }}
             >
               <Icon name="trash" size={13} />
-            </button>
+            </AsyncButton>
           </div>
         </div>
       ))}

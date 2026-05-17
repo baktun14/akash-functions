@@ -49,6 +49,9 @@ type LayoutContext = {
   refresh: () => Promise<void>;
   openBuilder: (preset?: PresetId | null, opts?: OpenBuilderOpts) => void;
   openEditor: (fnId: string) => void;
+  // True while openEditor is fetching the latest version. Lets the
+  // "Edit in builder" trigger show a loading state until the modal mounts.
+  editorLoading: boolean;
   // Tick that bumps after a save/restore so subscribed tabs (Source Code,
   // History) re-fetch their version data without prop-drilling.
   versionRev: number;
@@ -222,6 +225,7 @@ function Layout({
     refresh,
     openBuilder,
     openEditor,
+    editorLoading,
     versionRev,
   };
 
