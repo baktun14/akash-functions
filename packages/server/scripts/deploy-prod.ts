@@ -49,7 +49,7 @@ const TARGETS: Record<
   },
 };
 
-function parseArgs(): { target: Target; tag: string } {
+function parseArgs(): { target: Target; tag: string; provider?: string } {
   const args = new Map<string, string>();
   for (const a of process.argv.slice(2)) {
     const m = a.match(/^--([^=]+)=(.+)$/);
@@ -61,7 +61,11 @@ function parseArgs(): { target: Target; tag: string } {
     throw new Error('--target=server|web is required');
   }
   if (!tag) throw new Error('--tag=<semver> is required');
-  return { target, tag };
+  const provider = args.get('provider');
+  if (provider && !provider.startsWith('akash1')) {
+    throw new Error('--provider must be a bech32 address (akash1...), not a hostname');
+  }
+  return { target, tag, provider };
 }
 
 function requireEnv(name: string): string {
@@ -89,7 +93,13 @@ export async function renderSdl(target: Target, tag: string): Promise<string> {
     rendered = rendered.split(token).join(value);
   }
 
-  const leftover = rendered.match(/__[A-Z][A-Z0-9_]+__/);
+  // Strip comment lines before checking for unsubstituted placeholders so
+  // documentation that mentions __FOO__ doesn't trip the validator.
+  const codeOnly = rendered
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  const leftover = codeOnly.match(/__[A-Z][A-Z0-9_]+__/);
   if (leftover) {
     throw new Error(`SDL has unsubstituted placeholder: ${leftover[0]}`);
   }
@@ -102,29 +112,37 @@ const STATUS_POLL_INTERVAL_MS = 3000;
 const STATUS_POLL_TIMEOUT_MS = 240_000;
 
 async function main(): Promise<void> {
-  const { target, tag } = parseArgs();
+  const { target, tag, provider } = parseArgs();
   const apiKey = requireEnv('AKASH_API_KEY');
   const cfg = TARGETS[target];
 
   const sdl = await renderSdl(target, tag);
-  console.log(`[deploy] target=${target} tag=${tag} deposit=$${cfg.deposit}`);
+  console.log(
+    `[deploy] target=${target} tag=${tag} deposit=$${cfg.deposit}${provider ? ` pinned-provider=${provider}` : ''}`
+  );
 
   const created = await consoleApi.createDeployment(apiKey, { sdl, deposit: cfg.deposit });
   console.log(`[deploy] dseq=${created.dseq} tx=${created.signTx.transactionHash}`);
 
-  console.log('[deploy] waiting for bids...');
+  console.log(`[deploy] waiting for bids${provider ? ` from ${provider}` : ''}...`);
   const bid = await pollUntil({
     label: 'bids',
     intervalMs: BID_POLL_INTERVAL_MS,
     timeoutMs: BID_POLL_TIMEOUT_MS,
     fn: async () => {
       const bids = await consoleApi.getBids(apiKey, created.dseq);
-      const open = bids.filter((b) => b.state === 'open' || b.state === 'active');
+      const open = bids.filter(
+        (b) =>
+          (b.state === 'open' || b.state === 'active') &&
+          (!provider || b.id.provider === provider)
+      );
       if (open.length === 0) return undefined;
       return open.slice().sort((a, b) => Number(a.price.amount) - Number(b.price.amount))[0];
     },
   });
-  console.log(`[deploy] cheapest bid: provider=${bid.id.provider} price=${bid.price.amount}${bid.price.denom}`);
+  console.log(
+    `[deploy] ${provider ? 'pinned' : 'cheapest'} bid: provider=${bid.id.provider} price=${bid.price.amount}${bid.price.denom}`
+  );
 
   const lease = await consoleApi.acceptLeases(apiKey, {
     manifest: created.manifest,

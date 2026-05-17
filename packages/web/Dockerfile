@@ -31,4 +31,10 @@ RUN npm run build -w web
 FROM nginx:alpine AS runtime
 COPY --from=build /repo/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
+# Cap worker_processes — nginx default `auto` detects the *host's* CPU count,
+# not the container's CPU quota, so on an Akash provider with hundreds of cores
+# it spawns hundreds of workers for a 0.25 vCPU pod. Workers contend for FDs
+# and inotify instances, and the provider's reverse proxy returns 503 because
+# the upstream pod is too starved to accept connections.
+RUN sed -i 's/^worker_processes.*$/worker_processes 2;/' /etc/nginx/nginx.conf
 EXPOSE 80

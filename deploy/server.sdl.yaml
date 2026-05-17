@@ -1,9 +1,8 @@
 # Production SDL for the akash-functions server (Hono on Bun).
 #
 # The image tag and every env value are substituted at deploy/rebind time by
-# packages/server/scripts/deploy-prod.ts and rebind-prod.ts. Placeholders
-# of the form __TOKEN__ are replaced before the SDL is sent to Akash; any
-# placeholder left in the file will fail the script.
+# packages/server/scripts/deploy-prod.ts and rebind-prod.ts. Any unsubstituted
+# double-underscore placeholder will fail the script.
 #
 # count MUST stay 1 — the in-memory reconciler state in
 # packages/server/src/akash/reconciler.ts double-probes if a second replica
