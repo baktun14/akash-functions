@@ -16,6 +16,13 @@ services:
     expose:
       - port: 8081
         as: 80
+        # Custom hostnames the provider's ingress should route to this pod.
+        # Without this, nginx-ingress is keyed only to the auto-generated
+        # `<hash>.ingress.<provider>.com` and 404s any other Host header —
+        # which means Cloudflare proxying functions-api.akash.network through
+        # to the origin gets rejected.
+        accept:
+          - functions-api.akash.network
         to:
           - global: true
     env:
