@@ -35,7 +35,7 @@
 import { connect } from 'node:net';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { relative } from 'node:path';
 
 const APP_DIR = '/app';
@@ -742,21 +742,42 @@ async function bunInstallIfNeeded(dir: string): Promise<void> {
 // Bun defaults `jsxImportSource` to "react" for .tsx with no tsconfig.json
 // next to it, then auto-installs React 19 and crashes on the first JSX call
 // (its `ReactSharedInternals` isn't reachable when only the dev-runtime entry
-// got loaded). This platform is Bun + Hono, so write a default tsconfig that
-// points JSX at hono/jsx. A user-shipped tsconfig wins.
+// got loaded). This platform is Bun + Hono, so write a default tsconfig AND a
+// bunfig.toml pointing JSX at hono/jsx. The double-write is belt-and-
+// suspenders: 2.2.3 shipped the tsconfig-only fix and still observed crashes
+// loading react/jsx-dev-runtime, suggesting Bun's runtime JSX transform
+// doesn't always pick up the tsconfig (symlinked cwd, transform cache, or
+// runtime-vs-build resolution differences). bunfig.toml is read from cwd
+// before user code is transpiled and is the more reliable override.
+// User-shipped configs always win — we only write what's missing.
 async function ensureJsxTsconfig(dir: string): Promise<void> {
-  if (existsSync(`${dir}/tsconfig.json`)) return;
   const hasTsxEntry = ENTRY_CANDIDATES.some(
     (rel) => rel.endsWith('.tsx') && existsSync(`${dir}${rel}`),
   );
-  if (!hasTsxEntry) return;
-  await writeFile(
-    `${dir}/tsconfig.json`,
-    JSON.stringify({
+  if (!hasTsxEntry) {
+    console.log(`[jsx] no .tsx entry in ${dir}; skipping JSX config write`);
+    return;
+  }
+
+  const tsconfigPath = `${dir}/tsconfig.json`;
+  if (existsSync(tsconfigPath)) {
+    console.log(`[jsx] user-shipped tsconfig.json present at ${tsconfigPath}; not overwriting`);
+  } else {
+    const tsconfig = {
       compilerOptions: { jsx: 'react-jsx', jsxImportSource: 'hono/jsx' },
-    }),
-    'utf8',
-  );
+    };
+    await writeFile(tsconfigPath, JSON.stringify(tsconfig), 'utf8');
+    console.log(`[jsx] wrote ${tsconfigPath}: ${JSON.stringify(tsconfig)}`);
+  }
+
+  const bunfigPath = `${dir}/bunfig.toml`;
+  if (existsSync(bunfigPath)) {
+    console.log(`[jsx] user-shipped bunfig.toml present at ${bunfigPath}; not overwriting`);
+  } else {
+    const bunfig = 'jsx = "react-jsx"\njsxImportSource = "hono/jsx"\n';
+    await writeFile(bunfigPath, bunfig, 'utf8');
+    console.log(`[jsx] wrote ${bunfigPath}`);
+  }
 }
 
 async function bunInstall(dir: string): Promise<void> {
@@ -829,6 +850,18 @@ function spawnChild(dir: string): ChildHandle {
     throw new Error(`no entry point found in ${dir}; tried ${ENTRY_CANDIDATES.join(', ')}`);
   }
   console.log(`[spawn] bun --preload /boot/preload.ts ${entry} on port ${USER_PORT}`);
+  // One-shot diagnostic so we can confirm Bun sees our JSX configs through the
+  // symlink. The listing is shallow (top level only) and entry-relative so
+  // it's cheap. If 2.2.3's silent ensureJsxTsconfig was firing but Bun wasn't
+  // honoring the files, this log makes that visible in pod tail.
+  const merged = { NODE_ENV: 'production', ...currentEnv, ...baseEnv, PORT: String(USER_PORT) };
+  console.log(`[spawn] effective NODE_ENV=${merged.NODE_ENV}`);
+  try {
+    const listing = readdirSync(dir).join(', ');
+    console.log(`[spawn] cwd=${dir} entries=[${listing}]`);
+  } catch (err) {
+    console.log(`[spawn] cwd=${dir} listing failed: ${(err as Error).message}`);
+  }
   // Merge order matters: NODE_ENV default first (overridable by the user via
   // function_variables), then user vars, then SDL-injected baseEnv, then PORT.
   // Later spreads win, so SDL system vars (FUNCTION_ID, RUNNER_TOKEN,
@@ -854,7 +887,7 @@ function spawnChild(dir: string): ChildHandle {
     cwd: dir,
     stdout: 'inherit',
     stderr: 'pipe',
-    env: { NODE_ENV: 'production', ...currentEnv, ...baseEnv, PORT: String(USER_PORT) },
+    env: merged,
   });
   attachStderrTail(child);
   return child;
