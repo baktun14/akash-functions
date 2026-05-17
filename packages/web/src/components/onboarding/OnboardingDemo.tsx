@@ -37,7 +37,9 @@ export function OnboardingDemo() {
   }, [step]);
 
   return (
-    <div className="onboarding-demo">
+    // Decorative looping animation — the adjacent paragraph carries the
+    // real message, so hide this from AT to avoid chanting the log on repeat.
+    <div className="onboarding-demo" aria-hidden="true">
       <div className="onboarding-demo__card">
         <div className="onboarding-demo__topbar">
           <span className="onboarding-demo__dot" />
