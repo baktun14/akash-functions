@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import type { DeploymentRecord, FunctionRoute } from '@shared/types';
 import { startDeployPipeline } from '../akash/pipeline';
-import { probeIngress, toFetchUrl } from '../akash/reconciler';
+import { isRunnerFresh, probeIngress, toFetchUrl } from '../akash/reconciler';
 import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
@@ -158,9 +158,18 @@ deployRouter.post('/:id/deployments/:depId/update-image', async (c) => {
 
 // Real ingress reachability. Akash flips state to 'live' when the manifest is
 // accepted, but the provider's nginx still 503s for ~10-30s while the upstream
-// container boots. The browser can't tell 503 from 200 in `no-cors` mode, so
-// we probe server-side and expose a boolean. Frontend polls this until true
-// before showing the URL as ready.
+// container boots — and for slow-booting user code (e.g. an LLM loading a
+// model) that window can stretch to 60s+. The browser can't tell 503 from 200
+// in `no-cors` mode, so we probe server-side and expose a boolean. Frontend
+// polls this until true before showing the URL as ready.
+//
+// Cross-check the probe against runnerSeenAt the same way the reconciler does
+// (see akash/reconciler.ts): the runner is the better signal because it lives
+// inside the deployment and only stops polling when the lease is actually
+// gone. If the probe fails but the runner has reported within RUNNER_FRESH_MS,
+// treat the ingress as reachable — otherwise a flaky cross-provider HTTP path
+// or a slow first response leaves the UI stuck on "Finalizing your endpoint"
+// even though end-user traffic is already flowing.
 deployRouter.get('/:id/ingress-reachable', async (c) => {
   const walletAddress = c.get('walletAddress');
   const fnId = c.req.param('id');
@@ -173,7 +182,11 @@ deployRouter.get('/:id/ingress-reachable', async (c) => {
   if (!fn) throw new HTTPException(404, { message: 'Function not found' });
 
   const [dep] = await db
-    .select({ state: deployments.state, uris: deployments.uris })
+    .select({
+      state: deployments.state,
+      uris: deployments.uris,
+      runnerSeenAt: deployments.runnerSeenAt,
+    })
     .from(deployments)
     .where(and(eq(deployments.functionId, fnId), eq(deployments.state, 'live')))
     .orderBy(desc(deployments.createdAt))
@@ -182,8 +195,11 @@ deployRouter.get('/:id/ingress-reachable', async (c) => {
   const uri = dep?.uris?.[0];
   if (!uri) return c.json({ reachable: false });
 
-  const reachable = await probeIngress(toFetchUrl(uri));
-  return c.json({ reachable });
+  if (await probeIngress(toFetchUrl(uri))) {
+    return c.json({ reachable: true });
+  }
+
+  return c.json({ reachable: isRunnerFresh(dep?.runnerSeenAt ?? null) });
 });
 
 deployRouter.get('/:id/deployments/:depId', async (c) => {

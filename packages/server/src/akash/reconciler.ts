@@ -49,7 +49,9 @@ const STUCK_DEPLOY_TIMEOUT_MS = 10 * 60_000;
 // on every successful poll. 90s = roughly 9 poll windows — long enough that a
 // brief blip doesn't flip the gate, short enough that a lease that's actually
 // gone (runner stopped) crosses the threshold within ~2 reconciler ticks.
-const RUNNER_FRESH_MS = 90_000;
+// Exported so the on-demand /ingress-reachable probe in routes/deploy.ts can
+// apply the same heartbeat-trust rule.
+export const RUNNER_FRESH_MS = 90_000;
 
 const failureCounts = new Map<string, number>();
 
@@ -160,7 +162,7 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
   });
 }
 
-function isRunnerFresh(runnerSeenAt: Date | null): boolean {
+export function isRunnerFresh(runnerSeenAt: Date | null): boolean {
   if (!runnerSeenAt) return false;
   return Date.now() - runnerSeenAt.getTime() < RUNNER_FRESH_MS;
 }
