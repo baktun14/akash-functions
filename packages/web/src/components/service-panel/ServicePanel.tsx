@@ -232,7 +232,7 @@ export function ServicePanel({
               {svc.subdomain}
             </div>
           </div>
-          {ingressReachable && (
+          {effectiveStatus === 'online' && (
             <a
               href={externalUrl}
               target="_blank"
@@ -243,16 +243,18 @@ export function ServicePanel({
               <Icon name="external" size={12} /> Open URL
             </a>
           )}
-          <AsyncButton
-            onClick={redeploy}
-            loading={redeploying}
-            loadingText="Redeploying…"
-            className="btn btn-subtle btn-sm"
-            style={{ gap: 6, opacity: redeploying ? 0.6 : 1 }}
-          >
-            <Icon name="play" size={11} />
-            Redeploy
-          </AsyncButton>
+          {effectiveStatus !== 'pending' && (
+            <AsyncButton
+              onClick={redeploy}
+              loading={redeploying}
+              loadingText="Redeploying…"
+              className="btn btn-subtle btn-sm"
+              style={{ gap: 6, opacity: redeploying ? 0.6 : 1 }}
+            >
+              <Icon name="play" size={11} />
+              Redeploy
+            </AsyncButton>
+          )}
         </div>
 
         <div style={{ position: 'relative', display: 'flex', gap: 30 }}>
