@@ -32,7 +32,11 @@ services:
       - MASTER_ENCRYPTION_KEY=__MASTER_ENCRYPTION_KEY__
       - CODE_SIGNING_SECRET=__CODE_SIGNING_SECRET__
       - AKASH_API_BASE=https://console-api.akash.network/v1
-      - RUNNER_IMAGE=ghcr.io/baktun14/akash-functions-runner:latest
+      # Concrete tag, substituted by CI at rebind time from the latest
+      # runner-v* GitHub release (authed call, plenty of quota). Avoids the
+      # runtime GitHub lookup that breaks on Akash providers' shared egress
+      # IP rate limits.
+      - RUNNER_IMAGE=__RUNNER_IMAGE__
       - CODE_HOST_BASE=__CODE_HOST_BASE__
       - DEPLOY_DEPOSIT=0.5
       - DEPLOY_PRICING_AMOUNT=1000

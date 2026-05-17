@@ -19,6 +19,10 @@
 //     PROD_CODE_SIGNING_SECRET    — base64; ≥ 16 bytes after decode.
 //     PROD_CODE_HOST_BASE    — public URL of the API behind Cloudflare.
 //                              Example: https://api.<domain>
+//     PROD_RUNNER_IMAGE      — concrete runner image to pin (no :latest).
+//                              CI resolves the current runner-v* automatically;
+//                              for local bootstrap, pass it explicitly, e.g.
+//                              ghcr.io/baktun14/akash-functions-runner:2.2.1
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -86,6 +90,7 @@ export async function renderSdl(target: Target, tag: string): Promise<string> {
     substitutions['__MASTER_ENCRYPTION_KEY__'] = requireEnv('PROD_MASTER_ENCRYPTION_KEY');
     substitutions['__CODE_SIGNING_SECRET__'] = requireEnv('PROD_CODE_SIGNING_SECRET');
     substitutions['__CODE_HOST_BASE__'] = requireEnv('PROD_CODE_HOST_BASE');
+    substitutions['__RUNNER_IMAGE__'] = requireEnv('PROD_RUNNER_IMAGE');
   }
 
   let rendered = template;
