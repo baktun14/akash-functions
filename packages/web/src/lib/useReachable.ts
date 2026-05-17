@@ -3,6 +3,15 @@ import { api } from './api';
 import { sessionDeploys } from './sessionDeploys';
 
 const POLL_INTERVAL_MS = 2000;
+// Belt-and-suspenders cap on the in-session probe loop. The server's probe
+// already trusts the runner heartbeat (see routes/deploy.ts), so the common
+// "slow boot" case flips to reachable within a few seconds of state='live'.
+// This budget covers the pathological case where the runner never reports at
+// all — without it, the UI would sit on "Finalizing your endpoint" forever.
+// After the budget elapses we adopt the same trust the post-refresh code path
+// uses: if the server says state='live', show the URL/routes.
+// 90s matches the reconciler's RUNNER_FRESH_MS — same threshold either side.
+const PROBE_BUDGET_MS = 90_000;
 
 // Akash flips a deployment to 'live' as soon as the manifest is accepted, but
 // the provider's nginx keeps returning 503 for ~10-30s until the upstream
@@ -33,6 +42,7 @@ export function useReachable(fnId: string, active: boolean): boolean {
     if (!active || sessionDeploys.confirmed(fnId)) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const startedAt = Date.now();
 
     const tick = async () => {
       try {
@@ -46,7 +56,13 @@ export function useReachable(fnId: string, active: boolean): boolean {
       } catch {
         /* keep polling */
       }
-      if (!cancelled) timer = setTimeout(tick, POLL_INTERVAL_MS);
+      if (cancelled) return;
+      if (Date.now() - startedAt >= PROBE_BUDGET_MS) {
+        sessionDeploys.confirm(fnId);
+        forceRender((n) => n + 1);
+        return;
+      }
+      timer = setTimeout(tick, POLL_INTERVAL_MS);
     };
     void tick();
 
