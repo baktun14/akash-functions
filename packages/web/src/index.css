@@ -834,3 +834,95 @@
   animation: shimmer-sweep 2.4s ease-in-out infinite;
   pointer-events: none;
 }
+
+/* Onboarding hero demo — code card + animated deploy log. Hardcoded
+   dark-on-dark colors: lives only on the left grunge-textured column which
+   stays dark regardless of theme. */
+.onboarding-demo {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 460px;
+  width: 100%;
+  padding-top: 32px;
+}
+
+.onboarding-demo__card {
+  background: rgba(8, 8, 11, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  backdrop-filter: blur(6px);
+}
+
+.onboarding-demo__topbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.onboarding-demo__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.onboarding-demo__filename {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  letter-spacing: 0.02em;
+}
+
+.onboarding-demo__code {
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.onboarding-demo__log {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.9;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(8, 8, 11, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 12px 14px;
+  backdrop-filter: blur(6px);
+  min-height: 130px;
+}
+
+.onboarding-demo__log-prompt {
+  color: rgba(255, 255, 255, 0.55);
+  letter-spacing: 0.02em;
+  margin-bottom: 2px;
+}
+
+.onboarding-demo__log-line {
+  opacity: 0;
+  transform: translateY(4px);
+  transition:
+    opacity 320ms var(--ease-out),
+    transform 320ms var(--ease-out);
+}
+
+.onboarding-demo__log-line.is-shown {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.onboarding-demo__log-line.is-live {
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.onboarding-demo__log-line.is-live.is-shown {
+  color: #fff;
+}
