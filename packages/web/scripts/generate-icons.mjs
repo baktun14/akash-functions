@@ -27,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import satori from 'satori';
 import sharp from 'sharp';
-import toIco from 'to-ico';
+import pngToIco from 'png-to-ico';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, '..');
@@ -88,7 +88,7 @@ async function main() {
   const icoSources = await Promise.all(
     [16, 32, 48].map((s) => makeSquareIcon(signSvg, s, 0.78)),
   );
-  await fs.writeFile(path.join(PUBLIC, 'favicon.ico'), await toIco(icoSources));
+  await fs.writeFile(path.join(PUBLIC, 'favicon.ico'), await pngToIco(icoSources));
   console.log('wrote favicon.ico');
 
   // 5. og-image.png (1200x630) — composed via satori with Inter glyphs
