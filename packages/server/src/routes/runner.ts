@@ -306,11 +306,17 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
   //               and eventually close the row).
   //   non-fatal → existing behavior: live function responded 5xx on probe,
   //               yellow "Runtime error on first request" banner.
+  // `versionId` in the body is the version the runner just spawned. /health
+  // fires after a successful spawn/probe, so it's the only point at which we
+  // know which version is *actually running* (vs. /current, which just tells
+  // the runner what to download next). Persisting it here keeps
+  // deployments.version_id aligned with reality across reloads.
   let updated: { id: string }[];
   if (body.ok) {
     updated = await db
       .update(deployments)
       .set({
+        versionId: body.versionId,
         errorMessage: null,
         state: sql`CASE WHEN ${deployments.state} = 'failed' THEN 'live' ELSE ${deployments.state} END`,
       })
@@ -319,13 +325,13 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
   } else if (body.fatal) {
     updated = await db
       .update(deployments)
-      .set({ state: 'failed', errorMessage: formatHealthError(body) })
+      .set({ versionId: body.versionId, state: 'failed', errorMessage: formatHealthError(body) })
       .where(and(eq(deployments.functionId, fnId), isNull(deployments.closedAt)))
       .returning({ id: deployments.id });
   } else {
     updated = await db
       .update(deployments)
-      .set({ errorMessage: formatHealthError(body) })
+      .set({ versionId: body.versionId, errorMessage: formatHealthError(body) })
       .where(
         and(
           eq(deployments.functionId, fnId),
