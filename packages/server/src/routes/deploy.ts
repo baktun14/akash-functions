@@ -221,9 +221,14 @@ deployRouter.get('/:id/deployments/:depId', async (c) => {
     .limit(1);
   if (!dep) throw new HTTPException(404, { message: 'Deployment not found' });
 
-  // Routes are derived from the version's source on every fetch. Parsing here
-  // (rather than at write time) means edits propagate as soon as a new version
-  // is created — no schema change, no migration, no runner round-trip.
+  // Routes are derived from the latest version's source on every fetch.
+  // Parsing here (rather than at write time) means edits propagate as soon as
+  // a new version is created — no schema change, no migration, no runner
+  // round-trip. We read the latest version by functionId (mirroring the
+  // runner's `/current/:fnId` query) rather than dep.versionId, because the
+  // latter is set once at deploy time and only catches up once the runner
+  // reports back via /health — which would leave the dashboard showing stale
+  // routes for the ~10s between save and runner reload.
   const [version] = await db
     .select({
       sourceCiphertext: functionVersions.sourceCiphertext,
@@ -232,7 +237,8 @@ deployRouter.get('/:id/deployments/:depId', async (c) => {
       sourceKeyVersion: functionVersions.sourceKeyVersion,
     })
     .from(functionVersions)
-    .where(eq(functionVersions.id, dep.versionId))
+    .where(eq(functionVersions.functionId, fnId))
+    .orderBy(desc(functionVersions.createdAt))
     .limit(1);
   const detected = version ? extractRoutes(readSource(version)) : undefined;
   const routes = detected
