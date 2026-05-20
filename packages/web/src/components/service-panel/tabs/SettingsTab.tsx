@@ -126,33 +126,6 @@ export function SettingsTab({ svc, session, onCloseDeployment, onDelete }: Props
         </div>
       </Section>
 
-      <Section icon="network" title="Networking">
-        <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginBottom: 10 }}>
-          Access your application over HTTP with the following domain.
-        </div>
-        <div
-          className="card"
-          style={{
-            padding: '10px 12px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            background: 'var(--bg-elev-2)',
-          }}
-        >
-          <Icon name="globe" size={13} color="var(--fg-muted)" />
-          <span className="mono" style={{ fontSize: 12.5 }}>{svc.subdomain}</span>
-          <div style={{ flex: 1 }} />
-          <button
-            onClick={() => navigator.clipboard?.writeText(svc.subdomain).catch(() => undefined)}
-            style={{ background: 'transparent', border: 'none', color: 'var(--fg-muted)', cursor: 'pointer' }}
-            title="Copy URL"
-          >
-            <Icon name="copy" size={12} />
-          </button>
-        </div>
-      </Section>
-
       <Section icon="layers" title="Scale">
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <Kv label="vCPU per replica" value={cpuLabel} mono />
