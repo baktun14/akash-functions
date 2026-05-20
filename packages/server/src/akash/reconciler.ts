@@ -36,7 +36,7 @@
 // Akash on-chain state is reconciled separately at GET /api/functions (where
 // we have the user's apiKey). See routes/functions.ts.
 
-import { and, eq, like, lt, notInArray } from 'drizzle-orm';
+import { and, eq, like, lt, notInArray, or } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments, type DeploymentRow } from '../db/schema';
 import { log } from '../lib/log';
@@ -118,7 +118,7 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
   const reachable = await probe(toFetchUrl(url));
   if (reachable) {
     const hadFailures = failureCounts.delete(row.id);
-    if (hadFailures || row.errorMessage?.startsWith('ingress unreachable')) {
+    if (hadFailures || isProbeErrorMessage(row.errorMessage)) {
       await clearIngressErrorMessage(row.id);
     }
     if (row.provider) {
@@ -132,10 +132,10 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
 
   const runnerFresh = isRunnerFresh(row.runnerSeenAt);
 
-  // The runner is still polling but the probe couldn't reach the ingress.
-  // Heal any prior stamp first — without this, a deployment marked Degraded
-  // by an earlier flaky probe would stay yellow until a probe finally
-  // succeeded, which may never happen on a persistent peering glitch.
+  // If the runner became fresh after a prior runner-stale 'ingress unreachable'
+  // stamp, drop that stamp — its premise (lease may be gone) no longer holds.
+  // We do NOT touch the runner-fresh 'function routes unreachable' stamp here;
+  // that one only clears on a successful probe above.
   if (runnerFresh && row.errorMessage?.startsWith('ingress unreachable')) {
     await clearIngressErrorMessage(row.id);
     log.info('cleared stale ingress-unreachable stamp: runner still reporting', {
@@ -149,45 +149,54 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
   failureCounts.set(row.id, next);
 
   if (next < FAILURES_BEFORE_CLOSE) {
-    log.warn('ingress probe failed', { deploymentId: row.id, url, strike: next });
+    log.warn('ingress probe failed', { deploymentId: row.id, url, strike: next, runnerFresh });
     return;
   }
 
-  // Strike threshold reached. If the runner is still polling, the most
-  // plausible explanation is that this server can't reach the provider's
-  // ingress even though end-user traffic still flows. Skip the stamp; the
-  // next tick re-evaluates, and the moment the runner actually goes silent
-  // (~2 ticks past RUNNER_FRESH_MS) we'll stamp normally.
-  if (runnerFresh) {
-    log.warn('skipping ingress-unreachable stamp: runner still reporting', {
-      deploymentId: row.id,
-      url,
-      runnerSeenAt: row.runnerSeenAt,
-      strike: next,
-    });
-    return;
+  // Strike threshold reached. Attribute to the provider regardless of runner
+  // freshness — the smoke probe is specific (exact path + strict 200), so 3
+  // consecutive failures is a high-confidence "something between us and the
+  // runner is broken" signal. When the runner heartbeat is fresh, that points
+  // squarely at the provider's inbound ingress (gcnlab.fyi pattern observed
+  // in testing: TCP open, request sent, response never returns); when stale,
+  // the lease or our outbound may be at fault, but the provider is still the
+  // most plausible blame and a 24h cooldown is bounded blast radius.
+  if (row.provider) {
+    void recordProviderFailure(
+      row.provider,
+      runnerFresh
+        ? 'smoke probe failed; runner heartbeat fresh'
+        : 'smoke probe failed; runner heartbeat stale'
+    ).catch((err) =>
+      log.error('recordProviderFailure failed', { provider: row.provider, err: String(err) })
+    );
   }
 
-  const errorMessage = `ingress unreachable for ${FAILURES_BEFORE_CLOSE} consecutive probes`;
+  // The errorMessage stamp surfaces the issue in the dashboard. We split by
+  // runner freshness so the message reflects what's actually broken:
+  //   - runner stale  → the whole lease is suspect ("ingress unreachable")
+  //   - runner fresh  → only the inbound path is broken; the runner is alive
+  //                     but external clients can't reach it. Without this,
+  //                     the dashboard would show "Online" while every URL
+  //                     hangs (the gcnlab.fyi case the user reported).
+  const errorMessage = runnerFresh
+    ? 'function routes unreachable through this provider — redeploy to retry on a healthier one'
+    : `ingress unreachable for ${FAILURES_BEFORE_CLOSE} consecutive probes`;
   await db
     .update(deployments)
     .set({ errorMessage })
     .where(and(eq(deployments.id, row.id), eq(deployments.state, 'live')));
-  log.warn('reconciler flagged live deployment as unreachable', {
+  log.warn('reconciler flagged live deployment', {
     deploymentId: row.id,
     url,
     runnerSeenAt: row.runnerSeenAt,
+    runnerFresh,
   });
+}
 
-  if (row.provider) {
-    // Runner heartbeat is stale AND the runner's reserved health path is
-    // unreachable for 3 consecutive probes — strong signal the provider's
-    // ingress is broken for this deployment. Attribute the failure so future
-    // bids on this provider are filtered out for the cooldown window.
-    void recordProviderFailure(row.provider, 'smoke probe failed').catch((err) =>
-      log.error('recordProviderFailure failed', { provider: row.provider, err: String(err) })
-    );
-  }
+function isProbeErrorMessage(msg: string | null): boolean {
+  if (!msg) return false;
+  return msg.startsWith('ingress unreachable') || msg.startsWith('function routes unreachable');
 }
 
 export function isRunnerFresh(runnerSeenAt: Date | null): boolean {
@@ -202,7 +211,10 @@ async function clearIngressErrorMessage(deploymentId: string): Promise<void> {
     .where(and(
       eq(deployments.id, deploymentId),
       eq(deployments.state, 'live'),
-      like(deployments.errorMessage, 'ingress unreachable%')
+      or(
+        like(deployments.errorMessage, 'ingress unreachable%'),
+        like(deployments.errorMessage, 'function routes unreachable%')
+      )
     ));
 }
 
