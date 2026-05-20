@@ -56,7 +56,16 @@ export async function recordProviderFailure(
   // Compute cooldownUntil in SQL based on the post-increment value so we don't
   // need a follow-up SELECT. The CASE keeps existing cooldowns untouched when
   // we're still below the threshold (consecutive_failures + 1 < FAILURES_BEFORE_COOLDOWN).
-  const cooldownExpr = sql`CASE WHEN ${providerHealth.consecutiveFailures} + 1 >= ${FAILURES_BEFORE_COOLDOWN} THEN ${new Date(now.getTime() + COOLDOWN_MS)} ELSE ${providerHealth.cooldownUntil} END`;
+  //
+  // The cooldown timestamp is serialized as an ISO string + `::timestamptz`
+  // cast because postgres.js refuses to bind a JS `Date` as a generic
+  // parameter (it expects a string/Buffer when the binary type info isn't
+  // carried through a free-form `sql` template — only Drizzle's typed
+  // `.values()` / `.set()` paths know to format it). Without the cast every
+  // call to this function would throw `ERR_INVALID_ARG_TYPE: Received an
+  // instance of Date` and silently fail under `.catch(log.error)`.
+  const cooldownAtIso = new Date(now.getTime() + COOLDOWN_MS).toISOString();
+  const cooldownExpr = sql`CASE WHEN ${providerHealth.consecutiveFailures} + 1 >= ${FAILURES_BEFORE_COOLDOWN} THEN ${cooldownAtIso}::timestamptz ELSE ${providerHealth.cooldownUntil} END`;
   const rows = await db
     .insert(providerHealth)
     .values({
