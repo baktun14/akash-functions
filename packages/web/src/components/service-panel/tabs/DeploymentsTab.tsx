@@ -485,7 +485,9 @@ export function DeploymentsTab({ svc }: { svc: FunctionRecord }) {
               }}
             >
               <Icon name="x" size={12} color="var(--warn, #f5a524)" />
-              Runtime error on first request
+              {dep.errorMessage.startsWith('function routes unreachable through this provider')
+                ? "Provider's ingress isn't routing requests — click Redeploy to land on a different provider"
+                : 'Runtime error on first request'}
             </div>
             <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
               {dep.errorMessage}

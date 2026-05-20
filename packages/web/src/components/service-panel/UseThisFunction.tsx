@@ -7,7 +7,6 @@
 
 import { useState } from 'react';
 import type { FunctionRecord, FunctionRoute, RouteMethod } from '@shared/types';
-import { Icon } from '../icons';
 import { ensureHttpScheme } from '../../lib/url';
 import { concretePath } from './routes';
 import { SnippetBlock, type SnippetLang } from './SnippetBlock';
@@ -100,35 +99,6 @@ export function UseThisFunction({
         </div>
       )}
 
-      <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-        <TipCard
-          icon="globe"
-          title="Public URL"
-          body="Reachable over HTTPS from any client. Cold start under 200ms."
-        />
-        <TipCard
-          icon="lock"
-          title="Add auth"
-          body="Set AUTH_TOKEN in Variables and check it in your handler."
-        />
-        <TipCard
-          icon="bolt"
-          title="Custom domain"
-          body="Point a CNAME to your *.akash-functions.io subdomain."
-        />
-      </div>
-    </div>
-  );
-}
-
-function TipCard({ icon, title, body }: { icon: string; title: string; body: string }) {
-  return (
-    <div className="card" style={{ padding: 14, background: 'var(--bg-elev-2)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <Icon name={icon} size={13} color="var(--fg-muted)" />
-        <div style={{ fontSize: 13, fontWeight: 500 }}>{title}</div>
-      </div>
-      <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.5 }}>{body}</div>
     </div>
   );
 }
