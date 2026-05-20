@@ -620,6 +620,32 @@ functionsRouter.post('/:id/clone', async (c) => {
   });
   startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn' });
 
+  // Redeploy = replace, not duplicate. Close the source function's active
+  // lease in the background so the user doesn't pay for both — important
+  // when the redeploy was triggered to escape a misbehaving provider. We
+  // fire-and-forget rather than awaiting so the API response isn't delayed
+  // by the on-chain close; the new deployment is already in flight, so the
+  // user has a working endpoint as soon as it goes live regardless of how
+  // long the close takes. Failures here are logged but don't bubble up:
+  // a lingering source lease is annoying but the clone itself succeeded.
+  void closeAllActiveDeployments(id, akashKey)
+    .then((count) => {
+      if (count > 0) {
+        log.info('closed source deployment(s) on redeploy', {
+          sourceFunctionId: id,
+          newFunctionId: fn.id,
+          closed: count,
+        });
+      }
+    })
+    .catch((err) =>
+      log.warn('close source deployment on redeploy failed', {
+        sourceFunctionId: id,
+        newFunctionId: fn.id,
+        err: String(err),
+      })
+    );
+
   return c.json(
     {
       ...toRecord(fn),
