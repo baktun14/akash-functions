@@ -148,19 +148,26 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
   const next = (failureCounts.get(row.id) ?? 0) + 1;
   failureCounts.set(row.id, next);
 
-  if (next < FAILURES_BEFORE_CLOSE) {
+  // Two strike thresholds, chosen by how confident we are about who's at fault:
+  //   - runner fresh + probe fail = inbound path between us and the (provably
+  //     alive) runner is broken. Highest-confidence provider-blame signal we
+  //     have; act on it after a single strike so the dashboard surfaces the
+  //     issue within one tick instead of three.
+  //   - runner stale + probe fail = could be the lease, our outbound, or the
+  //     provider. Keep the 3-strike threshold to absorb transient blips.
+  const threshold = runnerFresh ? 1 : FAILURES_BEFORE_CLOSE;
+  if (next < threshold) {
     log.warn('ingress probe failed', { deploymentId: row.id, url, strike: next, runnerFresh });
     return;
   }
 
-  // Strike threshold reached. Attribute to the provider regardless of runner
-  // freshness — the smoke probe is specific (exact path + strict 200), so 3
-  // consecutive failures is a high-confidence "something between us and the
-  // runner is broken" signal. When the runner heartbeat is fresh, that points
-  // squarely at the provider's inbound ingress (gcnlab.fyi pattern observed
-  // in testing: TCP open, request sent, response never returns); when stale,
-  // the lease or our outbound may be at fault, but the provider is still the
-  // most plausible blame and a 24h cooldown is bounded blast radius.
+  // Threshold reached. Attribute to the provider regardless of runner
+  // freshness — the smoke probe is specific (exact path + strict 200), so the
+  // failure pattern is unambiguous. When the runner heartbeat is fresh, the
+  // 1-strike threshold above means we react within a single reconciler tick
+  // (gcnlab.fyi pattern observed in testing: TCP open, request sent, response
+  // never returns). When stale, 3 strikes give us a chance to absorb our own
+  // outbound blips before placing a 24h cooldown.
   if (row.provider) {
     void recordProviderFailure(
       row.provider,

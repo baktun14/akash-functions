@@ -6,13 +6,14 @@
 // 4. Poll the deployment until lease.status.services[serviceName].uris is set.
 // 5. Mark live.
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments } from '../db/schema';
 import { env } from '../env';
 import { log } from '../lib/log';
 import { ConsoleApiError, consoleApi, type Bid, type Lease } from './console-client';
-import { getBlocklistedProviders } from './provider-health';
+import { getBlocklistedProviders, recordProviderFailure } from './provider-health';
+import { isRunnerFresh, probeIngress, RUNNER_HEALTH_PATH, toFetchUrl } from './reconciler';
 
 export type StartDeployArgs = {
   apiKey: string;
@@ -128,6 +129,17 @@ async function runPipeline({
 
     await setState('live', { uris, liveAt: new Date() });
     log.info('deployment live', { deploymentId, uris });
+
+    // Eager smoke probe: don't wait up to a full reconciler tick to learn
+    // whether the provider's ingress is actually serving paths. The runner
+    // typically heartbeats within ~10-15s of container boot, and Akash only
+    // flips uris after the provider's ingress is up — by T+10s the probe
+    // should be conclusive for any healthy provider. For broken providers
+    // (gcnlab.fyi pattern), this collapses the "Provider's ingress isn't
+    // routing requests" surface time from minutes to seconds.
+    void scheduleEagerProbe(deploymentId, ourLease.id.provider, uris[0]).catch((err) =>
+      log.warn('eager smoke probe failed to schedule', { deploymentId, err: String(err) })
+    );
   } catch (err) {
     const message =
       err instanceof ConsoleApiError ? `${err.code}: ${err.message}` : String(err);
@@ -171,4 +183,71 @@ async function pollUntil<T>({
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const EAGER_PROBE_DELAY_MS = 10_000;
+const EAGER_PROBE_TIMEOUT_MS = 5_000;
+
+// Eager smoke probe — runs once after the pipeline marks a deployment live,
+// so we don't have to wait up to a full reconciler tick (60s) before learning
+// the provider's inbound path is broken. The reconciler still owns ongoing
+// health on the deployment; this just collapses the first-detection latency.
+//
+// Only attributes failure to the provider when the runner heartbeat is
+// already fresh — that confirms the runner booted and is ready to answer,
+// so a failed probe is unambiguously the inbound path's fault. If the
+// heartbeat hasn't fired yet, the runner may still be initializing and the
+// regular reconciler logic (with its 3-strike runner-stale path) will pick
+// up the slack.
+async function scheduleEagerProbe(
+  deploymentId: string,
+  provider: string,
+  url: string | undefined
+): Promise<void> {
+  if (!url || !provider) return;
+
+  // Give the runner a beat to boot. Akash flips uris when the lease is
+  // exposed, but the user code + runner inside may still be initializing.
+  await sleep(EAGER_PROBE_DELAY_MS);
+
+  const reachable = await probeIngress(toFetchUrl(url), EAGER_PROBE_TIMEOUT_MS, {
+    path: RUNNER_HEALTH_PATH,
+    requireStatus: 200,
+  });
+  if (reachable) {
+    log.info('eager smoke probe ok', { deploymentId, url });
+    return;
+  }
+
+  const [row] = await db
+    .select({ runnerSeenAt: deployments.runnerSeenAt, state: deployments.state })
+    .from(deployments)
+    .where(eq(deployments.id, deploymentId))
+    .limit(1);
+  if (!row || row.state !== 'live') return;
+  if (!isRunnerFresh(row.runnerSeenAt)) {
+    log.warn('eager smoke probe failed but runner not yet heartbeating; deferring to reconciler', {
+      deploymentId,
+      url,
+    });
+    return;
+  }
+
+  log.warn('eager smoke probe failed with runner fresh; flagging provider', {
+    deploymentId,
+    url,
+    provider,
+  });
+
+  void recordProviderFailure(provider, 'eager smoke probe failed; runner heartbeat fresh').catch(
+    (err) => log.error('recordProviderFailure failed', { provider, err: String(err) })
+  );
+
+  await db
+    .update(deployments)
+    .set({
+      errorMessage:
+        'function routes unreachable through this provider — redeploy to retry on a healthier one',
+    })
+    .where(and(eq(deployments.id, deploymentId), eq(deployments.state, 'live')));
 }
