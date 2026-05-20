@@ -40,6 +40,14 @@ import { and, eq, like, lt, notInArray } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments, type DeploymentRow } from '../db/schema';
 import { log } from '../lib/log';
+import { recordProviderFailure, recordProviderSuccess } from './provider-health';
+
+// Reserved path the runner answers directly (bypasses USER_PORT). Probing it
+// through the provider ingress verifies the provider can route arbitrary
+// non-root paths — catches providers whose ingress serves `/` but mis-routes
+// everything else, which used to flow through as healthy because the old
+// probe accepted any 2xx-4xx on `/`.
+export const RUNNER_HEALTH_PATH = '/_akash_runner/health';
 
 const TICK_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
@@ -103,11 +111,21 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
     return;
   }
 
+  // Probe the runner's reserved health path (not `/`). A 200 here proves the
+  // provider's ingress can route arbitrary paths through to the runner; just
+  // hitting `/` would have given a misleading green when user code happened
+  // to serve the root while the provider's path-routing was broken.
   const reachable = await probe(toFetchUrl(url));
   if (reachable) {
     const hadFailures = failureCounts.delete(row.id);
     if (hadFailures || row.errorMessage?.startsWith('ingress unreachable')) {
       await clearIngressErrorMessage(row.id);
+    }
+    if (row.provider) {
+      // Fire-and-forget: don't let a transient DB blip block reconciliation.
+      void recordProviderSuccess(row.provider).catch((err) =>
+        log.error('recordProviderSuccess failed', { provider: row.provider, err: String(err) })
+      );
     }
     return;
   }
@@ -160,6 +178,16 @@ async function checkLiveReachability(row: DeploymentRow): Promise<void> {
     url,
     runnerSeenAt: row.runnerSeenAt,
   });
+
+  if (row.provider) {
+    // Runner heartbeat is stale AND the runner's reserved health path is
+    // unreachable for 3 consecutive probes — strong signal the provider's
+    // ingress is broken for this deployment. Attribute the failure so future
+    // bids on this provider are filtered out for the cooldown window.
+    void recordProviderFailure(row.provider, 'smoke probe failed').catch((err) =>
+      log.error('recordProviderFailure failed', { provider: row.provider, err: String(err) })
+    );
+  }
 }
 
 export function isRunnerFresh(runnerSeenAt: Date | null): boolean {
@@ -200,8 +228,24 @@ async function failStuckDeploy(row: DeploymentRow, ageMs: number): Promise<void>
 }
 
 async function probe(url: string): Promise<boolean> {
-  return probeIngress(url, PROBE_TIMEOUT_MS);
+  // Reconciler tick: probe the runner's reserved health path and require a
+  // strict 200 — see RUNNER_HEALTH_PATH comment above.
+  return probeIngress(url, PROBE_TIMEOUT_MS, {
+    path: RUNNER_HEALTH_PATH,
+    requireStatus: 200,
+  });
 }
+
+export type ProbeOptions = {
+  /** Path to append to the URL (default: '' = bare host). */
+  path?: string;
+  /**
+   * If set, only this exact status counts as success. If unset, any non-5xx
+   * response is treated as reachable (the historical "is the ingress alive"
+   * semantic used by the user-facing /ingress-reachable endpoint).
+   */
+  requireStatus?: number;
+};
 
 // Try HTTPS and HTTP in parallel. Akash providers vary — most audited ones
 // terminate TLS on their global ingress, but plenty serve only plain HTTP and
@@ -209,18 +253,27 @@ async function probe(url: string): Promise<boolean> {
 // HTTPS was making perfectly reachable functions look unreachable, leaving
 // the UI stuck on "Finalizing your endpoint". Promise.any returns as soon as
 // either scheme succeeds; only when both fail do we return false.
-export async function probeIngress(url: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
+export async function probeIngress(
+  url: string,
+  timeoutMs = PROBE_TIMEOUT_MS,
+  options: ProbeOptions = {}
+): Promise<boolean> {
   const bare = url.replace(/^https?:\/\//i, '');
-  const candidates = [`https://${bare}`, `http://${bare}`];
+  const path = options.path ?? '';
+  const candidates = [`https://${bare}${path}`, `http://${bare}${path}`];
   try {
-    await Promise.any(candidates.map((u) => probeOne(u, timeoutMs)));
+    await Promise.any(candidates.map((u) => probeOne(u, timeoutMs, options.requireStatus)));
     return true;
   } catch {
     return false;
   }
 }
 
-async function probeOne(url: string, timeoutMs: number): Promise<true> {
+async function probeOne(
+  url: string,
+  timeoutMs: number,
+  requireStatus: number | undefined
+): Promise<true> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -232,7 +285,11 @@ async function probeOne(url: string, timeoutMs: number): Promise<true> {
       // default fetch UA. Identifying the probe is also useful in pod logs.
       headers: { 'user-agent': 'akash-functions-reconciler/1.0' },
     });
-    if (res.status >= 500) throw new Error(`status ${res.status}`);
+    if (requireStatus !== undefined) {
+      if (res.status !== requireStatus) throw new Error(`status ${res.status}`);
+    } else if (res.status >= 500) {
+      throw new Error(`status ${res.status}`);
+    }
     return true;
   } finally {
     clearTimeout(timeout);
