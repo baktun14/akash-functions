@@ -57,6 +57,13 @@
       "when": 1778814508355,
       "tag": "0007_mysterious_elektra",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1779313119140,
+      "tag": "0008_foamy_umar",
+      "breakpoints": true
     }
   ]
 }

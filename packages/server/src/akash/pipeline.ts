@@ -11,7 +11,8 @@ import { db } from '../db/client';
 import { deployments } from '../db/schema';
 import { env } from '../env';
 import { log } from '../lib/log';
-import { ConsoleApiError, consoleApi, type Lease } from './console-client';
+import { ConsoleApiError, consoleApi, type Bid, type Lease } from './console-client';
+import { getBlocklistedProviders } from './provider-health';
 
 export type StartDeployArgs = {
   apiKey: string;
@@ -55,8 +56,13 @@ async function runPipeline({
     await setState('bidding', { dseq });
     log.info('deployment created', { deploymentId, dseq, txHash: created.signTx.transactionHash });
 
-    // 2. Poll bids.
-    const bid = await pollUntil({
+    // 2. Poll bids. Exclude providers currently in the smoke-probe cooldown
+    //    window (provider_health.cooldown_until > now). If every open bid is
+    //    from a blocklisted provider, fall back to the cheapest one and stamp
+    //    a warning on the row — the user is staring at a deploy spinner and a
+    //    hard fail is worse UX than letting them retry on a known-flaky
+    //    provider.
+    const { bid, usedFallback } = await pollUntil({
       label: 'bids',
       intervalMs: BID_POLL_INTERVAL_MS,
       timeoutMs: BID_POLL_TIMEOUT_MS,
@@ -64,11 +70,24 @@ async function runPipeline({
         const bids = await consoleApi.getBids(apiKey, dseq);
         const open = bids.filter((b) => b.state === 'open' || b.state === 'active');
         if (!open.length) return undefined;
-        return open
-          .slice()
-          .sort((a, b) => Number(a.price.amount) - Number(b.price.amount))[0];
+        const blocklisted = await getBlocklistedProviders();
+        const eligible = open.filter((b) => !blocklisted.has(b.id.provider));
+        const byPrice = (a: Bid, b: Bid) => Number(a.price.amount) - Number(b.price.amount);
+        if (eligible.length > 0) {
+          return { bid: eligible.slice().sort(byPrice)[0]!, usedFallback: false };
+        }
+        return { bid: open.slice().sort(byPrice)[0]!, usedFallback: true };
       },
     });
+    if (usedFallback) {
+      log.warn('all candidate providers in cooldown; using cheapest available anyway', {
+        deploymentId,
+        provider: bid.id.provider,
+      });
+      await setState('bidding', {
+        errorMessage: 'all candidate providers in cooldown; using cheapest available anyway',
+      });
+    }
     log.info('bid selected', { deploymentId, provider: bid.id.provider, price: bid.price });
 
     // 3. Accept lease — this is the step that pushes the manifest to the

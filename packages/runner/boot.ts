@@ -17,6 +17,12 @@
 // the user code on a fixed internal USER_PORT after consulting the route /
 // apiKeyHashes tables refreshed from /api/runner/current on every poll.
 //
+// Reserved path: GET /_akash_runner/health is intercepted by the proxy and
+// answered directly (never forwarded to user code). The server-side reconciler
+// hits this path through the provider ingress to verify the provider can
+// route arbitrary (non-root) paths to the runner — used to detect providers
+// whose ingress serves `/` but mis-routes everything else.
+//
 // Required env vars (injected by the SDL at deploy time):
 //   FUNCTION_ID         opaque function identifier
 //   INITIAL_VERSION_ID  version to fetch on first boot
@@ -91,7 +97,11 @@ const POLL_INTERVAL_MS = clampPoll(Number(env.POLL_INTERVAL_MS ?? POLL_DEFAULT_M
 // Reported on every /api/runner/current poll so the dashboard can flag
 // deployments running an outdated runner and offer the in-place update flow.
 // Bump in lockstep with packages/runner/package.json.
-const RUNNER_VERSION = '2.3.0';
+const RUNNER_VERSION = '2.4.0';
+
+// Reserved path the runner answers directly (bypasses USER_PORT). The
+// reconciler uses this to verify the provider's ingress routes non-root paths.
+const RUNNER_HEALTH_PATH = '/_akash_runner/health';
 
 if (!FUNCTION_ID || !INITIAL_VERSION_ID || !BACKEND_BASE_URL || !RUNNER_TOKEN) {
   console.error('[boot] missing one of FUNCTION_ID, INITIAL_VERSION_ID, BACKEND_BASE_URL, RUNNER_TOKEN');
@@ -412,6 +422,16 @@ function startProxyServer(): void {
 async function handleProxyRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method.toUpperCase();
+
+  // Reserved runner-served path. Answered directly so the reconciler can
+  // verify that the provider's ingress actually routes non-root paths through
+  // to the runner — independent of whether the user's code is up.
+  if (url.pathname === RUNNER_HEALTH_PATH && (method === 'GET' || method === 'HEAD')) {
+    return new Response('ok', {
+      status: 200,
+      headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' },
+    });
+  }
 
   // CORS preflight: forward without auth so the browser can complete the
   // handshake and then send the real (auth-bearing) request.

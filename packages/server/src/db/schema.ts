@@ -177,6 +177,35 @@ export const functionVariables = pgTable(
   })
 );
 
+// Tracks per-provider deploy health so the bid picker can skip providers whose
+// ingress can't actually serve our function routes. The reconciler probes a
+// reserved runner path (/_akash_runner/health) through the provider ingress;
+// repeated failures (with the runner heartbeat stale) increment
+// consecutiveFailures, and crossing the threshold sets cooldownUntil into the
+// future so pipeline.ts excludes the provider from bid selection. Successful
+// probes reset consecutiveFailures and clear cooldownUntil.
+//
+// Cooldown is timestamp-based — blocked providers never see traffic, so they
+// can't earn a success signal to clear themselves; the cooldown window expires
+// on its own and the provider re-enters the pool naturally.
+export const providerHealth = pgTable(
+  'provider_health',
+  {
+    address: text('address').primaryKey(),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    totalFailures: integer('total_failures').notNull().default(0),
+    totalSuccesses: integer('total_successes').notNull().default(0),
+    lastFailureAt: timestamp('last_failure_at', { withTimezone: true }),
+    lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+    lastFailureReason: text('last_failure_reason'),
+    cooldownUntil: timestamp('cooldown_until', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    cooldownIdx: index('provider_health_cooldown_until_idx').on(table.cooldownUntil),
+  })
+);
+
 export type FunctionRow = typeof functions.$inferSelect;
 export type FunctionInsert = typeof functions.$inferInsert;
 export type FunctionVersionRow = typeof functionVersions.$inferSelect;
@@ -189,3 +218,5 @@ export type FunctionVariableRow = typeof functionVariables.$inferSelect;
 export type FunctionVariableInsert = typeof functionVariables.$inferInsert;
 export type ApiKeyRow = typeof apiKeys.$inferSelect;
 export type ApiKeyInsert = typeof apiKeys.$inferInsert;
+export type ProviderHealthRow = typeof providerHealth.$inferSelect;
+export type ProviderHealthInsert = typeof providerHealth.$inferInsert;
