@@ -49,19 +49,6 @@ export function DeploymentCard({ svc }: Props) {
           >
             {svc.name}
           </div>
-          <div
-            className="mono"
-            style={{
-              fontSize: 11,
-              color: 'var(--fg-subtle)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              marginTop: 2,
-            }}
-          >
-            {svc.subdomain}
-          </div>
         </div>
       </div>
 

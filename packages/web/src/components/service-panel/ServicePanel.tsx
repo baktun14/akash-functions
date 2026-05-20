@@ -228,9 +228,6 @@ export function ServicePanel({
                 {tone.label}
               </span>
             </h1>
-            <div className="mono" style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginTop: 4 }}>
-              {svc.subdomain}
-            </div>
           </div>
           {effectiveStatus === 'online' && (
             <a
