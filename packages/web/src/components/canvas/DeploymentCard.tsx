@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import type { FunctionRecord, ServiceStatus } from '@shared/types';
+import { ensureHttpScheme } from '../../lib/url';
 import { FnLogo, StatusDot } from '../icons';
 
 type Props = {
@@ -16,6 +17,7 @@ const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
 
 export function DeploymentCard({ svc }: Props) {
   const tone = STATUS_TONE[svc.status];
+  const url = svc.ingressUrl ? ensureHttpScheme(svc.ingressUrl) : null;
 
   return (
     <Link
@@ -49,6 +51,21 @@ export function DeploymentCard({ svc }: Props) {
           >
             {svc.name}
           </div>
+          {url && (
+            <div
+              className="mono"
+              style={{
+                fontSize: 11,
+                color: 'var(--fg-subtle)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                marginTop: 2,
+              }}
+            >
+              {url}
+            </div>
+          )}
         </div>
       </div>
 
