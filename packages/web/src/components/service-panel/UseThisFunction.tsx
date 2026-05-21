@@ -32,8 +32,9 @@ export function UseThisFunction({
 }) {
   const [tab, setTab] = useState<Lang>('curl');
   // Prefer the live ingress URL passed in by the parent. The function record's
-  // subdomain may still be the placeholder while the list query catches up.
-  const url = (urlOverride ?? ensureHttpScheme(svc.subdomain)).replace(/\/$/, '');
+  // ingressUrl can lag the parent's freshly-probed URL by one list-poll tick.
+  const fallback = svc.ingressUrl ? ensureHttpScheme(svc.ingressUrl) : '';
+  const url = (urlOverride ?? fallback).replace(/\/$/, '');
   const effectiveRoutes = routes && routes.length > 0 ? routes : DEFAULT_ROUTES;
 
   const samples = buildSamples(url, effectiveRoutes);

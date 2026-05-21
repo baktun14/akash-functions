@@ -90,7 +90,7 @@ export function ServicePanel({
     nameInputRef.current?.blur();
   };
 
-  const externalUrl = ensureHttpScheme(svc.subdomain);
+  const externalUrl = svc.ingressUrl ? ensureHttpScheme(svc.ingressUrl) : null;
 
   const redeploy = async () => {
     if (redeploying) return;
@@ -229,7 +229,7 @@ export function ServicePanel({
               </span>
             </h1>
           </div>
-          {effectiveStatus === 'online' && (
+          {effectiveStatus === 'online' && externalUrl && (
             <a
               href={externalUrl}
               target="_blank"

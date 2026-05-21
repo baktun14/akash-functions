@@ -19,7 +19,10 @@ export type FunctionRecord = {
   id: string;
   name: string;
   kind: 'function';
-  subdomain: string;
+  /** Real ingress hostname of the latest live deployment (e.g.
+   *  `abc123.ingress.example.cloud`). Absent on functions with no live
+   *  deployment — render-time code must treat as optional. */
+  ingressUrl?: string;
   image: string;
   status: ServiceStatus;
   region?: string;
