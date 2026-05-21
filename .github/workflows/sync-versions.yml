@@ -1,0 +1,64 @@
+name: Sync in-code versions
+
+# On every PR sync, predict the tag each publish workflow will cut on merge
+# (based on PR title + last tag), then write that version into the in-code
+# markers — RUNNER_VERSION, EXPECTED_RUNNER_VERSION, and each package.json
+# version — and commit back to the PR branch.
+#
+# This keeps the dashboard's "needs update" prompt honest: existing
+# deployments self-report the version they were built against, and as soon as
+# a new runner release tag is predicted, EXPECTED_RUNNER_VERSION moves above
+# what live runners report, so the prompt fires the moment the PR opens
+# instead of waiting for somebody to remember to bump it.
+#
+# Idempotent — the script no-ops when the in-code values already match.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - 'packages/runner/**'
+      - 'packages/server/**'
+      - 'packages/web/**'
+
+jobs:
+  sync:
+    # Skip fork PRs: GITHUB_TOKEN can't push to a fork's branch, and exposing
+    # write secrets to fork code via pull_request_target would be a footgun.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          # Use a fresh token so the resulting push doesn't get blocked by the
+          # repo's "GITHUB_TOKEN can't trigger workflows" rule (we don't need
+          # to trigger workflows from the bot push anyway, but if you ever
+          # swap this for a PAT, the same workflow path applies).
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Sync versions
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: node ./packages/releaser/sync-versions.mjs
+
+      - name: Commit changes back to the PR
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No version drift — nothing to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "chore: sync in-code versions to next release"
+          git push
