@@ -53,7 +53,11 @@ const POLL_MIN_MS = 3_000;
 const POLL_MAX_MS = 60_000;
 const POLL_DEFAULT_MS = 10_000;
 const KILL_GRACE_MS = 5_000;
-const HEALTH_CHECK_MS = 5_000;
+// 30s is generous for cold-starting real-world apps (Bun installing deps,
+// Next.js building, etc.). The previous 5s caused false "listen timeout"
+// stamps for any moderately heavy first boot. Once user code answers a
+// proxied request, `userCodeAcked` self-heals any stamp that did land.
+const HEALTH_CHECK_MS = 30_000;
 const HTTP_PROBE_MS = 5_000;
 const HTTP_PROBE_BODY_MAX = 1500;
 // Stderr ring-buffer cap per child. Large enough for a Bun stack trace (~2-3KB
@@ -163,6 +167,12 @@ let currentVarsRevision = -1;
 let currentEnv: Record<string, string> = {};
 let reloading = false;
 let shuttingDown = false;
+// Self-heal latch for the boot probe: once user code answers a real proxied
+// request with anything < 500, fire a one-shot `ok` health report so any
+// stale "listen timeout" / "Function returned 5xx" stamp from the initial
+// probe is cleared. Reset on reload so a new (possibly broken) version
+// re-arms — its own boot probe is still authoritative until then.
+let userCodeAcked = false;
 // Replaced wholesale on every successful poll. Empty until the first poll
 // completes; until then, protected routes 401 — acceptable because the
 // function isn't externally reachable before its lease is live anyway.
@@ -478,6 +488,14 @@ async function handleProxyRequest(req: Request): Promise<Response> {
       duplex: 'half',
       redirect: 'manual',
     });
+    // First non-5xx response from user code is ground truth that it's
+    // listening and serving — fire a one-shot ok report so the server
+    // clears any stale boot-probe stamp. 4xx (404 etc.) counts as healthy:
+    // user code is up, just doesn't route this path. Matches httpProbe().
+    if (!userCodeAcked && upstreamRes.status < 500) {
+      userCodeAcked = true;
+      void reportHealth(currentVersion, { kind: 'ok', status: upstreamRes.status });
+    }
     const respHeaders = new Headers();
     for (const [name, value] of upstreamRes.headers) {
       if (HOP_BY_HOP.has(name.toLowerCase())) continue;
@@ -589,6 +607,10 @@ async function reload(newVersionId: string, newVarsRevision?: number): Promise<v
     // Track the new version regardless of health-check outcome, so we don't
     // re-attempt the same broken version on every poll.
     currentVersion = newVersionId;
+    // Re-arm the proxy self-heal latch: the boot probe below is authoritative
+    // for the new version, and if it stamps an error we want the next
+    // successful proxied request to clear it.
+    userCodeAcked = false;
 
     const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
     if (!tcpHealthy) {
@@ -648,6 +670,8 @@ async function reloadVarsOnly(newRevision: number): Promise<void> {
     const next = spawnChild(CURRENT_LINK);
     currentChild = next;
     attachExitWatcher(next);
+    // Re-arm the proxy self-heal latch — same rationale as in reload().
+    userCodeAcked = false;
 
     const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
     if (!tcpHealthy) {
