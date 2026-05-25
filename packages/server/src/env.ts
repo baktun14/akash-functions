@@ -36,6 +36,7 @@ const Schema = z.object({
   RUNNER_IMAGE: z.string().default('ghcr.io/baktun14/akash-functions-runner:latest'),
   CODE_SIGNING_SECRET: z.string().min(16).default('dev-secret-change-me-32-bytes-min'),
   CODE_HOST_BASE: z.string().default('http://host.docker.internal:8081'),
+  FUNCTIONS_PUBLIC_BASE: z.string().default('http://localhost:8081'),
   // Console API takes deposit as a number in dollars (the API converts to AKT).
   DEPLOY_DEPOSIT: z.coerce.number().positive().default(0.5),
   DEPLOY_PRICING_AMOUNT: z.coerce.number().default(1000),

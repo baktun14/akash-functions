@@ -20,9 +20,14 @@ import { startDeployPipeline } from '../akash/pipeline';
 import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
-import { deployments, functionVariables, functionVersions, functions } from '../db/schema';
+import { deployments, functionAliases, functionVariables, functionVersions, functions } from '../db/schema';
 import { env } from '../env';
 import { secrets } from '../lib/secrets';
+import {
+  createAliasPublicId,
+  createOriginToken,
+  hashOriginToken,
+} from '../lib/origin-token';
 import { encryptedSourceColumns, readSource } from '../lib/source';
 import { isRunnerOutdated, isRunnerStale } from '../lib/runner-version';
 import { signRunner } from '../lib/signing';
@@ -68,6 +73,18 @@ const UpdateCodeBody = z.object({
   message: z.string().max(200).optional(),
   resources: ResourceSchema.optional(),
   envVars: z.record(z.string(), z.string()).optional(),
+});
+
+const UpsertVercelBody = z.object({
+  project: z.string().min(1).max(120),
+  name: z.string().min(1).max(60),
+  route: z.string().min(1).max(512),
+  kind: z.enum(['pages-api', 'app-route']),
+  source: SourceMapSchema,
+  resources: ResourceSchema,
+  envVars: z.record(z.string(), z.string()).optional(),
+  message: z.string().max(200).optional(),
+  deploy: z.boolean().default(true),
 });
 
 const RestoreBody = z.object({
@@ -124,6 +141,169 @@ functionsRouter.get('/', async (c) => {
   void autoRebindStaleRunners(akashKey, decorated.map((d) => d.dep));
 
   return c.json(list);
+});
+
+// CLI route: idempotently map a Vercel-compatible route to one Akash Function.
+// Git-push deploys should be stable: the first push creates a function and
+// lease, later pushes add a version to the same function. Existing live
+// runners hot-reload the latest version through /api/runner/current.
+functionsRouter.post('/vercel/upsert', zValidator('json', UpsertVercelBody), async (c) => {
+  const ownerHash = c.get('ownerHash');
+  const walletAddress = c.get('walletAddress');
+  const akashKey = c.get('akashKey');
+  const body = c.req.valid('json');
+  const envEntries = encryptedVariableEntries(body.envVars ?? {});
+  const envMetadata = Object.fromEntries(Object.keys(body.envVars ?? {}).map((key) => [key, '[encrypted]']));
+
+  const [existingAlias] = await db
+    .select()
+    .from(functionAliases)
+    .where(and(
+      eq(functionAliases.walletAddress, walletAddress),
+      eq(functionAliases.project, body.project),
+      eq(functionAliases.route, body.route)
+    ))
+    .limit(1);
+
+  const existingRows = existingAlias
+    ? await db
+        .select()
+        .from(functions)
+        .where(and(
+          eq(functions.id, existingAlias.functionId),
+          eq(functions.walletAddress, walletAddress),
+          isNull(functions.deletedAt)
+        ))
+        .limit(1)
+    : [];
+  const existing = existingRows[0];
+
+  const result = await db.transaction(async (tx) => {
+    const now = new Date();
+    const fn = existing ?? (
+      await tx
+        .insert(functions)
+        .values({
+          ownerHash,
+          walletAddress,
+          name: body.name,
+          subdomain: mintSubdomain(body.name),
+          ...(envEntries.length > 0 ? { variablesRevision: 1 } : {}),
+        })
+        .returning()
+    )[0];
+    if (!fn) throw new HTTPException(500, { message: 'Failed to upsert function' });
+
+    const [version] = await tx
+      .insert(functionVersions)
+      .values({
+        functionId: fn.id,
+        preset: 'rest',
+        prompt: `vercel:${body.project}:${body.route}:${body.kind}`,
+        message: body.message ?? `Deploy ${body.route}`,
+        ...encryptedSourceColumns(body.source),
+        resources: body.resources,
+        envVars: envMetadata,
+        createdAt: now,
+      })
+      .returning();
+    if (!version) throw new HTTPException(500, { message: 'Failed to insert version' });
+
+    if (existing) {
+      await tx
+        .update(functions)
+        .set({
+          updatedAt: now,
+          ...(envEntries.length > 0
+            ? { variablesRevision: sql`${functions.variablesRevision} + 1` }
+            : {}),
+        })
+        .where(eq(functions.id, fn.id));
+    }
+
+    if (envEntries.length > 0) {
+      await upsertEncryptedVariables(tx, fn.id, envEntries, now);
+    }
+
+    const [activeDep] = await tx
+      .select()
+      .from(deployments)
+      .where(and(
+        eq(deployments.functionId, fn.id),
+        notInArray(deployments.state, ['closed', 'failed'])
+      ))
+      .orderBy(desc(deployments.createdAt))
+      .limit(1);
+
+    const aliasResult = await upsertFunctionAlias(tx, {
+      existingAlias,
+      walletAddress,
+      project: body.project,
+      route: body.route,
+      routeKind: body.kind,
+      functionId: fn.id,
+      now,
+    });
+
+    if (!body.deploy || activeDep) {
+      return {
+        fn,
+        version,
+        dep: activeDep ?? null,
+        created: !existing,
+        shouldStartPipeline: false,
+        ...aliasResult,
+      };
+    }
+
+    const [dep] = await tx
+      .insert(deployments)
+      .values({
+        functionId: fn.id,
+        versionId: version.id,
+        state: 'pending',
+      })
+      .returning();
+    if (!dep) throw new HTTPException(500, { message: 'Failed to insert deployment' });
+    return {
+      fn,
+      version,
+      dep,
+      created: !existing,
+      shouldStartPipeline: true,
+      ...aliasResult,
+    };
+  });
+
+  if (result.shouldStartPipeline && result.dep) {
+    const runnerToken = signRunner({ fnId: result.fn.id });
+    const sdl = await buildSdl({
+      functionId: result.fn.id,
+      initialVersionId: result.version.id,
+      runnerToken,
+      resources: result.version.resources,
+    });
+    startDeployPipeline({ apiKey: akashKey, deploymentId: result.dep.id, sdl, serviceName: 'fn' });
+  }
+
+  const ingressUrl = result.dep?.uris?.[0];
+  const stableUrl = `${env.FUNCTIONS_PUBLIC_BASE.replace(/\/$/, '')}/i/${result.alias.publicId}`;
+  return c.json({
+    function: {
+      ...toRecord(result.fn),
+      ingressUrl,
+      latestDeploymentId: result.dep?.id,
+      status: result.dep ? stateToStatus(result.dep.state, result.dep.errorMessage) : 'idle',
+    },
+    versionId: result.version.id,
+    deploymentId: result.dep?.id,
+    ingressUrl,
+    stableUrl,
+    originToken: result.originToken,
+    action: result.created
+      ? (result.dep ? 'deployed' : 'created')
+      : (result.dep ? 'reused-deployment' : 'updated'),
+  }, result.created ? 201 : 200);
 });
 
 async function crossCheckAkashStates(
@@ -678,6 +858,147 @@ functionsRouter.post('/:id/close-deployment', async (c) => {
 
 const MAX_VARIABLES_PER_FUNCTION = 100;
 const MAX_TOTAL_PLAINTEXT_BYTES = 256 * 1024;
+
+function encryptedVariableEntries(envVars: Record<string, string>): Array<{
+  key: string;
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  keyVersion: number;
+}> {
+  const entries = Object.entries(envVars);
+  if (entries.length > MAX_VARIABLES_PER_FUNCTION) {
+    throw new HTTPException(400, {
+      message: `Cannot exceed ${MAX_VARIABLES_PER_FUNCTION} variables per function`,
+    });
+  }
+
+  let totalPlaintext = 0;
+  const encrypted: Array<{
+    key: string;
+    ciphertext: string;
+    iv: string;
+    authTag: string;
+    keyVersion: number;
+  }> = [];
+
+  for (const [key, value] of entries) {
+    const keyError = validateVariableKey(key);
+    if (keyError) throw new HTTPException(400, { message: keyError });
+    totalPlaintext += Buffer.byteLength(value, 'utf8');
+    if (totalPlaintext > MAX_TOTAL_PLAINTEXT_BYTES) {
+      throw new HTTPException(400, {
+        message: `Total variables size would exceed ${MAX_TOTAL_PLAINTEXT_BYTES} bytes`,
+      });
+    }
+    try {
+      encrypted.push({ key, ...secrets.encrypt(value) });
+    } catch (err) {
+      log.error('secrets.encrypt failed during CLI upsert', { err: String(err), key });
+      throw new HTTPException(500, { message: 'Failed to encrypt variable' });
+    }
+  }
+
+  return encrypted;
+}
+
+async function upsertEncryptedVariables(
+  tx: any,
+  functionId: string,
+  entries: Array<{
+    key: string;
+    ciphertext: string;
+    iv: string;
+    authTag: string;
+    keyVersion: number;
+  }>,
+  now: Date,
+): Promise<void> {
+  if (entries.length === 0) return;
+  await tx
+    .insert(functionVariables)
+    .values(
+      entries.map((entry) => ({
+        functionId,
+        key: entry.key,
+        ciphertext: entry.ciphertext,
+        iv: entry.iv,
+        authTag: entry.authTag,
+        keyVersion: entry.keyVersion,
+        createdAt: now,
+        updatedAt: now,
+      }))
+    )
+    .onConflictDoUpdate({
+      target: [functionVariables.functionId, functionVariables.key],
+      set: {
+        ciphertext: sql`excluded.ciphertext`,
+        iv: sql`excluded.iv`,
+        authTag: sql`excluded.auth_tag`,
+        keyVersion: sql`excluded.key_version`,
+        updatedAt: now,
+      },
+    });
+}
+
+async function upsertFunctionAlias(
+  tx: any,
+  args: {
+    existingAlias: typeof functionAliases.$inferSelect | undefined;
+    walletAddress: string;
+    project: string;
+    route: string;
+    routeKind: 'pages-api' | 'app-route';
+    functionId: string;
+    now: Date;
+  },
+): Promise<{
+  alias: typeof functionAliases.$inferSelect;
+  originToken: string;
+}> {
+  if (args.existingAlias) {
+    const originToken = secrets.decrypt({
+      ciphertext: args.existingAlias.originTokenCiphertext,
+      iv: args.existingAlias.originTokenIv,
+      authTag: args.existingAlias.originTokenAuthTag,
+      keyVersion: args.existingAlias.originTokenKeyVersion,
+    });
+    const [alias] = await tx
+      .update(functionAliases)
+      .set({
+        functionId: args.functionId,
+        routeKind: args.routeKind,
+        updatedAt: args.now,
+      })
+      .where(eq(functionAliases.id, args.existingAlias.id))
+      .returning();
+    return { alias: alias ?? args.existingAlias, originToken };
+  }
+
+  const originToken = createOriginToken();
+  const encrypted = secrets.encrypt(originToken);
+  const [alias] = await tx
+    .insert(functionAliases)
+    .values({
+      publicId: createAliasPublicId(),
+      walletAddress: args.walletAddress,
+      project: args.project,
+      route: args.route,
+      routeKind: args.routeKind,
+      functionId: args.functionId,
+      exposure: 'vercel-rewrite',
+      originTokenHash: hashOriginToken(originToken),
+      originTokenCiphertext: encrypted.ciphertext,
+      originTokenIv: encrypted.iv,
+      originTokenAuthTag: encrypted.authTag,
+      originTokenKeyVersion: encrypted.keyVersion,
+      createdAt: args.now,
+      updatedAt: args.now,
+    })
+    .returning();
+  if (!alias) throw new HTTPException(500, { message: 'Failed to create stable alias' });
+  return { alias, originToken };
+}
 
 const PutVariableBody = z.object({
   value: z

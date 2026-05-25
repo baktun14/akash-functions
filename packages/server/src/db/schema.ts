@@ -9,6 +9,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -142,6 +143,43 @@ export const deployments = pgTable('deployments', {
   closedAt: timestamp('closed_at', { withTimezone: true }),
 });
 
+// Stable public aliases for function ingress. Vercel-compatible deployments
+// use opaque public IDs plus an origin token so callers hit:
+//   /i/<public_id>/api/...
+// rather than a provider-specific lease hostname. The token is a capability
+// secret for invocation only; management still requires the Akash Console key.
+export const functionAliases = pgTable(
+  'function_aliases',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    publicId: text('public_id').notNull().unique(),
+    walletAddress: text('wallet_address').notNull(),
+    project: text('project').notNull(),
+    route: text('route').notNull(),
+    routeKind: text('route_kind').notNull(),
+    functionId: uuid('function_id')
+      .notNull()
+      .references(() => functions.id, { onDelete: 'cascade' }),
+    exposure: text('exposure').notNull().default('vercel-rewrite'),
+    originTokenHash: text('origin_token_hash').notNull(),
+    originTokenCiphertext: text('origin_token_ciphertext').notNull(),
+    originTokenIv: text('origin_token_iv').notNull(),
+    originTokenAuthTag: text('origin_token_auth_tag').notNull(),
+    originTokenKeyVersion: integer('origin_token_key_version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    walletIdx: index('function_aliases_wallet_address_idx').on(table.walletAddress),
+    functionIdx: index('function_aliases_function_id_idx').on(table.functionId),
+    projectRouteUnique: uniqueIndex('function_aliases_wallet_project_route_idx').on(
+      table.walletAddress,
+      table.project,
+      table.route
+    ),
+  })
+);
+
 // User-defined environment variables, encrypted at rest with AES-256-GCM.
 // Decoupled from function_versions so a user can add/edit/remove variables
 // without creating a code version. The runner picks up changes via the
@@ -212,6 +250,8 @@ export type FunctionVersionRow = typeof functionVersions.$inferSelect;
 export type FunctionVersionInsert = typeof functionVersions.$inferInsert;
 export type DeploymentRow = typeof deployments.$inferSelect;
 export type DeploymentInsert = typeof deployments.$inferInsert;
+export type FunctionAliasRow = typeof functionAliases.$inferSelect;
+export type FunctionAliasInsert = typeof functionAliases.$inferInsert;
 export type KeyLinkRow = typeof keyLinks.$inferSelect;
 export type KeyLinkInsert = typeof keyLinks.$inferInsert;
 export type FunctionVariableRow = typeof functionVariables.$inferSelect;

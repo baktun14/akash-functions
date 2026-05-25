@@ -93,10 +93,11 @@ const RUNNER_TOKEN = env.RUNNER_TOKEN;
 // External port the provider ingress hits. The runner's reverse proxy listens
 // here and forwards to user code on USER_PORT after auth.
 const EXTERNAL_PORT = Number(env.PORT ?? '3000');
-// Fixed internal port the user code listens on. The runner spawns the child
-// with PORT set to this value; the user code keeps using `process.env.PORT`
-// and is unaware that PORT was rewritten.
+// Internal ports the user code can listen on. The proxy switches between them
+// for blue/green rollovers: old code keeps serving on the active port while a
+// new version boots and passes probes on the standby port.
 const USER_PORT = 3001;
+const SECONDARY_USER_PORT = 3002;
 const POLL_INTERVAL_MS = clampPoll(Number(env.POLL_INTERVAL_MS ?? POLL_DEFAULT_MS));
 // Reported on every /api/runner/current poll so the dashboard can flag
 // deployments running an outdated runner and offer the in-place update flow.
@@ -165,6 +166,7 @@ let currentChild: ChildHandle | null = null;
 let currentVersion = INITIAL_VERSION_ID;
 let currentVarsRevision = -1;
 let currentEnv: Record<string, string> = {};
+let activeUserPort = USER_PORT;
 let reloading = false;
 let shuttingDown = false;
 // Self-heal latch for the boot probe: once user code answers a real proxied
@@ -178,6 +180,8 @@ let userCodeAcked = false;
 // function isn't externally reachable before its lease is live anyway.
 let routeTable: RouteEntry[] = [];
 let apiKeyHashes: Set<string> = new Set();
+let requireOriginToken = false;
+let originTokenHashes: Set<string> = new Set();
 // Hop-by-hop headers per RFC 7230. Stripped from both request and response so
 // the upstream socket lifecycle doesn't bleed into the user's view of headers.
 const HOP_BY_HOP = new Set([
@@ -200,7 +204,7 @@ const HOP_BY_HOP = new Set([
 
 console.log(
   `[boot] FUNCTION_ID=${FUNCTION_ID} initialVersion=${INITIAL_VERSION_ID} ` +
-    `external=${EXTERNAL_PORT} user=${USER_PORT} pollMs=${POLL_INTERVAL_MS}`
+    `external=${EXTERNAL_PORT} userPorts=${USER_PORT},${SECONDARY_USER_PORT} pollMs=${POLL_INTERVAL_MS}`
 );
 
 await prepareAppDir();
@@ -224,7 +228,7 @@ const [, initialEnvFetch] = await Promise.all([
 currentEnv = initialEnvFetch.env;
 currentVarsRevision = initialEnvFetch.revision;
 
-currentChild = spawnChild(CURRENT_LINK);
+currentChild = spawnChild(CURRENT_LINK, activeUserPort);
 attachExitWatcher(currentChild);
 
 // Reverse proxy on EXTERNAL_PORT — the only thing the provider ingress reaches.
@@ -296,6 +300,8 @@ async function fetchCurrentPointer(): Promise<CurrentPointer | null> {
     versionId?: string;
     variablesRevision?: number;
     apiKeyHashes?: string[];
+    requireOriginToken?: boolean;
+    originTokenHashes?: string[];
     routes?: Array<{ method: string; path: string; auth?: string }>;
   };
   // Refresh proxy auth state on every successful poll. Failures keep the last
@@ -303,10 +309,18 @@ async function fetchCurrentPointer(): Promise<CurrentPointer | null> {
   if (Array.isArray(body.apiKeyHashes)) {
     apiKeyHashes = new Set(body.apiKeyHashes);
   }
+  requireOriginToken = body.requireOriginToken === true;
+  if (Array.isArray(body.originTokenHashes)) {
+    originTokenHashes = new Set(body.originTokenHashes);
+  }
   if (Array.isArray(body.routes)) {
     routeTable = compileRouteTable(body.routes);
   }
   if (!body.versionId) return null;
+  if (brokenVersions.has(body.versionId)) {
+    console.warn(`[poll] latest version ${body.versionId} is marked broken locally; waiting for a newer version`);
+    return null;
+  }
   return {
     versionId: body.versionId,
     variablesRevision:
@@ -374,6 +388,10 @@ function extractApiKey(req: Request): string | null {
   return xKey ? xKey.trim() : null;
 }
 
+function extractOriginToken(req: Request, url: URL): string | null {
+  return req.headers.get('x-akash-origin-token') ?? url.searchParams.get('__akash_origin');
+}
+
 function isValidApiKey(plaintext: string): boolean {
   if (apiKeyHashes.size === 0) return false;
   const candidate = createHash('sha256').update(plaintext).digest('hex');
@@ -382,6 +400,16 @@ function isValidApiKey(plaintext: string): boolean {
   // The set has O(keys) entries (typically <10), so the cost is negligible.
   let matched = false;
   for (const stored of apiKeyHashes) {
+    if (timingSafeStringEqual(stored, candidate)) matched = true;
+  }
+  return matched;
+}
+
+function isValidOriginToken(plaintext: string): boolean {
+  if (originTokenHashes.size === 0) return false;
+  const candidate = createHash('sha256').update(plaintext).digest('hex');
+  let matched = false;
+  for (const stored of originTokenHashes) {
     if (timingSafeStringEqual(stored, candidate)) matched = true;
   }
   return matched;
@@ -414,6 +442,13 @@ function unauthorizedResponse(message: string): Response {
   );
 }
 
+function notFoundResponse(): Response {
+  return new Response('Not found', {
+    status: 404,
+    headers: { 'cache-control': 'no-store' },
+  });
+}
+
 function startProxyServer(): void {
   Bun.serve({
     port: EXTERNAL_PORT,
@@ -426,7 +461,7 @@ function startProxyServer(): void {
       return new Response('Bad Gateway', { status: 502 });
     },
   });
-  console.log(`[proxy] listening on :${EXTERNAL_PORT} → 127.0.0.1:${USER_PORT}`);
+  console.log(`[proxy] listening on :${EXTERNAL_PORT} → active child port`);
 }
 
 async function handleProxyRequest(req: Request): Promise<Response> {
@@ -441,6 +476,14 @@ async function handleProxyRequest(req: Request): Promise<Response> {
       status: 200,
       headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' },
     });
+  }
+
+  if (requireOriginToken) {
+    const token = extractOriginToken(req, url);
+    if (!token || !isValidOriginToken(token)) {
+      return notFoundResponse();
+    }
+    url.searchParams.delete('__akash_origin');
   }
 
   // CORS preflight: forward without auth so the browser can complete the
@@ -458,7 +501,7 @@ async function handleProxyRequest(req: Request): Promise<Response> {
     }
   }
 
-  if (!currentChild || reloading) {
+  if (!currentChild) {
     return new Response(
       JSON.stringify({ error: { code: 'UNAVAILABLE', message: 'Function is restarting' } }),
       {
@@ -472,7 +515,8 @@ async function handleProxyRequest(req: Request): Promise<Response> {
     );
   }
 
-  const upstream = new URL(url.pathname + url.search, `http://127.0.0.1:${USER_PORT}`);
+  const upstreamPort = activeUserPort;
+  const upstream = new URL(url.pathname + url.search, `http://127.0.0.1:${upstreamPort}`);
   const headers = new Headers();
   for (const [name, value] of req.headers) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
@@ -567,10 +611,10 @@ async function fetchEnvWithRetries(): Promise<EnvFetchResult> {
 async function reload(newVersionId: string, newVarsRevision?: number): Promise<void> {
   if (reloading) return;
   reloading = true;
-  console.log(`[reload] swapping ${currentVersion} → ${newVersionId}`);
+  console.log(`[reload] blue/green ${currentVersion} → ${newVersionId}`);
   const previousVersion = currentVersion;
-  const previousEnv = currentEnv;
-  const previousRevision = currentVarsRevision;
+  const candidatePort = standbyUserPort();
+  let candidate: ChildHandle | null = null;
   try {
     const newDir = versionDir(newVersionId);
     await rm(newDir, { recursive: true, force: true });
@@ -581,66 +625,73 @@ async function reload(newVersionId: string, newVarsRevision?: number): Promise<v
       await bunInstall(newDir);
     }
 
-    await swapCurrentSymlink(newDir);
-
+    let nextEnv = currentEnv;
+    let nextRevision = currentVarsRevision;
     // Re-fetch env if the server signalled a vars change alongside this code
     // change, or if it wasn't tracked before. Failure here keeps the previous
     // env (fail-open at runtime — boot is the only place we fail-closed).
     if (newVarsRevision !== undefined && newVarsRevision !== currentVarsRevision) {
       try {
         const fresh = await fetchEnv();
-        currentEnv = fresh.env;
-        currentVarsRevision = fresh.revision;
+        nextEnv = fresh.env;
+        nextRevision = fresh.revision;
       } catch (err) {
         console.warn(`[reload] env refetch failed; keeping previous env: ${(err as Error).message}`);
       }
     }
 
+    candidate = spawnChild(newDir, candidatePort, nextEnv);
+    attachExitWatcher(candidate);
+
+    const tcpHealthy = await waitForListening(candidatePort, HEALTH_CHECK_MS);
+    if (!tcpHealthy) {
+      console.error('[reload] tcp health check failed');
+      brokenVersions.add(newVersionId);
+      await reportHealth(previousVersion, {
+        kind: 'connect-error',
+        reason: `candidate ${newVersionId} listen timeout`,
+      });
+      await terminateChild(candidate);
+      return;
+    }
+
+    const probe = await httpProbe(candidatePort, HTTP_PROBE_MS);
+    if (probe.kind !== 'ok') {
+      console.error(`[reload] http probe ${probeSummary(probe)}`);
+      brokenVersions.add(newVersionId);
+      await reportHealth(previousVersion, probe);
+      await terminateChild(candidate);
+      return;
+    }
+    await reportHealth(newVersionId, probe);
+
+    await swapCurrentSymlink(newDir);
     const oldChild = currentChild;
-    currentChild = null; // tell the exit watcher the upcoming exit is expected
-    if (oldChild) await terminateChild(oldChild);
-
-    const next = spawnChild(CURRENT_LINK);
-    currentChild = next;
-    attachExitWatcher(next);
-
-    // Track the new version regardless of health-check outcome, so we don't
-    // re-attempt the same broken version on every poll.
+    currentChild = candidate;
+    candidate = null;
+    activeUserPort = candidatePort;
     currentVersion = newVersionId;
-    // Re-arm the proxy self-heal latch: the boot probe below is authoritative
+    currentEnv = nextEnv;
+    currentVarsRevision = nextRevision;
+    // Re-arm the proxy self-heal latch: the boot probe above is authoritative
     // for the new version, and if it stamps an error we want the next
     // successful proxied request to clear it.
     userCodeAcked = false;
-
-    const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
-    if (!tcpHealthy) {
-      console.error('[reload] tcp health check failed');
-      await reportHealth(newVersionId, { kind: 'connect-error', reason: 'listen timeout' });
-      currentEnv = previousEnv;
-      currentVarsRevision = previousRevision;
-      await rollbackOrStayDegraded(previousVersion);
-      return;
-    }
-
-    const probe = await httpProbe(USER_PORT, HTTP_PROBE_MS);
-    await reportHealth(newVersionId, probe);
-    if (probe.kind !== 'ok') {
-      console.error(`[reload] http probe ${probeSummary(probe)}`);
-      currentEnv = previousEnv;
-      currentVarsRevision = previousRevision;
-      await rollbackOrStayDegraded(previousVersion);
-      return;
-    }
-
     // Reload succeeded — the version is no longer broken (if it ever was).
     brokenVersions.delete(newVersionId);
 
-    console.log(`[reload] live on ${newVersionId}`);
+    console.log(`[reload] live on ${newVersionId} via port ${activeUserPort}`);
+    if (oldChild) {
+      void terminateChild(oldChild).catch((err) =>
+        console.warn(`[reload] old child termination failed: ${(err as Error).message}`)
+      );
+    }
     await pruneOldVersions(new Set([newVersionId, previousVersion]));
   } catch (err) {
     console.error(`[reload] failed: ${(err as Error).message}`);
     // Don't kill the running child; a bad fetch / install should leave the
     // pod serving its current version.
+    if (candidate) await terminateChild(candidate).catch(() => undefined);
     await rm(versionDir(newVersionId), { recursive: true, force: true }).catch(() => undefined);
   } finally {
     reloading = false;
@@ -656,47 +707,48 @@ async function reloadVarsOnly(newRevision: number): Promise<void> {
   if (reloading) return;
   reloading = true;
   console.log(`[vars-reload] revision ${currentVarsRevision} → ${newRevision}`);
-  const previousEnv = currentEnv;
-  const previousRevision = currentVarsRevision;
+  const candidatePort = standbyUserPort();
+  let candidate: ChildHandle | null = null;
   try {
     const fresh = await fetchEnv();
-    currentEnv = fresh.env;
-    currentVarsRevision = fresh.revision;
+    candidate = spawnChild(CURRENT_LINK, candidatePort, fresh.env);
+    attachExitWatcher(candidate);
 
-    const oldChild = currentChild;
-    currentChild = null;
-    if (oldChild) await terminateChild(oldChild);
-
-    const next = spawnChild(CURRENT_LINK);
-    currentChild = next;
-    attachExitWatcher(next);
-    // Re-arm the proxy self-heal latch — same rationale as in reload().
-    userCodeAcked = false;
-
-    const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
+    const tcpHealthy = await waitForListening(candidatePort, HEALTH_CHECK_MS);
     if (!tcpHealthy) {
       console.error('[vars-reload] tcp health check failed, reverting env');
       await reportHealth(currentVersion, { kind: 'connect-error', reason: 'vars-reload listen timeout' });
-      currentEnv = previousEnv;
-      currentVarsRevision = previousRevision;
-      await respawnChildWithCurrentEnv();
+      await terminateChild(candidate);
       return;
     }
 
-    const probe = await httpProbe(USER_PORT, HTTP_PROBE_MS);
+    const probe = await httpProbe(candidatePort, HTTP_PROBE_MS);
     await reportHealth(currentVersion, probe);
     if (probe.kind !== 'ok') {
       console.error(`[vars-reload] http probe failed (${probe.kind}); reverting env`);
-      currentEnv = previousEnv;
-      currentVarsRevision = previousRevision;
-      await respawnChildWithCurrentEnv();
+      await terminateChild(candidate);
       return;
     }
 
+    const oldChild = currentChild;
+    currentChild = candidate;
+    candidate = null;
+    activeUserPort = candidatePort;
+    currentEnv = fresh.env;
+    currentVarsRevision = fresh.revision;
+    // Re-arm the proxy self-heal latch — same rationale as in reload().
+    userCodeAcked = false;
+
     console.log(`[vars-reload] live with revision ${newRevision}`);
+    if (oldChild) {
+      void terminateChild(oldChild).catch((err) =>
+        console.warn(`[vars-reload] old child termination failed: ${(err as Error).message}`)
+      );
+    }
   } catch (err) {
     // fetchEnv() failure: keep the running child alive with stale env.
     console.error(`[vars-reload] failed: ${(err as Error).message}; keeping previous env`);
+    if (candidate) await terminateChild(candidate).catch(() => undefined);
   } finally {
     reloading = false;
   }
@@ -888,17 +940,25 @@ function pickEntry(dir: string): string | undefined {
   return undefined;
 }
 
-function spawnChild(dir: string): ChildHandle {
+function standbyUserPort(): number {
+  return activeUserPort === USER_PORT ? SECONDARY_USER_PORT : USER_PORT;
+}
+
+function spawnChild(
+  dir: string,
+  port: number = activeUserPort,
+  envOverride: Record<string, string> = currentEnv,
+): ChildHandle {
   const entry = pickEntry(dir);
   if (!entry) {
     throw new Error(`no entry point found in ${dir}; tried ${ENTRY_CANDIDATES.join(', ')}`);
   }
-  console.log(`[spawn] bun --preload /boot/preload.ts ${entry} on port ${USER_PORT}`);
+  console.log(`[spawn] bun --preload /boot/preload.ts ${entry} on port ${port}`);
   // One-shot diagnostic so we can confirm Bun sees our JSX configs through the
   // symlink. The listing is shallow (top level only) and entry-relative so
   // it's cheap. If 2.2.3's silent ensureJsxTsconfig was firing but Bun wasn't
   // honoring the files, this log makes that visible in pod tail.
-  const merged = { NODE_ENV: 'production', ...currentEnv, ...baseEnv, PORT: String(USER_PORT) };
+  const merged = { NODE_ENV: 'production', ...envOverride, ...baseEnv, PORT: String(port) };
   console.log(`[spawn] effective NODE_ENV=${merged.NODE_ENV}`);
   try {
     const listing = readdirSync(dir).join(', ');
@@ -1170,12 +1230,12 @@ async function reportHealthWithRetry(versionId: string, probe: ProbeResult): Pro
 }
 
 async function probeAndReport(versionId: string): Promise<void> {
-  const tcpHealthy = await waitForListening(USER_PORT, HEALTH_CHECK_MS);
+  const tcpHealthy = await waitForListening(activeUserPort, HEALTH_CHECK_MS);
   if (!tcpHealthy) {
     await reportHealth(versionId, { kind: 'connect-error', reason: 'listen timeout' });
     return;
   }
-  const probe = await httpProbe(USER_PORT, HTTP_PROBE_MS);
+  const probe = await httpProbe(activeUserPort, HTTP_PROBE_MS);
   await reportHealth(versionId, probe);
   if (probe.kind !== 'ok') {
     console.warn(`[health] ${probeSummary(probe)}`);
