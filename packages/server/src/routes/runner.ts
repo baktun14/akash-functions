@@ -21,7 +21,14 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import { db } from '../db/client';
-import { apiKeys, deployments, functionVariables, functionVersions, functions } from '../db/schema';
+import {
+  apiKeys,
+  deployments,
+  functionAliases,
+  functionVariables,
+  functionVersions,
+  functions,
+} from '../db/schema';
 import { secrets } from '../lib/secrets';
 import { readSource } from '../lib/source';
 import { verifyToken } from '../lib/signing';
@@ -166,6 +173,16 @@ runnerRouter.get('/current/:fnId', async (c) => {
       ).map((row) => row.keyHash)
     : [];
 
+  const originTokenHashes = (
+    await db
+      .select({ originTokenHash: functionAliases.originTokenHash })
+      .from(functionAliases)
+      .where(and(
+        eq(functionAliases.functionId, fnId),
+        eq(functionAliases.exposure, 'vercel-rewrite')
+      ))
+  ).map((row) => row.originTokenHash);
+
   const detected = extractRoutes(readSource(version)) ?? [];
   const routes = decorateRoutesWithAuth(detected, fn.protectedRoutes);
 
@@ -175,6 +192,8 @@ runnerRouter.get('/current/:fnId', async (c) => {
     updatedAt: version.createdAt.toISOString(),
     variablesRevision: fn.variablesRevision,
     apiKeyHashes: keyHashes,
+    requireOriginToken: originTokenHashes.length > 0,
+    originTokenHashes,
     routes,
   });
 });

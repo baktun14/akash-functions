@@ -10,6 +10,7 @@ import { env } from './env';
 import { errorHandler } from './middleware/error';
 import { akashMetaRouter } from './routes/akash-meta';
 import { agentRouter } from './routes/agent';
+import { aliasRouter } from './routes/aliases';
 import { deployRouter } from './routes/deploy';
 import { functionsRouter } from './routes/functions';
 import { keysRouter } from './routes/keys';
@@ -17,6 +18,11 @@ import { runnerRouter } from './routes/runner';
 import { log } from './lib/log';
 
 const app = new Hono();
+
+// Stable invocation URLs may carry origin-token query strings from Vercel
+// rewrites. Keep them outside the default request logger so those capability
+// secrets do not land in control-plane logs.
+app.route('/i', aliasRouter);
 
 app.use('*', logger());
 app.use(

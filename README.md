@@ -143,6 +143,62 @@ Three things must be true before clicking **Deploy** in the UI actually creates 
 
 3. **Your Akash wallet has funds.** The pipeline's default deposit is $0.50 (in AKT at current price). Top up the wallet behind your Console API key before deploying.
 
+## Deploying Vercel functions with the CLI
+
+The `akash-functions` CLI can move Next/Vercel API routes onto Akash while the
+app keeps serving the same public paths. It discovers these layouts:
+
+```text
+pages/api/**/*.ts
+app/api/**/route.ts
+src/pages/api/**/*.ts
+src/app/api/**/route.ts
+```
+
+Install and initialize it in the Next app:
+
+```bash
+npm i -D @akashnetwork/functions
+npx akash-functions init
+```
+
+Wrap the app's Next config so generated rewrites run before local routes:
+
+```js
+import { withAkashFunctions } from "@akashnetwork/functions/next";
+
+const config = {
+  // existing Next config
+};
+
+export default withAkashFunctions(config);
+```
+
+Deploy the discovered functions:
+
+```bash
+export AKASH_CONSOLE_API_KEY=...
+npx akash-functions discover
+npx akash-functions deploy
+```
+
+The CLI writes `.akash-functions/deployments.json` and
+`.akash-functions/rewrites.json`. The rewrite file includes an origin token, so
+`.akash-functions/` is ignored by this repo and should stay out of source
+control.
+
+For a Vercel prebuilt deploy, patch the build output before uploading it:
+
+```bash
+vercel build
+npx akash-functions deploy
+npx akash-functions patch-output
+vercel deploy --prebuilt
+```
+
+Use `AKASH_FUNCTIONS_API_BASE` when pointing the CLI at a non-production
+control-plane server.
+
 ## Workspace scripts
 
 ```bash
