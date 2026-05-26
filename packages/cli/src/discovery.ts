@@ -10,22 +10,32 @@ export async function discoverVercelRoutes(
   config: AkashFunctionsConfig,
 ): Promise<DiscoveredRoute[]> {
   const routes: DiscoveredRoute[] = [];
-  const pagesDir = path.join(cwd, 'src/pages/api');
-  const appDir = path.join(cwd, 'src/app/api');
+  const pagesDirs = [
+    path.join(cwd, 'pages/api'),
+    path.join(cwd, 'src/pages/api'),
+  ];
+  const appDirs = [
+    path.join(cwd, 'app/api'),
+    path.join(cwd, 'src/app/api'),
+  ];
 
-  for (const file of await walkIfExists(pagesDir)) {
-    if (!isRouteFile(file)) continue;
-    const rel = toPosix(path.relative(cwd, file));
-    if (!isIncluded(rel, config)) continue;
-    routes.push(makeRoute('pages-api', cwd, file));
+  for (const dir of pagesDirs) {
+    for (const file of await walkIfExists(dir)) {
+      if (!isRouteFile(file)) continue;
+      const rel = toPosix(path.relative(cwd, file));
+      if (!isIncluded(rel, config)) continue;
+      routes.push(makeRoute('pages-api', cwd, file));
+    }
   }
 
-  for (const file of await walkIfExists(appDir)) {
-    if (!isRouteFile(file)) continue;
-    if (!/\/route\.[^.]+$/.test(toPosix(file))) continue;
-    const rel = toPosix(path.relative(cwd, file));
-    if (!isIncluded(rel, config)) continue;
-    routes.push(makeRoute('app-route', cwd, file));
+  for (const dir of appDirs) {
+    for (const file of await walkIfExists(dir)) {
+      if (!isRouteFile(file)) continue;
+      if (!/\/route\.[^.]+$/.test(toPosix(file))) continue;
+      const rel = toPosix(path.relative(cwd, file));
+      if (!isIncluded(rel, config)) continue;
+      routes.push(makeRoute('app-route', cwd, file));
+    }
   }
 
   return routes.sort((a, b) => a.routePath.localeCompare(b.routePath));
@@ -52,7 +62,7 @@ function makeRoute(kind: RouteKind, cwd: string, file: string): DiscoveredRoute 
 
 function pagesApiPattern(rel: string): string {
   let route = rel
-    .replace(/^src\/pages\/api\//, '/api/')
+    .replace(/^(?:src\/)?pages\/api\//, '/api/')
     .replace(/\.[^.]+$/, '');
   route = route.replace(/\/index$/, '');
   return route || '/api';
@@ -60,7 +70,7 @@ function pagesApiPattern(rel: string): string {
 
 function appRoutePattern(rel: string): string {
   let route = rel
-    .replace(/^src\/app\/api\//, '/api/')
+    .replace(/^(?:src\/)?app\/api\//, '/api/')
     .replace(/\/route\.[^.]+$/, '');
   route = route.replace(/\/index$/, '');
   return route || '/api';

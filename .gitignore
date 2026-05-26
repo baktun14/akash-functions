@@ -11,6 +11,9 @@ build
 .DS_Store
 *.log
 
+# Akash Functions CLI local deploy state
+.akash-functions/
+
 # Drizzle
 packages/server/drizzle/
 

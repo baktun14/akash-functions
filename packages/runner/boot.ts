@@ -182,6 +182,8 @@ let routeTable: RouteEntry[] = [];
 let apiKeyHashes: Set<string> = new Set();
 let requireOriginToken = false;
 let originTokenHashes: Set<string> = new Set();
+const ORIGIN_TOKEN_HEADER = 'x-akash-origin-token';
+const ORIGIN_TOKEN_QUERY = '__akash_origin';
 // Hop-by-hop headers per RFC 7230. Stripped from both request and response so
 // the upstream socket lifecycle doesn't bleed into the user's view of headers.
 const HOP_BY_HOP = new Set([
@@ -389,7 +391,7 @@ function extractApiKey(req: Request): string | null {
 }
 
 function extractOriginToken(req: Request, url: URL): string | null {
-  return req.headers.get('x-akash-origin-token') ?? url.searchParams.get('__akash_origin');
+  return req.headers.get(ORIGIN_TOKEN_HEADER) ?? url.searchParams.get(ORIGIN_TOKEN_QUERY);
 }
 
 function isValidApiKey(plaintext: string): boolean {
@@ -483,7 +485,7 @@ async function handleProxyRequest(req: Request): Promise<Response> {
     if (!token || !isValidOriginToken(token)) {
       return notFoundResponse();
     }
-    url.searchParams.delete('__akash_origin');
+    url.searchParams.delete(ORIGIN_TOKEN_QUERY);
   }
 
   // CORS preflight: forward without auth so the browser can complete the
@@ -519,7 +521,9 @@ async function handleProxyRequest(req: Request): Promise<Response> {
   const upstream = new URL(url.pathname + url.search, `http://127.0.0.1:${upstreamPort}`);
   const headers = new Headers();
   for (const [name, value] of req.headers) {
-    if (HOP_BY_HOP.has(name.toLowerCase())) continue;
+    const lowerName = name.toLowerCase();
+    if (HOP_BY_HOP.has(lowerName)) continue;
+    if (lowerName === ORIGIN_TOKEN_HEADER) continue;
     headers.set(name, value);
   }
 

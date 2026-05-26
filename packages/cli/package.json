@@ -1,7 +1,6 @@
 {
   "name": "@akashnetwork/functions",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "bin": {
     "akash-functions": "./dist/bin.js"
@@ -16,7 +15,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@akash-functions/shared": "*",
     "esbuild": "0.19.12"
   },
   "devDependencies": {
