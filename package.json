@@ -12,6 +12,7 @@
     "dev:web": "npm run dev -w web",
     "dev:stop": "pids=$(lsof -iTCP:8081 -iTCP:5173 -iTCP:5174 -sTCP:LISTEN -t 2>/dev/null); if [ -n \"$pids\" ]; then echo \"$pids\" | xargs kill 2>/dev/null; sleep 1; pids=$(lsof -iTCP:8081 -iTCP:5173 -iTCP:5174 -sTCP:LISTEN -t 2>/dev/null); [ -n \"$pids\" ] && echo \"$pids\" | xargs kill -9 2>/dev/null; fi; true",
     "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "web": "npm run dev -w web",
     "server": "npm run dev -w server",

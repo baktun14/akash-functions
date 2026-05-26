@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "akash-functions": "./dist/bin.js"
+    "akash-functions": "dist/bin.js"
   },
   "exports": {
     ".": "./dist/index.js",
@@ -12,6 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/bin.ts",
+    "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
