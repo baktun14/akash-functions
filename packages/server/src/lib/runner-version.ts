@@ -2,7 +2,7 @@
 // packages/runner/package.json — deployments reporting a lower version on the
 // /api/runner/current poll get flagged as outdated and prompted to use the
 // in-place "Update runner image" flow.
-export const EXPECTED_RUNNER_VERSION = '2.3.0';
+export const EXPECTED_RUNNER_VERSION = '2.4.0';
 
 // Fresh deployments take up to one poll interval (~10s) to report their
 // version. Within this window after `liveAt`, an unknown version is treated as
