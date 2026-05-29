@@ -1,6 +1,7 @@
 import { sql, desc } from 'drizzle-orm';
 import {
   bigint,
+  bigserial,
   check,
   index,
   integer,
@@ -9,6 +10,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -26,6 +28,11 @@ export const functions = pgTable(
     name: text('name').notNull(),
     subdomain: text('subdomain').notNull().unique(),
     status: text('status').notNull().default('draft'),
+    // Source of truth for whether this is a long-lived HTTP **service** or an
+    // ephemeral Python **job** (run-to-completion on a GPU, auto-torn-down).
+    // Immutable at creation — a function is permanently one product or the
+    // other (D3). The entire UI routes on this (FunctionRecord.kind).
+    executionKind: text('execution_kind').notNull().default('service'),
     // Bumped in the same transaction as any function_variables mutation.
     // The runner polls /api/runner/current/:fnId and uses this counter to
     // detect when it should refetch /api/runner/env/:fnId and respawn the
@@ -132,6 +139,30 @@ export const deployments = pgTable('deployments', {
   uris: text('uris').array(),
   state: text('state').notNull().default('pending'),
   errorMessage: text('error_message'),
+  // Denormalized copy of functions.execution_kind so the (keyless) reconciler
+  // can branch on service-vs-job without a join (D3). Set at deployment insert.
+  runKind: text('run_kind').notNull().default('service'),
+  // Run outcome — what the user's script did — is ORTHOGONAL to `state` (the
+  // Akash lease lifecycle). Teardown sets state='closed' within seconds of a
+  // job finishing, which would clobber a success/failure value if it lived in
+  // `state`. So the durable run result lives here, written only by /complete
+  // and cancel, NEVER by teardown (D4). null | succeeded | failed | canceled.
+  runOutcome: text('run_outcome'),
+  // Process exit code reported by the runner on /complete (for the "Exit N"
+  // display). -256..255.
+  exitCode: integer('exit_code'),
+  // When the user's script actually started (first runner heartbeat) and
+  // finished (runner /complete). Distinct from lease createdAt/closedAt.
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
+  // Runaway backstop snapshotted onto the row at submit time (D5/D6). The
+  // reconciler force-terminates a job that overruns this.
+  maxDurationMs: integer('max_duration_ms'),
+  // Autonomous-teardown state machine (D1): null | requested | closing | done.
+  // CAS-claimed by the teardown driver so /complete and the reconciler
+  // watchdog can't double-close.
+  teardownState: text('teardown_state'),
+  teardownAttempts: integer('teardown_attempts').notNull().default(0),
   // Self-reported by the running runner on each /api/runner/current poll. Null
   // means the runner has never reported (legacy image pre-version-reporting,
   // or a fresh deployment that hasn't polled yet — `runnerSeenAt` disambiguates).
@@ -172,7 +203,58 @@ export const functionVariables = pgTable(
     ),
     keyReserved: check(
       'function_variables_key_not_reserved',
-      sql`${table.key} NOT IN ('FUNCTION_ID','INITIAL_VERSION_ID','BACKEND_BASE_URL','RUNNER_TOKEN','POLL_INTERVAL_MS','PORT')`
+      sql`${table.key} NOT IN ('FUNCTION_ID','INITIAL_VERSION_ID','BACKEND_BASE_URL','RUNNER_TOKEN','POLL_INTERVAL_MS','PORT','EXECUTION_KIND','DEPLOYMENT_ID')`
+    ),
+  })
+);
+
+// Encrypted, run-scoped cache of the user's OWN Akash Console API key (D1).
+// Why this exists: the Console key never lives anywhere outside an incoming
+// authed request, but autonomous teardown (close the lease seconds after a job
+// exits, with no browser open) needs a key. So at run-submit — an authed
+// request that carries the key — we cache it encrypted at rest (same AES-256-GCM
+// envelope as function_variables / source), keyed to the wallet, refreshed on
+// every authed request, and evicted when the wallet has no active runs. Read
+// ONLY by the teardown driver; the key NEVER enters the pod.
+//
+// Threat model (see ADR): a server compromise exposes these cached user
+// credentials. Bounded by encryption-at-rest + eviction when no runs are active.
+export const walletConsoleKeys = pgTable('wallet_console_keys', {
+  walletAddress: text('wallet_address').primaryKey(),
+  ciphertext: text('ciphertext').notNull(),
+  iv: text('iv').notNull(),
+  authTag: text('auth_tag').notNull(),
+  keyVersion: integer('key_version').notNull().default(1),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Append-only log lines for job runs. Persists past teardown so a finished run
+// can replay its output. `seq` is monotonic per (deployment, shard); the unique
+// index dedupes retried POSTs from the runner's at-least-once log sink.
+// `shard_index` is 0 today; Phase 2 (.map() fan-out) will use it to interleave
+// N shards under one logical run.
+export const runLogs = pgTable(
+  'run_logs',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    deploymentId: uuid('deployment_id')
+      .notNull()
+      .references(() => deployments.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    stream: text('stream').notNull(),
+    chunk: text('chunk').notNull(),
+    shardIndex: integer('shard_index').notNull().default(0),
+    ts: timestamp('ts', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    deploymentSeqIdx: index('run_logs_deployment_seq_idx').on(
+      table.deploymentId,
+      table.seq
+    ),
+    dedupeIdx: uniqueIndex('run_logs_deployment_shard_seq_uq').on(
+      table.deploymentId,
+      table.shardIndex,
+      table.seq
     ),
   })
 );
@@ -220,3 +302,7 @@ export type ApiKeyRow = typeof apiKeys.$inferSelect;
 export type ApiKeyInsert = typeof apiKeys.$inferInsert;
 export type ProviderHealthRow = typeof providerHealth.$inferSelect;
 export type ProviderHealthInsert = typeof providerHealth.$inferInsert;
+export type WalletConsoleKeyRow = typeof walletConsoleKeys.$inferSelect;
+export type WalletConsoleKeyInsert = typeof walletConsoleKeys.$inferInsert;
+export type RunLogRow = typeof runLogs.$inferSelect;
+export type RunLogInsert = typeof runLogs.$inferInsert;

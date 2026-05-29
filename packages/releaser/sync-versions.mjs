@@ -119,6 +119,18 @@ const runnerTouched = changedFiles.some((f) => f.startsWith('packages/runner/'))
 const userTouchedServer = changedFiles.some((f) => f.startsWith('packages/server/'));
 const webTouched = changedFiles.some((f) => f.startsWith('packages/web/'));
 
+// The python-runner image bakes the supervisor from packages/runner/boot.ts
+// (and preload.ts) at build time, so a change to those files reships the
+// python-runner image too — pyrunner-publish triggers on them. Mirror that
+// here so the python-runner package.json version is bumped in lockstep with
+// the pyrunner-v tag whenever boot.ts/preload.ts (or python-runner itself)
+// changes. There is no in-code version constant to update: the supervisor is
+// byte-identical to the standard runner, which already carries RUNNER_VERSION
+// in boot.ts (handled by the runner block above).
+const pyrunnerTouched =
+  changedFiles.some((f) => f.startsWith('packages/python-runner/')) ||
+  changedFiles.some((f) => f === 'packages/runner/boot.ts' || f === 'packages/runner/preload.ts');
+
 // Any runner change implies we'll write to packages/server/src/lib/runner-version.ts,
 // which causes server-publish to release on merge — so the server is always
 // "touched" when the runner is, for version-tracking purposes.
@@ -134,6 +146,12 @@ if (runnerTouched) {
   didAnything =
     updateStringConst('packages/server/src/lib/runner-version.ts', 'EXPECTED_RUNNER_VERSION', next) ||
     didAnything;
+}
+
+if (pyrunnerTouched) {
+  const next = nextVersionFor('pyrunner-v');
+  console.log(`pyrunner → ${next} (last tag → bump ${level})`);
+  didAnything = updateJsonVersion('packages/python-runner/package.json', next) || didAnything;
 }
 
 if (serverTouched) {

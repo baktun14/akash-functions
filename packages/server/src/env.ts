@@ -34,6 +34,11 @@ const Schema = z.object({
   // `:latest` is resolved to a concrete `:X.Y.Z` at SDL build time (Akash
   // rejects floating tags). See packages/server/src/akash/runner-image.ts.
   RUNNER_IMAGE: z.string().default('ghcr.io/baktun14/akash-functions-runner:latest'),
+  // Image for Python job runs. Same `:latest`→`:X.Y.Z` resolution as
+  // RUNNER_IMAGE, but pinned to the `pyrunner-v*` release train.
+  PYTHON_RUNNER_IMAGE: z
+    .string()
+    .default('ghcr.io/baktun14/akash-functions-python-runner:latest'),
   CODE_SIGNING_SECRET: z.string().min(16).default('dev-secret-change-me-32-bytes-min'),
   CODE_HOST_BASE: z.string().default('http://host.docker.internal:8081'),
   // Console API takes deposit as a number in dollars (the API converts to AKT).
@@ -51,6 +56,22 @@ const Schema = z.object({
     .refine((s) => Buffer.from(s, 'base64').length === 32, {
       message: 'MASTER_ENCRYPTION_KEY must decode to exactly 32 bytes (base64)',
     }),
+
+  // ── Python job (run-to-completion) tuning ──
+  // How long a job lease may sit before its runner's first heartbeat before the
+  // reconciler force-terminates it. Cold image pull + pip can be slow, so this
+  // is generous and SEPARATE from the run duration cap.
+  JOB_BOOT_TIMEOUT_MS: z.coerce.number().default(15 * 60_000),
+  // A `running` job whose runner heartbeat (`runnerSeenAt`) goes stale this long
+  // is presumed dead; the reconciler tears the lease down.
+  JOB_RUNNER_SILENCE_MS: z.coerce.number().default(90_000),
+  // Capped teardown retries before giving up (the lease then relies on
+  // on-chain cross-check / poll-drain fallback).
+  JOB_TEARDOWN_MAX_ATTEMPTS: z.coerce.number().default(8),
+  // Runaway backstop (NOT a cost cap) — generous default, user-overridable,
+  // snapshotted onto the deployment row at submit time. Now genuinely
+  // enforceable because the reconciler holds the cached key (D1).
+  JOB_MAX_DURATION_MS: z.coerce.number().default(6 * 60 * 60_000),
 });
 
 export const env = Schema.parse(process.env);

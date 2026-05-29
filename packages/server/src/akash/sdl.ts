@@ -12,7 +12,7 @@
 
 import yaml from 'js-yaml';
 import { env } from '../env';
-import { resolveRunnerImage } from './runner-image';
+import { resolvePythonRunnerImage, resolveRunnerImage } from './runner-image';
 
 export type GpuSpec = {
   vendor: 'nvidia' | 'amd';
@@ -39,6 +39,14 @@ export type BuildSdlArgs = {
   backendBaseUrl?: string;
   /** Override the runner's poll cadence. Defaults to 10s. */
   pollIntervalMs?: number;
+  /** 'service' (long-lived HTTP, default) or 'job' (run-to-completion Python).
+   *  Jobs use the python-runner image and get EXECUTION_KIND=job + DEPLOYMENT_ID
+   *  injected so the supervisor dispatches to job mode and scopes its
+   *  log/complete callbacks. */
+  executionKind?: 'service' | 'job';
+  /** Deployment (run) row id — REQUIRED for jobs; injected as DEPLOYMENT_ID so
+   *  the runner's /logs and /complete callbacks address the right run. */
+  deploymentId?: string;
 };
 
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
@@ -91,7 +99,15 @@ function normalizeSize(input: string): string {
 export async function buildSdl(args: BuildSdlArgs): Promise<string> {
   const backendBaseUrl = (args.backendBaseUrl ?? env.CODE_HOST_BASE).replace(/\/$/, '');
   const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const runnerImage = await resolveRunnerImage();
+  const executionKind = args.executionKind ?? 'service';
+  const isJob = executionKind === 'job';
+  // Jobs run the Python+CUDA image (which bakes the byte-identical supervisor);
+  // services run the lean Bun image.
+  const runnerImage = isJob ? await resolvePythonRunnerImage() : await resolveRunnerImage();
+
+  if (isJob && !args.deploymentId) {
+    throw new Error('buildSdl: deploymentId is required for job execution kind');
+  }
 
   // Only system-level vars go in the SDL — these are visible to providers.
   // User secrets (function_variables) are fetched separately at runtime.
@@ -103,6 +119,12 @@ export async function buildSdl(args: BuildSdlArgs): Promise<string> {
     `POLL_INTERVAL_MS=${pollIntervalMs}`,
     'PORT=3000',
   ];
+  if (isJob) {
+    // EXECUTION_KIND switches the supervisor to run-to-completion mode;
+    // DEPLOYMENT_ID scopes the run's /logs + /complete callbacks. Keep in
+    // lockstep with RESERVED_ENV_KEYS and the function_variables DB CHECK.
+    envVars.push('EXECUTION_KIND=job', `DEPLOYMENT_ID=${args.deploymentId}`);
+  }
 
   // Inline the GPU block only when requested. Akash SDL expects:
   //   gpu:

@@ -14,6 +14,7 @@ import { deployRouter } from './routes/deploy';
 import { functionsRouter } from './routes/functions';
 import { keysRouter } from './routes/keys';
 import { runnerRouter } from './routes/runner';
+import { runsRouter } from './routes/runs';
 import { log } from './lib/log';
 
 const app = new Hono();
@@ -30,6 +31,8 @@ app.use(
 );
 
 app.get('/api/health', (c) => c.json({ ok: true, runner: env.RUNNER_IMAGE }));
+// runsRouter first so the static `/runs` paths resolve ahead of `/:id`.
+app.route('/api/functions', runsRouter);
 app.route('/api/functions', functionsRouter);
 app.route('/api/functions', deployRouter);
 app.route('/api/keys', keysRouter);

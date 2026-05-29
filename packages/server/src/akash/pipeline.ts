@@ -21,6 +21,12 @@ export type StartDeployArgs = {
   sdl: string;
   /** Service name in the SDL; used to extract URIs from lease status. */
   serviceName: string;
+  /** 'service' (default) or 'job'. Jobs are port-less run-to-completion pods:
+   *  the pipeline must NOT poll for ingress URIs (there are none) — it waits for
+   *  the runner's first heartbeat, then marks the run `running`. */
+  runKind?: 'service' | 'job';
+  /** Runaway backstop for jobs (snapshotted onto the row). */
+  maxDurationMs?: number;
 };
 
 const BID_POLL_INTERVAL_MS = 2000;
@@ -34,12 +40,17 @@ export function startDeployPipeline(args: StartDeployArgs): void {
   });
 }
 
+const JOB_BOOT_POLL_INTERVAL_MS = 3000;
+
 async function runPipeline({
   apiKey,
   deploymentId,
   sdl,
   serviceName,
+  runKind = 'service',
+  maxDurationMs,
 }: StartDeployArgs): Promise<void> {
+  const isJob = runKind === 'job';
   const setState = async (
     state: string,
     extra: Partial<typeof deployments.$inferInsert> = {}
@@ -112,6 +123,41 @@ async function runPipeline({
       oseq: ourLease.id.oseq,
     });
     log.info('lease accepted', { deploymentId, provider: ourLease.id.provider });
+
+    // 4-job. Jobs are port-less — there are no ingress URIs to poll for, and
+    //   HTTP-probing a job pod to death is exactly the failure the reconciler
+    //   guards against. Instead, wait for the runner's first heartbeat
+    //   (runnerSeenAt stamped by /api/runner/current), then mark `running`.
+    //   The boot timeout is generous (cold CUDA image pull + pip).
+    if (isJob) {
+      await pollUntil({
+        label: 'job-runner-heartbeat',
+        intervalMs: JOB_BOOT_POLL_INTERVAL_MS,
+        timeoutMs: env.JOB_BOOT_TIMEOUT_MS,
+        fn: async () => {
+          const [row] = await db
+            .select({ runnerSeenAt: deployments.runnerSeenAt, state: deployments.state })
+            .from(deployments)
+            .where(eq(deployments.id, deploymentId))
+            .limit(1);
+          // A racing /complete (very fast job) may have already moved us past
+          // running — stop waiting in that case.
+          if (row && (row.state === 'closed' || row.state === 'running')) return true;
+          return isRunnerFresh(row?.runnerSeenAt ?? null) ? true : undefined;
+        },
+      });
+      // Only advance to running if a terminal report hasn't already landed.
+      await db
+        .update(deployments)
+        .set({
+          state: 'running',
+          startedAt: new Date(),
+          ...(maxDurationMs ? { maxDurationMs } : {}),
+        })
+        .where(and(eq(deployments.id, deploymentId), eq(deployments.state, 'leased')));
+      log.info('job running', { deploymentId, provider: ourLease.id.provider });
+      return;
+    }
 
     // 4. Poll deployment status for service URIs.
     const uris = await pollUntil({

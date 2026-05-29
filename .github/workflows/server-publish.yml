@@ -249,6 +249,22 @@ jobs:
           echo "Resolved runner image: $image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve python runner image
+        id: python
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=$(gh release list --limit 50 --json tagName --jq \
+            '[.[] | select(.tagName | startswith("pyrunner-v"))][0].tagName' \
+            | sed 's/^pyrunner-v//')
+          if [ -z "$tag" ]; then
+            echo "::error::No pyrunner-v* release exists yet — cannot rebind"
+            exit 1
+          fi
+          image="ghcr.io/baktun14/akash-functions-python-runner:$tag"
+          echo "Resolved python runner image: $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
       - name: Migrate Neon
         env:
           DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
@@ -262,6 +278,7 @@ jobs:
           PROD_CODE_SIGNING_SECRET: ${{ secrets.CODE_SIGNING_SECRET }}
           PROD_CODE_HOST_BASE: ${{ vars.PROD_API_BASE }}
           PROD_RUNNER_IMAGE: ${{ steps.runner.outputs.image }}
+          PROD_PYTHON_RUNNER_IMAGE: ${{ steps.python.outputs.image }}
         run: |
           npm run rebind-prod -w server -- \
             --target=server \

@@ -86,10 +86,13 @@ const ENV_BOOT_FETCH_BACKOFF_MS = 1_000;
 const ENTRY_CANDIDATES = ['/src/index.ts', '/index.ts', '/src/index.tsx', '/index.tsx'];
 
 const env = process.env;
-const FUNCTION_ID = env.FUNCTION_ID;
-const INITIAL_VERSION_ID = env.INITIAL_VERSION_ID;
-const BACKEND_BASE_URL = env.BACKEND_BASE_URL?.replace(/\/$/, '');
-const RUNNER_TOKEN = env.RUNNER_TOKEN;
+// Exported so the job-mode supervisor (./boot-job.ts) reuses the exact same
+// env-derived bindings instead of re-deriving them — keeps the two modes in
+// lockstep on token/base-url normalization.
+export const FUNCTION_ID = env.FUNCTION_ID;
+export const INITIAL_VERSION_ID = env.INITIAL_VERSION_ID;
+export const BACKEND_BASE_URL = env.BACKEND_BASE_URL?.replace(/\/$/, '');
+export const RUNNER_TOKEN = env.RUNNER_TOKEN;
 // External port the provider ingress hits. The runner's reverse proxy listens
 // here and forwards to user code on USER_PORT after auth.
 const EXTERNAL_PORT = Number(env.PORT ?? '3000');
@@ -101,7 +104,13 @@ const POLL_INTERVAL_MS = clampPoll(Number(env.POLL_INTERVAL_MS ?? POLL_DEFAULT_M
 // Reported on every /api/runner/current poll so the dashboard can flag
 // deployments running an outdated runner and offer the in-place update flow.
 // Bump in lockstep with packages/runner/package.json.
-const RUNNER_VERSION = '2.4.0';
+export const RUNNER_VERSION = '2.4.0';
+
+// Execution mode selector. 'service' (default) is the long-lived HTTP supervisor
+// + reverse proxy below. 'job' is the run-to-completion mode in ./boot-job.ts —
+// dispatched at the boot block instead of the service block when set. Lowercased
+// so the SDL can inject 'job'/'JOB'/'Job' interchangeably.
+const EXECUTION_KIND = (process.env.EXECUTION_KIND ?? 'service').toLowerCase();
 
 // Reserved path the runner answers directly (bypasses USER_PORT). The
 // reconciler uses this to verify the provider's ingress routes non-root paths.
@@ -126,7 +135,7 @@ const currentUrl =
   `${BACKEND_BASE_URL}/api/runner/current/${FUNCTION_ID}?v=${encodeURIComponent(RUNNER_VERSION)}`;
 const envUrl = `${BACKEND_BASE_URL}/api/runner/env/${FUNCTION_ID}`;
 const healthUrl = `${BACKEND_BASE_URL}/api/runner/health/${FUNCTION_ID}`;
-const authHeader = { Authorization: `Bearer ${RUNNER_TOKEN}` };
+export const authHeader = { Authorization: `Bearer ${RUNNER_TOKEN}` };
 
 type ProbeResult =
   | { kind: 'ok'; status: number }
@@ -198,6 +207,16 @@ const HOP_BY_HOP = new Set([
 
 // ─── boot ───
 
+// Mode dispatch. Job mode runs the run-to-completion supervisor in a separate
+// module and never starts the reverse proxy / poll-reload loop below. The
+// service block is gated behind the `else` so importing boot.ts from
+// boot-job.ts (for the exported helpers) evaluates this module top-to-bottom
+// WITHOUT re-running the service boot — EXECUTION_KIND is 'job' in that path,
+// so only the job branch fires (which re-imports nothing further from here).
+if (EXECUTION_KIND === 'job') {
+  await import('./boot-job');
+} else {
+// vvv service-mode boot block — kept byte-for-byte; only wrapped in this else vvv
 console.log(
   `[boot] FUNCTION_ID=${FUNCTION_ID} initialVersion=${INITIAL_VERSION_ID} ` +
     `external=${EXTERNAL_PORT} user=${USER_PORT} pollMs=${POLL_INTERVAL_MS}`
@@ -243,6 +262,8 @@ process.on('SIGINT', () => forwardSignal('SIGINT'));
 // Background poll loop. Errors here must never crash the supervisor — keep the
 // running child alive and try again next interval.
 void pollLoop();
+// ^^^ service-mode boot block — kept byte-for-byte; only wrapped in this else ^^^
+}
 
 // ─── implementation ───
 
@@ -543,7 +564,7 @@ async function fetchEnv(): Promise<EnvFetchResult> {
   };
 }
 
-async function fetchEnvWithRetries(): Promise<EnvFetchResult> {
+export async function fetchEnvWithRetries(): Promise<EnvFetchResult> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= ENV_BOOT_FETCH_ATTEMPTS; attempt++) {
     try {
@@ -751,7 +772,7 @@ async function rollbackToVersion(versionId: string): Promise<void> {
   void probeAndReport(versionId);
 }
 
-async function fetchAndExtract(versionId: string, dest: string): Promise<void> {
+export async function fetchAndExtract(versionId: string, dest: string): Promise<void> {
   console.log(`[fetch] ${codeUrl(versionId)} → ${dest}`);
   await mkdir(dest, { recursive: true });
 
@@ -1213,6 +1234,6 @@ function waitForListening(port: number, timeoutMs: number): Promise<boolean> {
   });
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

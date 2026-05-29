@@ -10,6 +10,11 @@ export const RESERVED_ENV_KEYS = [
   'RUNNER_TOKEN',
   'POLL_INTERVAL_MS',
   'PORT',
+  // Job (Python-run) execution. EXECUTION_KIND switches the runner into
+  // run-to-completion mode; DEPLOYMENT_ID scopes the run's log/complete
+  // callbacks. Keep in lockstep with the DB CHECK and sdl.ts.
+  'EXECUTION_KIND',
+  'DEPLOYMENT_ID',
 ] as const;
 
 export type ReservedEnvKey = (typeof RESERVED_ENV_KEYS)[number];

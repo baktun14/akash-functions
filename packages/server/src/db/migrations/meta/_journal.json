@@ -64,6 +64,13 @@
       "when": 1779313119140,
       "tag": "0008_foamy_umar",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1780086198502,
+      "tag": "0009_certain_goblin_queen",
+      "breakpoints": true
     }
   ]
 }

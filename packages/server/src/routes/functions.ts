@@ -13,10 +13,12 @@ import type {
   PresetId,
   ProtectedRoutesResponse,
   PutFunctionVariableResponse,
+  RunOutcome,
 } from '@shared/types';
 import { validateVariableKey } from '@shared/reserved-vars';
 import { ConsoleApiError, consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
+import { drainPendingTeardowns } from '../akash/teardown';
 import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
@@ -93,21 +95,40 @@ functionsRouter.get('/', async (c) => {
     rows.map(async (fn) => ({ fn, dep: await latestDeployment(fn.id) }))
   );
 
-  const list: FunctionRecord[] = decorated.map(({ fn, dep }) => ({
-    id: fn.id,
-    name: fn.name,
-    kind: 'function' as const,
-    ingressUrl: dep?.uris?.[0],
-    image: env.RUNNER_IMAGE,
-    status: dep ? stateToStatus(dep.state, dep.errorMessage) : 'idle',
-    latestDeploymentId: dep?.id,
-    // Only flag live deployments; functions that are idle/pending/failed/closed
-    // either have no runner running or are mid-transition, so an "outdated"
-    // badge would be noise.
-    runnerOutdated:
-      dep?.state === 'live' ? isRunnerOutdated(dep.runnerVersion, dep.liveAt) : false,
-    runnerStale: dep ? isRunnerStale(dep.runnerSeenAt, dep.liveAt, dep.state) : false,
-  }));
+  const list: FunctionRecord[] = decorated.map(({ fn, dep }) => {
+    const isJob = fn.executionKind === 'job';
+    return {
+      id: fn.id,
+      name: fn.name,
+      kind: isJob ? ('python-job' as const) : ('function' as const),
+      // Jobs have no ingress URL (D6).
+      ingressUrl: isJob ? undefined : dep?.uris?.[0],
+      image: isJob ? env.PYTHON_RUNNER_IMAGE : env.RUNNER_IMAGE,
+      status: dep ? stateToStatus(dep.state, dep.errorMessage) : 'idle',
+      latestDeploymentId: dep?.id,
+      // Job cards show the latest run's outcome instead of runner nudges (D6).
+      ...(isJob
+        ? {
+            runOutcome: (dep?.runOutcome as RunOutcome | null) ?? undefined,
+            exitCode: dep?.exitCode ?? undefined,
+            runnerOutdated: false,
+            runnerStale: false,
+          }
+        : {
+            // Only flag live deployments; functions that are idle/pending/
+            // failed/closed either have no runner running or are mid-transition,
+            // so an "outdated" badge would be noise.
+            runnerOutdated:
+              dep?.state === 'live' ? isRunnerOutdated(dep.runnerVersion, dep.liveAt) : false,
+            runnerStale: dep ? isRunnerStale(dep.runnerSeenAt, dep.liveAt, dep.state) : false,
+          }),
+    };
+  });
+
+  // Fallback teardown drain (D1): retry any job lease stuck in
+  // teardown_state='requested' using THIS request's fresh Console key — covers
+  // the rotated-cached-key case. Fire-and-forget.
+  void drainPendingTeardowns(akashKey);
 
   // Fire-and-forget: cross-check on-chain state for any deployment we still
   // believe is live/leased. The reconciler can't do this (no apiKey outside
@@ -962,11 +983,12 @@ function mintSubdomain(name: string): string {
 }
 
 function toRecord(fn: typeof functions.$inferSelect): FunctionRecord {
+  const isJob = fn.executionKind === 'job';
   return {
     id: fn.id,
     name: fn.name,
-    kind: 'function',
-    image: env.RUNNER_IMAGE,
+    kind: isJob ? 'python-job' : 'function',
+    image: isJob ? env.PYTHON_RUNNER_IMAGE : env.RUNNER_IMAGE,
     status: stateToStatus(fn.status),
     createdAt: fn.createdAt.toISOString(),
     updatedAt: fn.updatedAt.toISOString(),
@@ -980,6 +1002,11 @@ function stateToStatus(state: string, errorMessage: string | null = null): Funct
       // is striking out (yellow degraded), or the runner reported a non-fatal
       // runtime error. The lease is still paid, so we don't want it offline.
       return errorMessage ? 'degraded' : 'online';
+    case 'running':
+      // Job lease is up and the user's script is executing. The job card pill
+      // itself is computed from runOutcome+exitCode (D6); this generic status
+      // just reflects "actively up".
+      return 'online';
     case 'pending':
     case 'bidding':
     case 'leased':
