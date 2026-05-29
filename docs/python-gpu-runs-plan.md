@@ -1,6 +1,6 @@
 # Python GPU Runs — Modal-style ephemeral jobs on Akash Functions (grilled & revised)
 
-> Supersedes `/Users/baktun14/.claude/plans/i-want-to-be-synthetic-tide.md`. Same goal and
+> Supersedes the original pre-grill design. Same goal and
 > architecture; this revision incorporates six decisions resolved in a `grill-with-docs` session
 > that were grounded against the actual code. The originals's Phase-1 subsystem detail (log batching,
 > SSE backfill, CI train, etc.) still applies except where contradicted below.
