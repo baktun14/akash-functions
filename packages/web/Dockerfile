@@ -16,6 +16,7 @@ COPY packages/server/package.json ./packages/server/
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/web/package.json ./packages/web/
 COPY packages/runner/package.json ./packages/runner/
+COPY packages/python-runner/package.json ./packages/python-runner/
 COPY packages/releaser/package.json ./packages/releaser/
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 
