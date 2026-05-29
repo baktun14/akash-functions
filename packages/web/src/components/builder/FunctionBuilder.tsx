@@ -8,10 +8,11 @@
 // We let the user deploy with 0 matches (providers come online dynamically)
 // but require an explicit confirm so they don't sit in `bidding` by surprise.
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   CodeSample,
   CreateAndRunRequest,
+  GpuModelOption,
   GpuSpec,
   PresetId,
   ResourceRequest,
@@ -78,16 +79,47 @@ function parseGpuHint(gpu: string): GpuSpec | null {
   return { vendor: m[1] as 'nvidia' | 'amd', model: m[2]! };
 }
 
+// Datacenter-class GPUs in rough capability order — used to pick a sensible
+// AVAILABLE default for a Python job when the preset's hint (h100) is busy.
+const JOB_GPU_PREFERENCE = ['h200', 'h100', 'a100', 'pro6000se', 'l40', 'l4', 'rtx5090'];
+
+// Choose an available GPU for a job: keep `preferred` if it has free capacity;
+// otherwise fall back through the preference list, then to the model with the
+// most free units. Returns `preferred` unchanged when nothing is free (so we
+// don't silently flip the user's pick to "None"). The model list carries live
+// availability from /api/gpu-models.
+function pickAvailableGpu(models: GpuModelOption[], preferred: GpuSpec | null): GpuSpec | null {
+  const avail = models.filter((m) => m.available > 0);
+  if (avail.length === 0) return preferred;
+  if (
+    preferred &&
+    avail.some((m) => m.vendor === preferred.vendor && m.model === preferred.model)
+  ) {
+    return preferred;
+  }
+  for (const model of JOB_GPU_PREFERENCE) {
+    const hit = avail.find((m) => m.model === model);
+    if (hit) return { vendor: hit.vendor, model: hit.model };
+  }
+  const best = avail.slice().sort((a, b) => b.available - a.available)[0]!;
+  return { vendor: best.vendor, model: best.model };
+}
+
 function parseDefaultForm(sample: CodeSample): ResourceForm {
   const cpu = sample.res.cpu.match(/[\d.]+/)?.[0] ?? '0.5';
   const memMatch = sample.res.mem.match(/(\d+)\s*(Mi|Gi)/i);
+  const gpu = parseGpuHint(sample.res.gpu);
+  // A real GPU passthrough (Python jobs) needs room for the CUDA/PyTorch image
+  // + pip wheels — the server floors job storage to 20Gi anyway, so default the
+  // form to match instead of showing a misleading 1Gi.
+  const isGpuJob = gpu != null;
   return {
     cpu,
     memoryValue: memMatch ? parseInt(memMatch[1]!, 10) : 512,
     memoryUnit: (memMatch?.[2]?.replace(/^\w/, (c) => c.toUpperCase()) ?? 'Mi') as SizeUnit,
-    storageValue: 1,
+    storageValue: isGpuJob ? 20 : 1,
     storageUnit: 'Gi',
-    gpu: parseGpuHint(sample.res.gpu),
+    gpu,
   };
 }
 
@@ -184,6 +216,33 @@ export function FunctionBuilder({
   const gpuModelsState = useGpuModels();
   const feasibility = useFeasibility(customResourceRequest, customRes !== null);
 
+  // For Python jobs, auto-correct the GPU to an AVAILABLE model once the live
+  // inventory loads. The preset hint is h100, which is frequently busy — without
+  // this the form opens on "0 providers match" and (worse) a run launched
+  // without opening Adjust would request a busy GPU and never get a bid. Runs
+  // once per preset selection so it sets a good default without fighting a
+  // user's later manual pick.
+  const gpuAutoPicked = useRef(false);
+  useEffect(() => {
+    if (!isPython || gpuModelsState.status !== 'ready' || gpuAutoPicked.current) return;
+    const current = effectiveForm.gpu;
+    const currentAvailable =
+      current != null &&
+      gpuModelsState.models.some(
+        (m) => m.vendor === current.vendor && m.model === current.model && m.available > 0
+      );
+    if (!currentAvailable) {
+      const picked = pickAvailableGpu(gpuModelsState.models, current);
+      if (picked && (picked.model !== current?.model || picked.vendor !== current?.vendor)) {
+        updateForm({ gpu: picked });
+      }
+    }
+    gpuAutoPicked.current = true;
+    // updateForm/effectiveForm are recomputed each render; we intentionally gate
+    // re-runs on the ref, not the dep list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPython, gpuModelsState]);
+
   const updateForm = (patch: Partial<ResourceForm>) => {
     setCustomRes((cur) => ({ ...(cur ?? parseDefaultForm(sample)), ...patch }));
     setConfirmingNoMatch(false);
@@ -201,6 +260,8 @@ export function FunctionBuilder({
     // with "0.25 vCPU" they picked under rest after switching to gpu.
     setCustomRes(null);
     setConfirmingNoMatch(false);
+    // Allow the availability-aware GPU auto-pick to run again for the new preset.
+    gpuAutoPicked.current = false;
   };
 
   const onDeployClick = async () => {
