@@ -14,6 +14,7 @@ import {
 } from 'react-router-dom';
 import type {
   CodeSample,
+  CreateAndRunRequest,
   DeploymentRecord,
   FunctionRecord,
   FunctionVersionDetail,
@@ -216,6 +217,35 @@ function Layout({
     }
   };
 
+  // Python-job "Run" path: create function + first version + first run in one
+  // shot, push the new python-job into local state, and navigate to its
+  // RunPanel so the user watches logs stream live.
+  const handleRun = async (body: CreateAndRunRequest) => {
+    try {
+      const run = await api.createAndRun(body);
+      const svc: FunctionRecord = {
+        id: run.functionId,
+        name: body.name,
+        kind: 'python-job',
+        image: 'ghcr.io/akash-network/python-runner',
+        status: 'pending',
+        deploymentId: run.runId,
+        latestDeploymentId: run.runId,
+      };
+      setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
+      sessionDeploys.mark(svc.id);
+      setBuilderOpen(false);
+      setToast({ kind: 'ok', text: `Running ${body.name}…` });
+      setTimeout(() => setToast(null), 3500);
+      navigate(`/functions/${svc.id}`);
+      refresh().catch(() => undefined);
+    } catch (err) {
+      setBuilderOpen(false);
+      setToast({ kind: 'error', text: `Run failed: ${(err as Error).message}` });
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
   const sidebarActive = pathToSidebarId(location.pathname);
 
   const ctx: LayoutContext = {
@@ -295,6 +325,7 @@ function Layout({
                 initialSource={builderInitialSource}
                 onClose={() => setBuilderOpen(false)}
                 onDeploy={handleDeploy}
+                onRun={handleRun}
                 agentSlot={builderHostsAgent ? agentPanelEl : null}
                 agentOpen={agentOpen}
                 onOpenAgent={() => setAgentOpen(true)}

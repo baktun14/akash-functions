@@ -1,0 +1,168 @@
+name: Publish python runner image
+
+# On main: conventional-commits-driven release. Reads commits since the last
+# `pyrunner-v*` tag scoped to packages/python-runner; if there's a releasable
+# change, computes the next semver, creates a GitHub release (which creates the
+# tag), and publishes the python runner image with that version + :latest.
+# On PRs: builds only, tagged :sha-<short> for verification.
+#
+# Why it ALSO triggers on packages/runner/boot.ts (+ preload.ts): this image
+# bakes the Bun supervisor from packages/runner at build time (byte-identical
+# to the standard runner). A change there must reship this image, so those
+# paths are in the trigger surface even though the release is scoped/versioned
+# off packages/python-runner.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/python-runner/**'
+      - 'packages/runner/boot.ts'
+      - 'packages/runner/preload.ts'
+      - 'packages/releaser/**'
+      - '.github/workflows/pyrunner-publish.yml'
+  pull_request:
+    paths:
+      - 'packages/python-runner/**'
+      - 'packages/runner/boot.ts'
+      - 'packages/runner/preload.ts'
+      - 'packages/releaser/**'
+      - '.github/workflows/pyrunner-publish.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/baktun14/akash-functions-python-runner
+
+jobs:
+  release:
+    name: Compute next version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed for `gh release create` + tag push
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install releaser deps
+        run: npm install --workspace packages/releaser --no-audit --no-fund
+
+      - name: Compute next version from conventional commits
+        id: bump
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          analysis=$(node ./packages/releaser/recommended-bump.js \
+            --tag-prefix=pyrunner-v \
+            --path packages/python-runner \
+            --repo-url "https://github.com/$GITHUB_REPOSITORY" \
+            --target-sha "$TARGET_SHA")
+          echo "$analysis" | jq
+
+          err=$(echo "$analysis" | jq -r '.error // empty')
+          if [ -n "$err" ]; then
+            echo "No releasable change: $err"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version=$(echo "$analysis" | jq -r '.nextVersion')
+          tag=$(echo "$analysis" | jq -r '.nextTag')
+          changelog=$(echo "$analysis" | jq -r '.changelog')
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            echo "$changelog"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release (also creates the git tag)
+        if: steps.bump.outputs.tag != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.bump.outputs.tag }}
+          RELEASE_CHANGELOG: ${{ steps.bump.outputs.changelog }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            --notes "$RELEASE_CHANGELOG"
+
+      # Marker artifact for server-publish's workflow_run handler. Its mere
+      # presence signals "a python-runner release was cut; you should rebind
+      # prod." Absent on no-release runs (e.g. docs-only commits) so
+      # server-publish cleanly skips the rebind instead of restarting prod for
+      # nothing.
+      - name: Write release marker
+        if: steps.bump.outputs.tag != ''
+        run: echo "${{ steps.bump.outputs.tag }}" > pyrunner-released.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.bump.outputs.tag != ''
+        with:
+          name: pyrunner-released
+          path: pyrunner-released.txt
+          retention-days: 1
+
+  build:
+    name: Build python runner image
+    runs-on: ubuntu-latest
+    # On PRs the release job is skipped; on main we need the resolved version.
+    needs: [release]
+    if: |
+      always() &&
+      (needs.release.result == 'skipped' ||
+       needs.release.result == 'success')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ needs.release.outputs.version }},enable=${{ needs.release.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ needs.release.outputs.version != '' }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          # Repo root context so the Dockerfile can COPY packages/runner/boot.ts
+          # (the baked-in supervisor lives outside packages/python-runner).
+          context: .
+          file: packages/python-runner/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

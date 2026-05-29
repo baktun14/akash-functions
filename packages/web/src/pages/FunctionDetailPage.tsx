@@ -2,6 +2,7 @@ import { type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { FunctionRecord } from '@shared/types';
 import { ServicePanel } from '../components/service-panel/ServicePanel';
+import { RunPanel } from '../components/run-panel/RunPanel';
 import { useLayout } from '../App';
 import { api } from '../lib/api';
 import { sessionDeploys } from '../lib/sessionDeploys';
@@ -99,6 +100,23 @@ export function FunctionDetailPage(): ReactElement {
           Back to functions
         </button>
       </div>
+    );
+  }
+
+  // Python-job functions are a distinct product: ephemeral GPU runs with live
+  // log streaming and an exit code — RunPanel, not ServicePanel (D6). Keyed on
+  // svc.id like ServicePanel so tab state resets on function change.
+  if (svc.kind === 'python-job') {
+    return (
+      <RunPanel
+        key={svc.id}
+        svc={svc}
+        session={session}
+        onClose={() => navigate('/functions')}
+        onCloseDeployment={handleCloseDeployment}
+        onDelete={handleDelete}
+        onRename={handleRename}
+      />
     );
   }
 

@@ -13,7 +13,7 @@ import { ensureHttpScheme } from '../../../lib/url';
 import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
-const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased'];
+const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased', 'running'];
 const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
 
@@ -84,6 +84,11 @@ function describe(dep: DeploymentRecord | null): StateMeta {
       return { label: 'Starting', pillClass: 'pill', body: 'Bringing your function online', tone: 'warn' };
     case 'live':
       return { label: 'Active', pillClass: 'pill pill-ok', body: 'ready to receive traffic', tone: 'ok' };
+    case 'running':
+      // Job-only lease phase — the script is executing. Services never reach
+      // this; jobs render in RunPanel, but keep the arm so this tab never shows
+      // a raw state string if a job row ever lands here.
+      return { label: 'Running', pillClass: 'pill pill-ok', body: 'Your run is executing', tone: 'ok' };
     case 'failed':
       return {
         label: 'Failed',

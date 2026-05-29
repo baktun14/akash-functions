@@ -18,7 +18,9 @@ GitHub uses the **PR title** as the default squash-merge commit message. Individ
 | `<type>!:` or `BREAKING CHANGE:` footer | major | yes |
 | `chore:` / `docs:` / `ci:` / `test:` / `style:` | none | no — use these when no release should be cut |
 
-Scope SHOULD match the affected package: `feat(web):`, `fix(server):`, `fix(runner):`. For cross-cutting changes, omit scope.
+Scope SHOULD match the affected package: `feat(web):`, `fix(server):`, `fix(runner):`, `fix(pyrunner):` (for `packages/python-runner/**`). For cross-cutting changes, omit scope.
+
+**`packages/python-runner/**` and the `boot.ts` coupling:** the python-runner image bakes the supervisor from `packages/runner/boot.ts` (+ `preload.ts`) at build time, so [pyrunner-publish.yml](.github/workflows/pyrunner-publish.yml) triggers on **both** `packages/python-runner/**` and `packages/runner/boot.ts`/`preload.ts`. A change to either should carry a `feat`/`fix`/`refactor`/`perf` PR title so a `pyrunner-v*` tag is cut — otherwise prod job leases rebind to the old python-runner image (same failure mode as the runner train). Note a `boot.ts` change bumps **both** `runner-v*` and `pyrunner-v*`.
 
 ### Before merging — checklist
 

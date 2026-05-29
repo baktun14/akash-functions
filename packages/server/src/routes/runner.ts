@@ -21,11 +21,12 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import { db } from '../db/client';
-import { apiKeys, deployments, functionVariables, functionVersions, functions } from '../db/schema';
+import { apiKeys, deployments, functionVariables, functionVersions, functions, runLogs } from '../db/schema';
 import { secrets } from '../lib/secrets';
 import { readSource } from '../lib/source';
 import { verifyToken } from '../lib/signing';
 import { log } from '../lib/log';
+import { requestTeardown } from '../akash/teardown';
 import { decorateRoutesWithAuth } from './deploy';
 import { extractRoutes } from './extract-routes';
 
@@ -121,17 +122,33 @@ runnerRouter.get('/current/:fnId', async (c) => {
   // changed guard would mean a long-lived deployment never refreshes the
   // timestamp and looks permanently stranded. One update per ~10s per
   // deployment is negligible at this scale.
+  // `d=<deploymentId>` is set by JOB runners so the heartbeat stamps only THIS
+  // run's row (concurrent runs are allowed — D6) and we can compute a per-run
+  // `terminal` flag. Service runners omit it and keep the fn-wide stamp.
+  const deploymentParam = c.req.query('d');
   const reportedVersion = c.req.query('v');
   if (reportedVersion && /^\d+\.\d+\.\d+/.test(reportedVersion)) {
     await db
       .update(deployments)
       .set({ runnerVersion: reportedVersion, runnerSeenAt: new Date() })
       .where(
-        and(
-          eq(deployments.functionId, fnId),
-          ne(deployments.state, 'closed')
-        )
+        deploymentParam
+          ? and(eq(deployments.id, deploymentParam), eq(deployments.functionId, fnId))
+          : and(eq(deployments.functionId, fnId), ne(deployments.state, 'closed'))
       );
+  }
+
+  // Terminal guard (D2): a job runner asks, on boot/restart, whether its run is
+  // already finished — if so it idles instead of re-running the script. A run is
+  // terminal once it has a run_outcome or its lease is closed/failed.
+  let terminal = false;
+  if (deploymentParam) {
+    const [dep] = await db
+      .select({ runOutcome: deployments.runOutcome, state: deployments.state })
+      .from(deployments)
+      .where(and(eq(deployments.id, deploymentParam), eq(deployments.functionId, fnId)))
+      .limit(1);
+    terminal = !!dep && (dep.runOutcome != null || dep.state === 'closed' || dep.state === 'failed');
   }
 
   const [version] = await db
@@ -176,6 +193,7 @@ runnerRouter.get('/current/:fnId', async (c) => {
     variablesRevision: fn.variablesRevision,
     apiKeyHashes: keyHashes,
     routes,
+    terminal,
   });
 });
 
@@ -311,6 +329,10 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
   // know which version is *actually running* (vs. /current, which just tells
   // the runner what to download next). Persisting it here keeps
   // deployments.version_id aligned with reality across reloads.
+  // Stamp runnerSeenAt on every health report too (in addition to /current),
+  // so a service runner that reports health but missed a poll window still
+  // looks alive to the staleness check.
+  const seenAt = new Date();
   let updated: { id: string }[];
   if (body.ok) {
     updated = await db
@@ -318,6 +340,7 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
       .set({
         versionId: body.versionId,
         errorMessage: null,
+        runnerSeenAt: seenAt,
         state: sql`CASE WHEN ${deployments.state} = 'failed' THEN 'live' ELSE ${deployments.state} END`,
       })
       .where(and(eq(deployments.functionId, fnId), isNull(deployments.closedAt)))
@@ -325,13 +348,13 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
   } else if (body.fatal) {
     updated = await db
       .update(deployments)
-      .set({ versionId: body.versionId, state: 'failed', errorMessage: formatHealthError(body) })
+      .set({ versionId: body.versionId, state: 'failed', errorMessage: formatHealthError(body), runnerSeenAt: seenAt })
       .where(and(eq(deployments.functionId, fnId), isNull(deployments.closedAt)))
       .returning({ id: deployments.id });
   } else {
     updated = await db
       .update(deployments)
-      .set({ versionId: body.versionId, errorMessage: formatHealthError(body) })
+      .set({ versionId: body.versionId, errorMessage: formatHealthError(body), runnerSeenAt: seenAt })
       .where(
         and(
           eq(deployments.functionId, fnId),
@@ -353,6 +376,154 @@ runnerRouter.post('/health/:fnId', zValidator('json', HealthBody), async (c) => 
   }
 
   return c.json({ updated: updated.length });
+});
+
+// ── Job (Python-run) terminal report (D4 + D1) ──
+//
+// The SOLE reliable terminal signal for a job. Distinct from /health on purpose:
+// /health's fatal branch sets state='failed' (crash semantics), but a clean job
+// exit is success, not a crash. This endpoint is the only writer of run_outcome
+// + exit_code + finished_at, is idempotent (re-POST after a retry is a no-op),
+// and fires the autonomous teardown driver (D1) so the lease closes within
+// seconds with no browser open. Teardown NEVER touches run_outcome (D4).
+const CompleteBody = z.object({
+  deploymentId: z.string().uuid(),
+  versionId: z.string().uuid(),
+  exitCode: z.number().int().min(-256).max(255),
+  phase: z.enum(['run', 'install', 'no-entry', 'spawn', 'gpu-unavailable']),
+  reason: z.string().max(512).optional(),
+  finishedAt: z.string().datetime().optional(),
+});
+
+runnerRouter.post('/complete/:fnId', zValidator('json', CompleteBody), async (c) => {
+  const fnId = c.req.param('fnId');
+  const token = extractToken(c);
+
+  const verified = verifyToken(token, { fnId, allowKinds: ['runner'] });
+  if (!verified.ok) {
+    log.warn('runner token rejected', { fnId, reason: verified.reason, path: c.req.path });
+    throw new HTTPException(401, { message: `Invalid token: ${verified.reason}` });
+  }
+
+  const body = c.req.valid('json');
+  const succeeded = body.phase === 'run' && body.exitCode === 0;
+  const runOutcome = succeeded ? 'succeeded' : 'failed';
+  const finishedAt = body.finishedAt ? new Date(body.finishedAt) : new Date();
+  const errorMessage = succeeded
+    ? null
+    : completeErrorMessage(body.phase, body.exitCode, body.reason);
+
+  // Idempotent: only the FIRST terminal report wins (run_outcome still null).
+  // A retried POST or a racing cancel leaves the durable result untouched.
+  const updated = await db
+    .update(deployments)
+    .set({
+      versionId: body.versionId,
+      runOutcome,
+      exitCode: body.exitCode,
+      finishedAt,
+      errorMessage,
+      teardownState: 'requested',
+    })
+    .where(
+      and(
+        eq(deployments.id, body.deploymentId),
+        eq(deployments.functionId, fnId),
+        isNull(deployments.runOutcome)
+      )
+    )
+    .returning({ id: deployments.id });
+
+  // Fire teardown whether or not this was the first report — a retry that finds
+  // run_outcome already set still needs the lease gone (the prior teardown may
+  // have failed). requestTeardown is idempotent (CAS on teardown_state).
+  void requestTeardown(body.deploymentId);
+
+  log.info('job complete', {
+    fnId,
+    deploymentId: body.deploymentId,
+    phase: body.phase,
+    exitCode: body.exitCode,
+    runOutcome,
+    firstReport: updated.length > 0,
+  });
+  return c.json({ ok: true, firstReport: updated.length > 0 });
+});
+
+function completeErrorMessage(phase: string, exitCode: number, reason?: string): string {
+  const head =
+    phase === 'install'
+      ? `Dependency install failed (exit ${exitCode})`
+      : phase === 'no-entry'
+        ? 'No Python entry point found (expected main.py)'
+        : phase === 'spawn'
+          ? 'Failed to start the Python process'
+          : phase === 'gpu-unavailable'
+            ? 'GPU not visible on this provider (torch.cuda.is_available() was false)'
+            : `Script exited with code ${exitCode}`;
+  const full = reason ? `${head}: ${reason}` : head;
+  return full.length > ERROR_MESSAGE_MAX ? `${full.slice(0, ERROR_MESSAGE_MAX - 1)}…` : full;
+}
+
+// ── Job log ingest ──
+//
+// Batched, at-least-once stream of stdout/stderr chunks. seq is monotonic per
+// (deployment, shard); the unique index dedupes retried POSTs. Logs are
+// lossy/best-effort — the exit code rides /complete, never this channel.
+const LogsBody = z.object({
+  deploymentId: z.string().uuid(),
+  baseSeq: z.number().int().min(0),
+  shardIndex: z.number().int().min(0).default(0),
+  chunks: z
+    .array(
+      z.object({
+        stream: z.enum(['stdout', 'stderr']),
+        text: z.string().max(64 * 1024),
+        ts: z.string().datetime().optional(),
+      })
+    )
+    .max(2048),
+});
+
+// Soft cap on persisted log rows per run, so a runaway logger can't unbound the
+// table. Past the cap we drop new chunks (the runner still has them in pod logs)
+// — a one-time truncation sentinel marks the gap.
+const RUN_LOG_MAX_ROWS = 200_000;
+
+runnerRouter.post('/logs/:fnId', zValidator('json', LogsBody), async (c) => {
+  const fnId = c.req.param('fnId');
+  const token = extractToken(c);
+
+  const verified = verifyToken(token, { fnId, allowKinds: ['runner'] });
+  if (!verified.ok) {
+    throw new HTTPException(401, { message: `Invalid token: ${verified.reason}` });
+  }
+
+  const body = c.req.valid('json');
+  if (body.chunks.length === 0) return c.body(null, 204);
+
+  // Scope check: the deployment must belong to this function.
+  const [dep] = await db
+    .select({ id: deployments.id })
+    .from(deployments)
+    .where(and(eq(deployments.id, body.deploymentId), eq(deployments.functionId, fnId)))
+    .limit(1);
+  if (!dep) throw new HTTPException(404, { message: 'Deployment not found for function' });
+
+  const rows = body.chunks.map((ch, i) => ({
+    deploymentId: body.deploymentId,
+    seq: body.baseSeq + i,
+    stream: ch.stream,
+    chunk: ch.text,
+    shardIndex: body.shardIndex,
+    ts: ch.ts ? new Date(ch.ts) : new Date(),
+  }));
+
+  // onConflictDoNothing on the (deployment, shard, seq) unique index = retry
+  // dedupe. Best-effort; a failed insert just means the runner retries.
+  await db.insert(runLogs).values(rows).onConflictDoNothing();
+
+  return c.body(null, 204);
 });
 
 function sanitizeRelPath(p: string): string {

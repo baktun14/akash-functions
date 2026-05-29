@@ -1,0 +1,10 @@
+{
+  "name": "python-runner",
+  "version": "2.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:image": "docker build -f ./Dockerfile -t akash-fns/python-runner:dev ../..",
+    "smoke": "docker run --rm -e EXECUTION_KIND=job -e FUNCTION_ID -e INITIAL_VERSION_ID -e BACKEND_BASE_URL -e RUNNER_TOKEN akash-fns/python-runner:dev"
+  }
+}

@@ -23,6 +23,10 @@ import type {
   FeasibilityCheck,
   AgentChatRequest,
   AgentChatChunk,
+  RunRecord,
+  CreateRunRequest,
+  CreateAndRunRequest,
+  RunLogChunk,
 } from '@shared/types';
 import {
   AKASHML_KEY,
@@ -125,6 +129,24 @@ export interface ApiClient {
     req: AgentChatRequest,
     signal?: AbortSignal
   ): AsyncIterable<AgentChatChunk>;
+
+  // ── Python GPU runs (job-functions) ──
+  // Kick off a new run of an existing job-function (uses its latest version
+  // unless `versionId` is pinned). The Console key rides the bearer header.
+  createRun(fnId: string, body?: CreateRunRequest): Promise<RunRecord>;
+  // Create a job-function + first version + first run in one shot — the
+  // builder's primary "Run" action. Server sets execution_kind='job'.
+  createAndRun(body: CreateAndRunRequest): Promise<RunRecord>;
+  getRun(fnId: string, runId: string): Promise<RunRecord>;
+  listRuns(fnId: string): Promise<RunRecord[]>;
+  cancelRun(fnId: string, runId: string): Promise<void>;
+  // Streams a run's stdout/stderr as SSE chunks, resuming after `afterSeq`
+  // on reconnect. Mirrors agentChatStream's frame parsing.
+  streamRunLogs(
+    fnId: string,
+    runId: string,
+    opts?: { afterSeq?: number; signal?: AbortSignal }
+  ): AsyncIterable<RunLogChunk>;
 }
 
 // CodeSample.code is tokenized for the template preview. Concatenating the
@@ -161,7 +183,27 @@ const DEFAULT_SERVICES: FunctionRecord[] = [
     image: 'ghcr.io/akash-network/function-bun:1.3.0',
     status: 'online',
   },
+  {
+    // Sample python-job so the RunPanel UI is exercisable in mock mode.
+    id: 'fn-job-1',
+    name: 'gpu-job',
+    kind: 'python-job',
+    image: 'ghcr.io/akash-network/python-runner:1.0.0',
+    status: 'online',
+    runOutcome: 'succeeded',
+    exitCode: 0,
+  },
 ];
+
+const RUNS_KEY_PREFIX = 'akash_functions_runs_v1__';
+
+function readMockRuns(fnId: string): RunRecord[] {
+  return readJSON<RunRecord[]>(RUNS_KEY_PREFIX + fnId) ?? [];
+}
+
+function writeMockRuns(fnId: string, list: RunRecord[]): void {
+  writeJSON(RUNS_KEY_PREFIX + fnId, list);
+}
 
 // Default Hono sample for seeding mock-mode functions that have no recorded
 // versions yet (e.g. the static demo function in DEFAULT_SERVICES).
@@ -633,6 +675,146 @@ class MockApi implements ApiClient {
     }
     yield { type: 'done' };
   }
+
+  // ── Python GPU runs ──
+
+  private synthRun(fnId: string, versionId: string): RunRecord {
+    return {
+      runId: 'run-' + Math.random().toString(36).slice(2, 9),
+      functionId: fnId,
+      versionId,
+      state: 'pending',
+      provider: 'akash1mockprovider',
+      dseq: String(1_000_000 + Math.floor(Math.random() * 9_000_000)),
+      maxDurationMs: 30 * 60_000,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  async createRun(fnId: string, _body?: CreateRunRequest): Promise<RunRecord> {
+    await delay(500);
+    const versions = seedMockVersionsIfEmpty(fnId);
+    const run = this.synthRun(fnId, versions[0]?.id ?? 'mock');
+    writeMockRuns(fnId, [run, ...readMockRuns(fnId)]);
+    return run;
+  }
+
+  async createAndRun(body: CreateAndRunRequest): Promise<RunRecord> {
+    await delay(700);
+    const services = (await this.listServices()).slice();
+    const id = 'fn-' + Math.random().toString(36).slice(2, 7);
+    const baseName = body.name || 'gpu-job';
+    const svc: FunctionRecord = {
+      id,
+      name: baseName,
+      kind: 'python-job',
+      image: 'ghcr.io/akash-network/python-runner:1.0.0',
+      status: 'pending',
+    };
+    services.push(svc);
+    writeJSON(SERVICES_KEY, services);
+
+    // Seed an initial version so the Source tab has content.
+    const versionId = 'v-' + Math.random().toString(36).slice(2, 9);
+    const initial: FunctionVersionDetail = {
+      id: versionId,
+      createdAt: new Date().toISOString(),
+      message: 'Initial version',
+      preset: 'python',
+      isLatest: true,
+      deploymentCount: 1,
+      source: body.source,
+      resources: body.resources,
+      envVars: body.envVars ?? {},
+    };
+    writeMockVersions(id, [initial]);
+
+    const run = this.synthRun(id, versionId);
+    writeMockRuns(id, [run]);
+    return run;
+  }
+
+  async getRun(fnId: string, runId: string): Promise<RunRecord> {
+    await delay(80);
+    const run = readMockRuns(fnId).find((r) => r.runId === runId);
+    if (!run) throw new Error('Run not found');
+    return run;
+  }
+
+  async listRuns(fnId: string): Promise<RunRecord[]> {
+    await delay(100);
+    const existing = readMockRuns(fnId);
+    if (existing.length > 0) return existing;
+    // Seed a finished sample run so the Runs tab + LogConsole are exercisable.
+    const seeded: RunRecord = {
+      runId: 'run-seed-' + fnId.slice(-4),
+      functionId: fnId,
+      versionId: seedMockVersionsIfEmpty(fnId)[0]?.id ?? 'mock',
+      state: 'closed',
+      runOutcome: 'succeeded',
+      exitCode: 0,
+      provider: 'akash1mockprovider',
+      dseq: '1234567',
+      startedAt: new Date(Date.now() - 95_000).toISOString(),
+      finishedAt: new Date(Date.now() - 30_000).toISOString(),
+      maxDurationMs: 30 * 60_000,
+      createdAt: new Date(Date.now() - 120_000).toISOString(),
+      closedAt: new Date(Date.now() - 28_000).toISOString(),
+    };
+    writeMockRuns(fnId, [seeded]);
+    return [seeded];
+  }
+
+  async cancelRun(fnId: string, runId: string): Promise<void> {
+    await delay(150);
+    const list = readMockRuns(fnId).map((r) =>
+      r.runId === runId
+        ? { ...r, state: 'closed' as const, runOutcome: 'canceled' as const, finishedAt: new Date().toISOString(), closedAt: new Date().toISOString() }
+        : r
+    );
+    writeMockRuns(fnId, list);
+  }
+
+  // Canned offline log stream so the LogConsole can be developed without a
+  // backend. Honors afterSeq so reconnect-resume can be exercised.
+  async *streamRunLogs(
+    fnId: string,
+    runId: string,
+    opts?: { afterSeq?: number; signal?: AbortSignal }
+  ): AsyncIterable<RunLogChunk> {
+    const signal = opts?.signal;
+    const after = opts?.afterSeq ?? 0;
+    const lines: Array<{ stream: 'stdout' | 'stderr'; text: string }> = [
+      { stream: 'stdout', text: 'Collecting torch\n' },
+      { stream: 'stdout', text: 'Installing collected packages: torch\n' },
+      { stream: 'stdout', text: '== GPU info ==\n' },
+      { stream: 'stdout', text: 'CUDA available: True\n' },
+      { stream: 'stdout', text: 'Device: NVIDIA H100 80GB HBM3\n' },
+      { stream: 'stderr', text: 'UserWarning: TF32 enabled by default\n' },
+      { stream: 'stdout', text: 'matmul(4096x4096) ok in 12.3ms\n' },
+      { stream: 'stdout', text: 'Done.\n' },
+    ];
+    yield { type: 'state', state: 'running' };
+    let seq = 0;
+    for (const line of lines) {
+      seq += 1;
+      if (seq <= after) continue;
+      if (signal?.aborted) return;
+      await new Promise((r) => setTimeout(r, 250));
+      yield { type: 'log', seq, stream: line.stream, text: line.text, ts: new Date().toISOString() };
+    }
+    if (signal?.aborted) return;
+    await new Promise((r) => setTimeout(r, 300));
+    // Persist the terminal outcome so getRun/listRuns reflect it.
+    const list = readMockRuns(fnId).map((r) =>
+      r.runId === runId
+        ? { ...r, state: 'closed' as const, runOutcome: 'succeeded' as const, exitCode: 0, finishedAt: new Date().toISOString(), closedAt: new Date().toISOString() }
+        : r
+    );
+    writeMockRuns(fnId, list);
+    yield { type: 'state', state: 'closed', runOutcome: 'succeeded', exitCode: 0 };
+    yield { type: 'end' };
+  }
 }
 
 class LiveApi implements ApiClient {
@@ -950,6 +1132,90 @@ class LiveApi implements ApiClient {
           if (!payload) continue;
           try {
             yield JSON.parse(payload) as AgentChatChunk;
+          } catch {
+            // Tolerate malformed frames rather than killing the stream.
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  // ── Python GPU runs ──
+  // The Console key is carried by the bearer auth header (server reads it from
+  // the request), exactly like deploy() — no need to put akashKey in the body.
+
+  async createRun(fnId: string, body?: CreateRunRequest): Promise<RunRecord> {
+    return this.req<RunRecord>(`/api/functions/${fnId}/runs`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  async createAndRun(body: CreateAndRunRequest): Promise<RunRecord> {
+    return this.req<RunRecord>('/api/functions/runs', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async getRun(fnId: string, runId: string): Promise<RunRecord> {
+    return this.req<RunRecord>(`/api/functions/${fnId}/runs/${runId}`);
+  }
+
+  async listRuns(fnId: string): Promise<RunRecord[]> {
+    return this.req<RunRecord[]>(`/api/functions/${fnId}/runs`);
+  }
+
+  async cancelRun(fnId: string, runId: string): Promise<void> {
+    await this.req(`/api/functions/${fnId}/runs/${runId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  async *streamRunLogs(
+    fnId: string,
+    runId: string,
+    opts?: { afterSeq?: number; signal?: AbortSignal }
+  ): AsyncIterable<RunLogChunk> {
+    const qs =
+      opts?.afterSeq != null ? `?afterSeq=${encodeURIComponent(opts.afterSeq)}` : '';
+    const res = await fetch(
+      this.base + `/api/functions/${fnId}/runs/${runId}/logs${qs}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          ...this.authHeader,
+        },
+        signal: opts?.signal,
+      }
+    );
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`${res.status}: ${text || res.statusText}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const line = frame.split('\n').find((l) => l.startsWith('data:'));
+          if (!line) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          try {
+            yield JSON.parse(payload) as RunLogChunk;
           } catch {
             // Tolerate malformed frames rather than killing the stream.
           }

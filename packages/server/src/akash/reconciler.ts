@@ -39,8 +39,10 @@
 import { and, eq, like, lt, notInArray, or } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments, type DeploymentRow } from '../db/schema';
+import { env } from '../env';
 import { log } from '../lib/log';
 import { recordProviderFailure, recordProviderSuccess } from './provider-health';
+import { requestTeardown } from './teardown';
 
 // Reserved path the runner answers directly (bypasses USER_PORT). Probing it
 // through the provider ingress verifies the provider can route arbitrary
@@ -91,6 +93,13 @@ async function reconcileOnce(): Promise<void> {
 }
 
 async function reconcileRow(row: DeploymentRow): Promise<void> {
+  // Jobs are port-less run-to-completion pods. They must NEVER hit the HTTP
+  // reachability probe (there's no ingress to probe — that would HTTP-probe a
+  // port-less pod to death) and they have their own watchdog (D1).
+  if (row.runKind === 'job') {
+    await reconcileJobRow(row);
+    return;
+  }
   if (row.state === 'live') {
     await checkLiveReachability(row);
     return;
@@ -101,6 +110,67 @@ async function reconcileRow(row: DeploymentRow): Promise<void> {
       await failStuckDeploy(row, ageMs);
     }
   }
+}
+
+// Job watchdog (D1). Closes zombie leases autonomously using the cached key —
+// upgraded from the old detect-only behavior. Handles:
+//   - orphan sweep: a terminal run (run_outcome set) whose lease isn't closed
+//     yet (a /complete landed but teardown hasn't finished) → (re)request it.
+//   - overrun: a running job past its max-duration backstop → fail + teardown.
+//   - runner silence: a running job whose heartbeat went stale → presume dead,
+//     fail + teardown.
+//   - boot timeout: a pre-heartbeat job (pending/bidding/leased) older than the
+//     generous JOB_BOOT_TIMEOUT_MS → fail + teardown.
+async function reconcileJobRow(row: DeploymentRow): Promise<void> {
+  const now = Date.now();
+
+  // Orphan: the run finished (outcome recorded) but the lease is still open and
+  // teardown hasn't completed. Nudge the teardown driver again.
+  if (row.runOutcome && row.state !== 'closed' && row.teardownState !== 'done') {
+    await requestTeardown(row.id);
+    return;
+  }
+
+  if (row.state === 'running') {
+    // Overrun backstop.
+    const maxMs = row.maxDurationMs ?? env.JOB_MAX_DURATION_MS;
+    const startedMs = (row.startedAt ?? row.createdAt).getTime();
+    if (now - startedMs > maxMs) {
+      await failJob(row, `run exceeded max duration (${Math.round(maxMs / 1000)}s)`);
+      return;
+    }
+    // Runner silence — the pod went dark mid-run.
+    if (row.runnerSeenAt && now - row.runnerSeenAt.getTime() > env.JOB_RUNNER_SILENCE_MS) {
+      await failJob(row, 'runner went silent during run');
+      return;
+    }
+    return;
+  }
+
+  if (row.state === 'pending' || row.state === 'bidding' || row.state === 'leased') {
+    // Pre-heartbeat boot grace — cold CUDA pull + pip is slow, so jobs get a
+    // much longer leash than the service stuck-deploy timeout.
+    const ageMs = now - row.createdAt.getTime();
+    if (ageMs > env.JOB_BOOT_TIMEOUT_MS) {
+      await failJob(row, 'job did not start within boot timeout');
+    }
+  }
+}
+
+// Mark a job failed (run outcome) and request lease teardown. Idempotent via
+// the state re-assert.
+async function failJob(row: DeploymentRow, reason: string): Promise<void> {
+  await db
+    .update(deployments)
+    .set({
+      runOutcome: row.runOutcome ?? 'failed',
+      errorMessage: row.errorMessage ?? reason,
+      finishedAt: row.finishedAt ?? new Date(),
+      teardownState: row.teardownState ?? 'requested',
+    })
+    .where(and(eq(deployments.id, row.id), eq(deployments.state, row.state)));
+  log.warn('reconciler failing job', { deploymentId: row.id, reason, fromState: row.state });
+  await requestTeardown(row.id);
 }
 
 async function checkLiveReachability(row: DeploymentRow): Promise<void> {

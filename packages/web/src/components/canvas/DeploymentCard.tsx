@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import type { FunctionRecord, ServiceStatus } from '@shared/types';
+import type { FunctionRecord, RunOutcome, ServiceStatus } from '@shared/types';
 import { ensureHttpScheme } from '../../lib/url';
 import { FnLogo, StatusDot } from '../icons';
 
@@ -15,9 +15,34 @@ const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
   idle:     { color: 'var(--fg-subtle, #777)',   label: 'Not deployed' },
 };
 
+// Python-job cards surface the latest run's outcome (runOutcome + exitCode),
+// falling back to the lease status while the run is still in flight. No ingress
+// URL, no runner-outdated nudge — those are service-only concepts (D6).
+function jobTone(svc: FunctionRecord): { color: string; label: string } {
+  const outcome: RunOutcome | undefined = svc.runOutcome;
+  if (outcome === 'succeeded') {
+    return { color: 'var(--ok)', label: `Succeeded · Exit ${svc.exitCode ?? 0}` };
+  }
+  if (outcome === 'failed') {
+    return { color: 'var(--err, #e5484d)', label: `Failed · Exit ${svc.exitCode ?? 1}` };
+  }
+  if (outcome === 'canceled') {
+    return { color: 'var(--fg-subtle, #777)', label: 'Canceled' };
+  }
+  if (svc.status === 'offline') {
+    return { color: 'var(--err, #e5484d)', label: 'Failed' };
+  }
+  if (svc.status === 'pending' || svc.status === 'online') {
+    return { color: 'var(--warn, #f5a524)', label: 'Running' };
+  }
+  return { color: 'var(--fg-subtle, #777)', label: 'Finished' };
+}
+
 export function DeploymentCard({ svc }: Props) {
-  const tone = STATUS_TONE[svc.status];
-  const url = svc.ingressUrl ? ensureHttpScheme(svc.ingressUrl) : null;
+  const isJob = svc.kind === 'python-job';
+  const tone = isJob ? jobTone(svc) : STATUS_TONE[svc.status];
+  // Suppress the ingress URL for python-jobs — runs have no public endpoint.
+  const url = !isJob && svc.ingressUrl ? ensureHttpScheme(svc.ingressUrl) : null;
 
   return (
     <Link
@@ -91,7 +116,7 @@ export function DeploymentCard({ svc }: Props) {
           </span>
         </div>
         <span className="mono" style={{ fontSize: 11, color: 'var(--fg-subtle)' }}>
-          1 replica
+          {isJob ? 'GPU run' : '1 replica'}
         </span>
       </div>
     </Link>

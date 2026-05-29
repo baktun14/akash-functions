@@ -11,12 +11,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type {
   CodeSample,
+  CreateAndRunRequest,
   GpuSpec,
   PresetId,
   ResourceRequest,
 } from '@shared/types';
 import { FnLogo, Icon } from '../icons';
-import { PRESETS, SAMPLES } from '../../data/presets';
+import { PRESETS, SAMPLES, PYTHON_REQUIREMENTS } from '../../data/presets';
 import { ResChip } from './ResChip';
 import { AgentCTACard } from './AgentCTACard';
 import { AkashMLConnect } from './AkashMLConnect';
@@ -42,6 +43,10 @@ type Props = {
     customResources?: ResourceRequest,
     envVars?: Record<string, string>,
   ) => Promise<void>;
+  /** Python-job primary action. When the active preset is `python`, the
+   *  builder's primary button reads "Run" and calls this instead of onDeploy.
+   *  The parent wires it to api.createAndRun + navigates to the RunPanel. */
+  onRun?: (body: CreateAndRunRequest) => Promise<void>;
   /** Agent chat panel — when present, the builder shifts to a 3-column grid
    *  with the agent docked on the right. Layout owns the panel; we just host it. */
   agentSlot?: ReactNode;
@@ -65,6 +70,14 @@ type ResourceForm = {
 
 const CPU_OPTIONS = ['0.25', '0.5', '1', '2', '4', '8'];
 
+// Parse a "vendor model" GPU hint (e.g. "nvidia h100") off the sample's
+// resource chip. Returns null for "no GPU" / "AkashML" / unparseable values.
+function parseGpuHint(gpu: string): GpuSpec | null {
+  const m = gpu.trim().toLowerCase().match(/^(nvidia|amd)\s+(\S+)$/);
+  if (!m) return null;
+  return { vendor: m[1] as 'nvidia' | 'amd', model: m[2]! };
+}
+
 function parseDefaultForm(sample: CodeSample): ResourceForm {
   const cpu = sample.res.cpu.match(/[\d.]+/)?.[0] ?? '0.5';
   const memMatch = sample.res.mem.match(/(\d+)\s*(Mi|Gi)/i);
@@ -74,7 +87,7 @@ function parseDefaultForm(sample: CodeSample): ResourceForm {
     memoryUnit: (memMatch?.[2]?.replace(/^\w/, (c) => c.toUpperCase()) ?? 'Mi') as SizeUnit,
     storageValue: 1,
     storageUnit: 'Gi',
-    gpu: null,
+    gpu: parseGpuHint(sample.res.gpu),
   };
 }
 
@@ -92,6 +105,7 @@ export function FunctionBuilder({
   initialSource,
   onClose,
   onDeploy,
+  onRun,
   agentSlot,
   agentOpen,
   onOpenAgent,
@@ -100,7 +114,7 @@ export function FunctionBuilder({
     initialPreset && SAMPLES[initialPreset] ? initialPreset : 'rest';
   const [preset, setPreset] = useState<PresetId>(initial);
   const [source, setSource] = useState<string>(() =>
-    initialSource ?? tokensToSource(SAMPLES[initial].code)
+    initialSource ?? SAMPLES[initial].source ?? tokensToSource(SAMPLES[initial].code)
   );
   // `prompt` is no longer user-editable in the builder — the agent panel is the
   // prompt surface. We still carry the preset's stock prompt through to
@@ -153,7 +167,11 @@ export function FunctionBuilder({
   const [deploying, setDeploying] = useState(false);
 
   const sample = SAMPLES[preset];
-  const templateSource = useMemo(() => tokensToSource(sample.code), [sample.code]);
+  const isPython = preset === 'python';
+  const templateSource = useMemo(
+    () => sample.source ?? tokensToSource(sample.code),
+    [sample.source, sample.code]
+  );
   const dirty = source !== templateSource || name !== sample.name;
   const trimmedName = name.trim();
   const canDeploy = trimmedName.length > 0 && !missingEnvValues;
@@ -176,7 +194,7 @@ export function FunctionBuilder({
     if (dirty && !confirm('Discard unsaved changes?')) return;
     const ns = SAMPLES[next];
     setPreset(next);
-    setSource(tokensToSource(ns.code));
+    setSource(ns.source ?? tokensToSource(ns.code));
     setPrompt(ns.prompt);
     setName(ns.name);
     // Re-seed the form to the new preset's defaults so the user isn't stuck
@@ -208,11 +226,29 @@ export function FunctionBuilder({
     }
     setDeploying(true);
     try {
-      await onDeploy(
-        { ...sample, name: trimmedName, source, prompt },
-        customResourceRequest ?? undefined,
-        Object.keys(envOut).length > 0 ? envOut : undefined,
-      );
+      if (isPython) {
+        // Python jobs: create-and-run with a { main.py, requirements.txt }
+        // source map and a GPU-bearing resource request.
+        const resources: ResourceRequest = customResourceRequest ?? {
+          cpu: effectiveForm.cpu,
+          memory: `${effectiveForm.memoryValue}${effectiveForm.memoryUnit}`,
+          storage: `${effectiveForm.storageValue}${effectiveForm.storageUnit}`,
+          gpu: effectiveForm.gpu ?? { vendor: 'nvidia', model: 'h100' },
+        };
+        await onRun?.({
+          name: trimmedName,
+          prompt,
+          source: { 'main.py': source, 'requirements.txt': PYTHON_REQUIREMENTS },
+          resources,
+          envVars: Object.keys(envOut).length > 0 ? envOut : undefined,
+        });
+      } else {
+        await onDeploy(
+          { ...sample, name: trimmedName, source, prompt },
+          customResourceRequest ?? undefined,
+          Object.keys(envOut).length > 0 ? envOut : undefined,
+        );
+      }
     } finally {
       setDeploying(false);
     }
@@ -445,7 +481,7 @@ export function FunctionBuilder({
             onClick={onDeployClick}
             disabled={!canDeploy}
             loading={deploying}
-            loadingText="Deploying…"
+            loadingText={isPython ? 'Starting run…' : 'Deploying…'}
             spinnerSize={12}
             style={{
               width: '100%',
@@ -457,7 +493,13 @@ export function FunctionBuilder({
             }}
           >
             <Icon name="play" size={12} color="#0A0A0F" />
-            {confirmingNoMatch ? 'Deploy anyway' : 'Deploy function'}
+            {confirmingNoMatch
+              ? isPython
+                ? 'Run anyway'
+                : 'Deploy anyway'
+              : isPython
+                ? 'Run'
+                : 'Deploy function'}
           </AsyncButton>
           {confirmingNoMatch && (
             <div

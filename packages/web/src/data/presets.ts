@@ -11,6 +11,7 @@ export const PRESETS: Preset[] = [
   { id: 'jsx',  label: 'Website with JSX', icon: 'web' },
   { id: 'cron', label: 'Cron every hour',  icon: 'cron' },
   { id: 'gpu',  label: 'AkashML inference', icon: 'cpu', akash: true },
+  { id: 'python', label: 'Python GPU job', icon: 'bolt', akash: true },
 ];
 
 const restCode: TokenLine[] = [
@@ -76,6 +77,33 @@ const gpuCode: TokenLine[] = [
   [['t', 'Bun'], ['p', '.'], ['f', 'serve'], ['p', '({ '], ['v', 'port'], ['p', ': '], ['n', '3000'], ['p', ', '], ['v', 'fetch'], ['p', ': '], ['v', 'app'], ['p', '.'], ['v', 'fetch'], ['p', ' });']],
 ];
 
+const pythonSource = `# main.py — runs to completion on a GPU, then tears down.
+import torch
+
+print("== GPU info ==")
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("Device:", torch.cuda.get_device_name(0))
+
+# Tiny matmul to prove the GPU is doing work.
+a = torch.randn(4096, 4096, device="cuda")
+b = torch.randn(4096, 4096, device="cuda")
+c = a @ b
+torch.cuda.synchronize()
+print("matmul result sum:", float(c.sum()))
+print("Done.")
+`;
+
+const pythonCode: TokenLine[] = pythonSource
+  .split('\n')
+  .map((line) =>
+    line === ''
+      ? []
+      : line.startsWith('#')
+        ? [['c', line] as const]
+        : [['v', line] as const]
+  );
+
 export const SAMPLES: Record<PresetId, CodeSample> = {
   rest: {
     prompt:
@@ -105,4 +133,16 @@ export const SAMPLES: Record<PresetId, CodeSample> = {
     code: gpuCode,
     res: { cpu: '0.25 vCPU', mem: '256 Mi', gpu: 'AkashML' },
   },
+  python: {
+    prompt:
+      'Run a Python script on an H100 that prints GPU info and does a small ' +
+      'torch matmul, then exits.',
+    name: 'gpu-job',
+    code: pythonCode,
+    source: pythonSource,
+    res: { cpu: '4 vCPU', mem: '16 Gi', gpu: 'nvidia h100' },
+  },
 };
+
+// requirements.txt that ships with the python sample's source map.
+export const PYTHON_REQUIREMENTS = 'torch\n';

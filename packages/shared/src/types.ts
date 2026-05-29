@@ -15,10 +15,23 @@ export type Session = {
 // offline — deployment failed or closed
 export type ServiceStatus = 'online' | 'degraded' | 'offline' | 'pending' | 'idle';
 
+// `function` — a long-lived HTTP service (the original product).
+// `python-job` — an ephemeral Python run: executes to completion on a GPU,
+//   streams stdout/stderr, captures the exit code, and auto-tears-down the
+//   lease. Distinct product, distinct UI (RunPanel vs ServicePanel). Derived
+//   from functions.execution_kind (D3).
+export type FunctionKind = 'function' | 'python-job';
+
 export type FunctionRecord = {
   id: string;
   name: string;
-  kind: 'function';
+  kind: FunctionKind;
+  /** For job-functions only: outcome of the latest run (D4), used by the card
+   *  pill alongside exitCode. */
+  runOutcome?: RunOutcome;
+  /** For job-functions only: exit code of the latest run, for the "Exit N"
+   *  display. */
+  exitCode?: number;
   /** Real ingress hostname of the latest live deployment (e.g.
    *  `abc123.ingress.example.cloud`). Absent on functions with no live
    *  deployment — render-time code must treat as optional. */
@@ -45,7 +58,7 @@ export type FunctionRecord = {
   runnerStale?: boolean;
 };
 
-export type PresetId = 'rest' | 'jsx' | 'cron' | 'gpu';
+export type PresetId = 'rest' | 'jsx' | 'cron' | 'gpu' | 'python';
 
 export type Preset = {
   id: PresetId;
@@ -132,8 +145,19 @@ export type Template = {
 };
 
 // Backend-only, but lives here so both sides agree on the shape.
+//
+// `running` is a real lease phase for **job** deployments: the lease is up, the
+// runner heartbeat is fresh, and the user's script is executing. It is NOT a
+// success/failure value — the run's outcome lives separately in `runOutcome`
+// (D4), because teardown flips `state` to `closed` within seconds of a job
+// finishing and would otherwise clobber the result. Service deployments never
+// enter `running`; they go straight to `live`.
 export type DeploymentState =
-  | 'pending' | 'bidding' | 'leased' | 'live' | 'failed' | 'closed';
+  | 'pending' | 'bidding' | 'leased' | 'live' | 'running' | 'failed' | 'closed';
+
+// What the user's script did, independent of the lease lifecycle (D4). Written
+// only by /complete and cancel; survives the lease close.
+export type RunOutcome = 'succeeded' | 'failed' | 'canceled';
 
 // HTTP route detected from the function's source code. The server scans the
 // source map for `<router>.<verb>("/path", ...)` registrations and surfaces
@@ -190,9 +214,103 @@ export type DeploymentRecord = {
    *  cloudflared tunnel rotated). Recover by pushing a fresh SDL via the same
    *  in-place /update-image flow. */
   runnerStale?: boolean;
+  // ── Job-run fields (run_kind === 'job'); absent/ignored for services ──
+  /** 'service' | 'job' — denormalized from the function's execution kind. */
+  runKind?: 'service' | 'job';
+  /** What the user's script did — independent of `state` (D4). */
+  runOutcome?: RunOutcome;
+  /** Process exit code reported on /complete (the "Exit N" display). */
+  exitCode?: number;
+  /** When the script actually started (first runner heartbeat). */
+  startedAt?: string;
+  /** When the runner reported completion. */
+  finishedAt?: string;
+  /** Runaway backstop snapshotted at submit time. */
+  maxDurationMs?: number;
   createdAt: string;
   liveAt?: string;
   closedAt?: string;
+};
+
+// ── Python job runs ──
+//
+// A "run" is exactly one `deployments` row (no separate runs table) whose
+// run_kind === 'job'. These shapes are the REST + streaming contract a future
+// `akash run script.py --gpu h100` CLI will reuse.
+
+// One execution of a job-function, as the client sees it. `runId` === the
+// deployment row id.
+export type RunRecord = {
+  runId: string;
+  functionId: string;
+  versionId: string;
+  state: DeploymentState;
+  runOutcome?: RunOutcome;
+  exitCode?: number;
+  provider?: string;
+  dseq?: string;
+  /** Provisioning phase for the UI (D5) — derived from state + heartbeat. */
+  startedAt?: string;
+  finishedAt?: string;
+  maxDurationMs?: number;
+  errorMessage?: string;
+  createdAt: string;
+  closedAt?: string;
+};
+
+// Create a new run of an existing job-function (uses its latest version unless
+// pinned).
+export type CreateRunRequest = {
+  versionId?: string;
+  /** The user's Akash Console key, also cached server-side for autonomous
+   *  teardown (D1). Carried on the authed request; reused from the bearer
+   *  token when omitted. */
+  akashKey?: string;
+};
+
+// Create a job-function AND its first version AND kick off the first run, in one
+// transaction (the builder's primary "Run" action).
+export type CreateAndRunRequest = {
+  name: string;
+  prompt?: string;
+  source: Record<string, string>; // path → contents (main.py, requirements.txt)
+  resources: ResourceRequest;
+  envVars?: Record<string, string>;
+};
+
+// Streamed run-log chunks emitted as SSE `data: {json}` frames. Mirrors
+// AgentChatChunk's shape so the client stream helper is near-identical.
+export type RunLogChunk =
+  | { type: 'log'; seq: number; stream: 'stdout' | 'stderr'; text: string; ts: string }
+  | { type: 'state'; state: DeploymentState; runOutcome?: RunOutcome; exitCode?: number }
+  | { type: 'end' }
+  | { type: 'error'; message: string };
+
+// ── Runner → server job callbacks (HMAC-authed on /api/runner/*) ──
+// The runner is a standalone Bun file that does NOT import this package, so it
+// mirrors these shapes inline; this is the server-side source of truth.
+
+// Which phase the run terminated in — distinguishes a clean script exit from a
+// platform failure so the UI can explain pip/entry/GPU problems precisely.
+export type JobCompletePhase = 'run' | 'install' | 'no-entry' | 'spawn' | 'gpu-unavailable';
+
+// POST /api/runner/complete/:fnId — the SOLE reliable terminal signal. Exit
+// rides this channel, never the lossy log channel.
+export type JobCompleteRequest = {
+  deploymentId: string;
+  versionId: string;
+  exitCode: number; // -256..255
+  phase: JobCompletePhase;
+  reason?: string;
+  finishedAt?: string;
+};
+
+// POST /api/runner/logs/:fnId — batched, at-least-once log delivery.
+export type RunLogBatch = {
+  deploymentId: string;
+  baseSeq: number;
+  shardIndex?: number;
+  chunks: Array<{ stream: 'stdout' | 'stderr'; text: string; ts: string }>;
 };
 
 // API request/response shapes
