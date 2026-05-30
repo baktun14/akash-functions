@@ -36,3 +36,23 @@ Optional: `SPIKE_MODELS="a100,h200"`, `SPIKE_DEPOSIT=5`, `SPIKE_BID_WINDOW_MS=45
 | ⚠ **NO BIDS** | nothing bids even single-group at 500k | capacity/region/pricing — try other models, or recalibrate `pricingAmount()` uact ceilings |
 
 If the control bids only at `500k` (not `100k`), the script flags that `pricingAmount()`'s uact ceilings likely need raising.
+
+## Watch & auto-run (run the spike the moment capacity returns)
+
+The market is dry today, so rather than poll by hand, leave
+[watch-and-spike.mjs](watch-and-spike.mjs) running. It polls Console GPU
+inventory (`/gpu` + `/providers`, same landscape pass as the spike) and the
+instant **≥2 datacenter-class models** have an active online+audited provider
+with free GPU, it fires `spike-multigroup.mjs` **without `--accept`** (refundable
+deposits only — no lease accepted) and prints the GO / NO-GO verdict.
+
+```bash
+export AKASH_API_KEY=<your Console API key>
+node packages/server/scripts/watch-and-spike.mjs            # poll, run spike once, exit
+node packages/server/scripts/watch-and-spike.mjs --continue # keep watching after each run
+```
+Knobs: `SPIKE_WATCH_POLL_MS` (default 300000 = 5m), `SPIKE_WATCH_MIN_MODELS`
+(default 2), `SPIKE_WATCH_COOLDOWN_MS` (default 3600000 = 1h, `--continue` only).
+Any spike env (`SPIKE_MODELS`, `SPIKE_DEPOSIT`, `SPIKE_BID_WINDOW_MS`) passes
+through. Because the trigger set equals the spike's biddable set, a fired run
+won't hit the "only one biddable model" inconclusive verdict.
