@@ -91,7 +91,7 @@ explore the UI without a backend or a real Akash key. Set
 | `CODE_SIGNING_SECRET` | dev placeholder | HMAC secret for runner code-fetch tokens |
 | `CODE_HOST_BASE` | `http://host.docker.internal:8081` | Public host the runner uses to fetch source. **Must be reachable from Akash provider containers** — for local dev, run a tunnel (see below). |
 | `DEPLOY_DEPOSIT` | `0.5` | Initial escrow deposit (USD; Console API converts to AKT) |
-| `DEPLOY_PRICING_AMOUNT` | `1000` | uakt/block in the SDL pricing block |
+| `DEPLOY_PRICING_AMOUNT` | `1000` | uact/block in the SDL pricing block |
 | `VITE_API_BASE` | `http://localhost:8081` | Frontend → backend URL |
 | `VITE_API_MODE` | `live` | `live` (real backend + Akash) or `mock` (offline localStorage-only) |
 

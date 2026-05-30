@@ -82,6 +82,17 @@ const Schema = z.object({
   // (which ages a job from createdAt) doesn't fail a still-searching run.
   GPU_FALLBACK_MAX_ATTEMPTS: z.coerce.number().int().positive().default(6),
 
+  // ── Python job GPU multi-group fan-out (initial launch only) ──
+  // Total time to poll bids across all groups of the single multi-group
+  // deployment before giving up (→ wait-for-capacity park, else fail). One
+  // create covers every candidate, so this replaces the sequential path's
+  // MAX_ATTEMPTS × BID_TIMEOUT (~120s) with a single bounded window.
+  GPU_PARALLEL_BID_TIMEOUT_MS: z.coerce.number().default(30_000),
+  // Once a NON-requested group gets an eligible bid, wait this much longer for
+  // the requested (or a better-ranked) group to bid before committing to the
+  // best collected. The requested group short-circuits this window.
+  GPU_PARALLEL_BID_WINDOW_MS: z.coerce.number().default(6_000),
+
   // ── Wait-for-capacity (delayed start) ──
   // Default wait budget when a deploy opts in without specifying one.
   WAIT_FOR_CAPACITY_DEFAULT_MAX_WAIT_MS: z.coerce.number().default(24 * 60 * 60_000), // 24h

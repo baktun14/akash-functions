@@ -19,6 +19,7 @@ import { ConsoleApiError, consoleApi, type Bid, type Lease } from './console-cli
 import { getBlocklistedProviders, recordProviderFailure } from './provider-health';
 import { isRunnerFresh, probeIngress, RUNNER_HEALTH_PATH, toFetchUrl } from './reconciler';
 import { enterWaitingOrFail } from './waiting-driver';
+import { selectEligibleBid } from './bid-select';
 
 export type StartDeployArgs = {
   apiKey: string;
@@ -121,15 +122,8 @@ export async function createAndAcquireLease({
         timeoutMs: bidTimeoutMs,
         fn: async () => {
           const bids = await consoleApi.getBids(apiKey, dseq!);
-          const open = bids.filter((b) => b.state === 'open' || b.state === 'active');
-          if (!open.length) return undefined;
           const blocklisted = await getBlocklistedProviders();
-          const eligible = open.filter((b) => !blocklisted.has(b.id.provider));
-          const byPrice = (a: Bid, b: Bid) => Number(a.price.amount) - Number(b.price.amount);
-          if (eligible.length > 0) {
-            return { bid: eligible.slice().sort(byPrice)[0]!, usedFallback: false };
-          }
-          return { bid: open.slice().sort(byPrice)[0]!, usedFallback: true };
+          return selectEligibleBid(bids, blocklisted);
         },
       });
       bid = picked.bid;
