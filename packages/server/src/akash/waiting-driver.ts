@@ -30,9 +30,9 @@ import {
   type WaitPolicyConfig,
 } from './wait-policy';
 // runs.ts ↔ waiting-driver is a function-level circular import (Seam A in
-// runs.ts calls enterWaitingOrFail; the driver re-invokes runGpuFallback). Both
+// runs.ts calls enterWaitingOrFail; the driver re-invokes runGpuMultiGroup). Both
 // are resolved at call time, never at module-eval time, so ESM handles it.
-import { runGpuFallback, withJobStorageFloor } from '../routes/runs';
+import { runGpuMultiGroup, withJobStorageFloor } from '../routes/runs';
 
 const TERMINAL_STATES = ['closed', 'failed'];
 
@@ -202,10 +202,13 @@ async function fireBurst(row: DeploymentRow, key: string): Promise<void> {
   const isGpu = !!row.gpuModel;
   const isJob = row.runKind === 'job';
 
-  // GPU job → reuse the availability-driven fallback loop (it rebuilds the SDL
-  // per attempt and re-enters enterWaitingOrFail on exhaustion).
+  // GPU job → fan out across all available models in one multi-group deployment,
+  // same as the initial launch. It self-degrades to the sequential single-attempt
+  // path when <2 models have capacity, and re-enters enterWaitingOrFail on
+  // exhaustion. (Each burst is still one bounded ~36s poll, well under the burst
+  // supervisor timeout.)
   if (isJob && isGpu) {
-    await runGpuFallback({
+    await runGpuMultiGroup({
       fnId: row.functionId,
       versionId: row.versionId,
       deploymentId: row.id,

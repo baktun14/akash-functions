@@ -559,10 +559,11 @@ const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolv
 // else best JOB_GPU_PREFERENCE rank, cheapest eligible provider within the
 // winning group), and let the unaccepted groups' bids expire. One dseq / one
 // escrow / one create tx — the proven single-deployment crash-safety (reconciler
-// + teardown + burst supervisor) covers it unchanged. Only launchRun uses this;
-// reconciler retry bursts keep the sequential runGpuFallback (cheap escrow on the
-// patient path). gseq↔candidate mapping is by placement-name order (see
-// groupBidsByCandidate); accept uses the bid's own gseq/oseq/provider.
+// + teardown + burst supervisor) covers it unchanged. Used by both launchRun and
+// the wait-for-capacity reconciler re-bursts (fireBurst), so a parked run keeps
+// fanning out across all available models on every retry, not just the first.
+// gseq↔candidate mapping is by placement-name order (see groupBidsByCandidate);
+// accept uses the bid's own gseq/oseq/provider.
 export async function runGpuMultiGroup(args: {
   fnId: string;
   versionId: string;
