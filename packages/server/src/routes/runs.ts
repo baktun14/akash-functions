@@ -12,15 +12,24 @@
 //   - the pipeline runs in job mode (no URI poll; waits for first heartbeat).
 //   - the user's Console key is cached encrypted for autonomous teardown (D1).
 
-import { and, asc, desc, eq, gt, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNotNull, isNull, notInArray } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
-import type { DeploymentState, RunLogChunk, RunOutcome, RunRecord } from '@shared/types';
-import { startDeployPipeline } from '../akash/pipeline';
+import type {
+  DeploymentState,
+  GpuModelOption,
+  GpuSpec,
+  RunLogChunk,
+  RunOutcome,
+  RunRecord,
+} from '@shared/types';
+import { createAndAcquireLease, finishJobDeploy, startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
+import { consoleApi } from '../akash/console-client';
+import { getAvailableGpuModels, gpuKey, pickNextGpu } from '../akash/gpu-inventory';
 import { cacheWalletKey } from '../akash/key-cache';
 import { cancelRunLease } from '../akash/teardown';
 import { db } from '../db/client';
@@ -124,6 +133,10 @@ runsRouter.post('/runs', zValidator('json', CreateAndRunBody), async (c) => {
         state: 'pending',
         runKind: 'job',
         maxDurationMs: env.JOB_MAX_DURATION_MS,
+        // Seed the requested GPU so the run summary shows it before the pipeline
+        // runs; the fallback loop updates it per attempt.
+        gpuVendor: resources.gpu?.vendor ?? null,
+        gpuModel: resources.gpu?.model ?? null,
       })
       .returning();
     if (!dep) throw new HTTPException(500, { message: 'Failed to record run' });
@@ -173,6 +186,8 @@ runsRouter.post('/:id/runs', zValidator('json', CreateRunBody), async (c) => {
       state: 'pending',
       runKind: 'job',
       maxDurationMs: env.JOB_MAX_DURATION_MS,
+      gpuVendor: resources.gpu?.vendor ?? null,
+      gpuModel: resources.gpu?.model ?? null,
     })
     .returning();
   if (!dep) throw new HTTPException(500, { message: 'Failed to record run' });
@@ -287,6 +302,7 @@ runsRouter.get('/:id/runs/:runId/logs', async (c) => {
           state: deployments.state,
           runOutcome: deployments.runOutcome,
           exitCode: deployments.exitCode,
+          errorMessage: deployments.errorMessage,
         })
         .from(deployments)
         .where(eq(deployments.id, runId))
@@ -302,6 +318,7 @@ runsRouter.get('/:id/runs/:runId/logs', async (c) => {
             state,
             runOutcome: outcome ?? undefined,
             exitCode: run.exitCode ?? undefined,
+            errorMessage: run.errorMessage ?? undefined,
           });
         }
         // Terminal AND caught up (no rows this tick) → end the stream.
@@ -341,8 +358,9 @@ async function ownedJobFunction(fnId: string, walletAddress: string) {
 }
 
 // Build the job SDL (needs the deployment id for DEPLOYMENT_ID) and fire the
-// pipeline in job mode. On SDL-build failure, fail the row rather than leaving
-// it stuck pending.
+// pipeline in job mode. GPU jobs run the availability-driven fallback loop (try
+// the requested GPU, then alternates); gpu-less jobs take the single-attempt
+// pipeline. On SDL-build failure, fail the row rather than leaving it stuck.
 async function launchRun(
   fnId: string,
   versionId: string,
@@ -350,6 +368,15 @@ async function launchRun(
   resources: z.infer<typeof ResourceSchema>,
   akashKey: string
 ): Promise<void> {
+  // Detached: the route returns 201 immediately; deploy work runs in the
+  // background. A crash in the loop fails the row rather than wedging it.
+  if (resources.gpu) {
+    void runGpuFallback({ fnId, versionId, deploymentId, resources, akashKey }).catch(async (err) => {
+      log.error('gpu fallback crashed', { fnId, deploymentId, err: String(err) });
+      await failRun(deploymentId, String(err));
+    });
+    return;
+  }
   try {
     const runnerToken = signRunner({ fnId });
     const sdl = await buildSdl({
@@ -370,11 +397,163 @@ async function launchRun(
     });
   } catch (err) {
     log.error('failed to launch run', { fnId, deploymentId, err: String(err) });
-    await db
-      .update(deployments)
-      .set({ state: 'failed', runOutcome: 'failed', errorMessage: String(err) })
-      .where(eq(deployments.id, deploymentId));
+    await failRun(deploymentId, String(err));
   }
+}
+
+// Availability-driven GPU fallback for a job run. Attempt 0 is always the
+// requested GPU (we honor the user's pick); on no-bid we close that deployment
+// and try the next available datacenter-class model, until a lease lands or
+// candidates are exhausted. `state` stays `bidding` across attempts and
+// `gpu_attempt > 0` is the UI's "searching for another GPU" signal. All writes
+// are guarded against a concurrent cancel (which sets state→closed).
+async function runGpuFallback(args: {
+  fnId: string;
+  versionId: string;
+  deploymentId: string;
+  resources: z.infer<typeof ResourceSchema>;
+  akashKey: string;
+}): Promise<void> {
+  const { fnId, versionId, deploymentId, resources, akashKey } = args;
+  const requested = resources.gpu;
+  if (!requested) {
+    // Defensive — launchRun only routes GPU jobs here.
+    await failRun(deploymentId, 'internal: GPU fallback invoked without a GPU');
+    return;
+  }
+
+  const runnerToken = signRunner({ fnId });
+  const tried = new Set<string>();
+  const triedLabels: string[] = [];
+  let available: GpuModelOption[] | null = null;
+  let lastError: string | null = null;
+
+  for (let attempt = 0; attempt < env.GPU_FALLBACK_MAX_ATTEMPTS; attempt++) {
+    if (await runIsTerminal(deploymentId)) return; // canceled between attempts
+
+    // Pick this attempt's GPU.
+    let gpu: GpuSpec;
+    if (attempt === 0) {
+      gpu = requested;
+    } else {
+      if (!available) {
+        try {
+          available = await getAvailableGpuModels(akashKey);
+        } catch (err) {
+          available = [];
+          lastError = `could not load GPU inventory: ${String(err)}`;
+        }
+      }
+      const next = pickNextGpu(available, tried);
+      if (!next) break; // no untried available GPU left → fail below
+      gpu = next;
+    }
+    tried.add(gpuKey(gpu));
+    triedLabels.push(`${gpu.vendor} ${gpu.model}`);
+
+    // Reflect the current attempt on the row (drives the GPU summary +
+    // "searching" sub-status). Guarded: a no-op means a cancel raced in.
+    const claimed = await db
+      .update(deployments)
+      .set({ gpuVendor: gpu.vendor, gpuModel: gpu.model, gpuAttempt: attempt })
+      .where(and(eq(deployments.id, deploymentId), notInArray(deployments.state, ['closed', 'failed'])))
+      .returning({ id: deployments.id });
+    if (claimed.length === 0) return;
+
+    const sdl = await buildSdl({
+      functionId: fnId,
+      initialVersionId: versionId,
+      runnerToken,
+      resources: { ...resources, gpu },
+      executionKind: 'job',
+      deploymentId,
+    });
+
+    const res = await createAndAcquireLease({
+      apiKey: akashKey,
+      deploymentId,
+      sdl,
+      bidTimeoutMs: env.GPU_FALLBACK_BID_TIMEOUT_MS,
+    });
+
+    // A cancel may have raced in during the attempt. runOutcome is
+    // authoritative — the lease primitive never writes it — so it survives any
+    // `state` write createAndAcquireLease made. Bail and close whatever we just
+    // created so it can't orphan, re-asserting closed if cancel left the state
+    // resurrected to bidding/leased.
+    if (await runIsTerminal(deploymentId)) {
+      await closeDseqBestEffort(akashKey, res.dseq);
+      await db
+        .update(deployments)
+        .set({ state: 'closed' })
+        .where(and(eq(deployments.id, deploymentId), isNotNull(deployments.runOutcome)));
+      return;
+    }
+
+    if (res.outcome === 'leased') {
+      await finishJobDeploy({
+        deploymentId,
+        lease: res.lease,
+        maxDurationMs: env.JOB_MAX_DURATION_MS,
+      });
+      return;
+    }
+
+    // No lease this attempt — close the dseq to reclaim its deposit, then loop
+    // to the next GPU.
+    if (res.outcome === 'error') {
+      lastError = res.message;
+      log.warn('gpu fallback: attempt error', { deploymentId, attempt, gpu: gpuKey(gpu), err: res.message });
+    } else {
+      log.info('gpu fallback: no bids', { deploymentId, attempt, gpu: gpuKey(gpu) });
+    }
+    await closeDseqBestEffort(akashKey, res.dseq);
+  }
+
+  // Exhausted all candidates without a lease.
+  const list = triedLabels.join(', ');
+  const message =
+    `No GPU available — tried ${list || requested.model}; none had free capacity right now.` +
+    (lastError ? ` Last error: ${lastError}.` : '') +
+    ' Please try again in a few minutes.';
+  await failRun(deploymentId, message);
+  log.error('gpu fallback exhausted', { deploymentId, tried: list });
+}
+
+// True once a run has reached a terminal/closed state (e.g. the user canceled),
+// so the fallback loop stops instead of creating another deployment.
+async function runIsTerminal(deploymentId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ state: deployments.state, runOutcome: deployments.runOutcome })
+    .from(deployments)
+    .where(eq(deployments.id, deploymentId))
+    .limit(1);
+  if (!row) return true;
+  return row.runOutcome != null || row.state === 'closed' || row.state === 'failed';
+}
+
+// Close a no-bid deployment to reclaim its escrow deposit. Best-effort with one
+// retry; never throws (a failed close must not block the next attempt).
+async function closeDseqBestEffort(akashKey: string, dseq: string | undefined): Promise<void> {
+  if (!dseq) return;
+  for (let i = 0; i < 2; i++) {
+    try {
+      await consoleApi.closeDeployment(akashKey, dseq);
+      return;
+    } catch (err) {
+      log.warn('gpu fallback: closeDeployment failed', { dseq, attempt: i, err: String(err) });
+    }
+  }
+}
+
+// Mark a run failed with a message, without clobbering a terminal state a cancel
+// or /complete may have already written. Deploy failures carry no exit code, so
+// runOutcome is left unset → the UI shows "Failed" (not "Failed · Exit N").
+async function failRun(deploymentId: string, message: string): Promise<void> {
+  await db
+    .update(deployments)
+    .set({ state: 'failed', errorMessage: message })
+    .where(and(eq(deployments.id, deploymentId), notInArray(deployments.state, ['closed', 'failed'])));
 }
 
 function encryptEnvVars(
@@ -430,6 +609,10 @@ function toRunRecord(dep: typeof deployments.$inferSelect): RunRecord {
     exitCode: dep.exitCode ?? undefined,
     provider: dep.provider ?? undefined,
     dseq: dep.dseq ?? undefined,
+    gpu: dep.gpuModel
+      ? { vendor: (dep.gpuVendor ?? 'nvidia') as GpuSpec['vendor'], model: dep.gpuModel }
+      : undefined,
+    gpuAttempt: dep.gpuAttempt,
     startedAt: dep.startedAt?.toISOString(),
     finishedAt: dep.finishedAt?.toISOString(),
     maxDurationMs: dep.maxDurationMs ?? undefined,

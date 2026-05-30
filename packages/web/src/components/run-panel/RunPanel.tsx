@@ -28,7 +28,7 @@ import {
   computeRunPill,
   estimateCostUsd,
   formatDuration,
-  H100_HOURLY_USD,
+  gpuHourlyUsd,
   isRunActive,
   phaseLabel,
   runDurationMs,
@@ -69,6 +69,7 @@ export function RunPanel({
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [canceling, setCanceling] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
 
   // Live transitions bubbled up from the LogConsole stream so the pill updates
   // without re-fetching (D4).
@@ -99,11 +100,14 @@ export function RunPanel({
     state: DeploymentState;
     runOutcome?: RunOutcome;
     exitCode?: number;
+    errorMessage?: string;
   } = {
     state: streamUpdate?.state ?? selectedRun?.state ?? 'pending',
     runOutcome: streamUpdate?.runOutcome ?? selectedRun?.runOutcome,
     exitCode: streamUpdate?.exitCode ?? selectedRun?.exitCode,
+    errorMessage: streamUpdate?.errorMessage ?? selectedRun?.errorMessage,
   };
+  const failed = merged.runOutcome === 'failed' || merged.state === 'failed';
   const active = isRunActive(merged.state, merged.runOutcome);
   const pill = computeRunPill(merged.state, merged.runOutcome, merged.exitCode);
 
@@ -160,6 +164,25 @@ export function RunPanel({
       alert(`Failed to cancel run: ${(err as Error).message}`);
     } finally {
       setCanceling(false);
+    }
+  };
+
+  // Re-run the job: starts a fresh run of the latest version (same code + GPU
+  // request), so it re-enters the GPU-fallback flow. We jump to the new run.
+  const onRunAgain = async () => {
+    if (rerunning) return;
+    setRerunning(true);
+    try {
+      const run = await api.createRun(svc.id);
+      setStreamUpdate(null);
+      setRuns((cur) => [run, ...cur]);
+      setSelectedRunId(run.runId);
+      setTab('Logs');
+      await loadRuns();
+    } catch (err) {
+      alert(`Failed to start a new run: ${(err as Error).message}`);
+    } finally {
+      setRerunning(false);
     }
   };
 
@@ -278,7 +301,8 @@ export function RunPanel({
             </h1>
             {active && (
               <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginTop: 4 }}>
-                {phaseLabel(merged.state)}…
+                {phaseLabel(merged.state, selectedRun?.gpuAttempt)}
+                {selectedRun?.gpu ? ` · ${selectedRun.gpu.vendor.toUpperCase()} ${selectedRun.gpu.model.toUpperCase()}` : ''}…
               </div>
             )}
           </div>
@@ -294,10 +318,26 @@ export function RunPanel({
               Cancel run
             </AsyncButton>
           )}
+          {!active && selectedRun && (
+            <AsyncButton
+              onClick={onRunAgain}
+              loading={rerunning}
+              loadingText="Starting…"
+              className="btn btn-primary btn-sm"
+              style={{ gap: 6 }}
+            >
+              <Icon name="refresh" size={11} color="#0A0A0F" />
+              Run again
+            </AsyncButton>
+          )}
         </div>
 
         {/* Run-summary row — GPU / provider / duration / exit / est. cost. */}
         <RunSummary run={selectedRun} merged={merged} />
+
+        {failed && merged.errorMessage && (
+          <FailureBanner message={merged.errorMessage} />
+        )}
 
         <div style={{ position: 'relative', display: 'flex', gap: 30, marginTop: 16 }}>
           {TABS.map((t) => (
@@ -387,6 +427,31 @@ function StatusPill({ pill }: { pill: ReturnType<typeof computeRunPill> }) {
   );
 }
 
+function FailureBanner({ message }: { message: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 8,
+        marginTop: 12,
+        padding: '10px 14px',
+        background: 'rgba(229, 72, 77, 0.08)',
+        border: '1px solid rgba(229, 72, 77, 0.35)',
+        borderRadius: 10,
+        fontSize: 12.5,
+        color: 'var(--err, #e5484d)',
+        lineHeight: 1.5,
+      }}
+    >
+      <span style={{ marginTop: 1, flexShrink: 0 }}>
+        <Icon name="info" size={13} color="var(--err, #e5484d)" />
+      </span>
+      <span>{message}</span>
+    </div>
+  );
+}
+
 function RunSummary({
   run,
   merged,
@@ -395,6 +460,10 @@ function RunSummary({
   merged: { state: DeploymentState; runOutcome?: RunOutcome; exitCode?: number };
 }) {
   const durationMs = runDurationMs(run?.startedAt, run?.finishedAt, Date.now());
+  const gpuModel = run?.gpu?.model;
+  const gpuLabel = run?.gpu
+    ? `${run.gpu.vendor.toUpperCase()} ${run.gpu.model.toUpperCase()}`
+    : '—';
   return (
     <div
       style={{
@@ -408,7 +477,7 @@ function RunSummary({
         fontSize: 12.5,
       }}
     >
-      <SummaryItem icon="gpu" label="GPU" value="NVIDIA H100" />
+      <SummaryItem icon="gpu" label="GPU" value={gpuLabel} />
       <SummaryItem
         icon="network"
         label="Provider"
@@ -427,8 +496,8 @@ function RunSummary({
       <SummaryItem
         icon="coin"
         label="Cost (est.)"
-        value={durationMs != null ? `$${estimateCostUsd(durationMs).toFixed(3)}` : '—'}
-        hint={`est. @ $${H100_HOURLY_USD}/hr`}
+        value={durationMs != null ? `$${estimateCostUsd(durationMs, gpuModel).toFixed(3)}` : '—'}
+        hint={`est. @ $${gpuHourlyUsd(gpuModel)}/hr`}
       />
     </div>
   );
