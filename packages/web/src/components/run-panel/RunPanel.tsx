@@ -69,6 +69,7 @@ export function RunPanel({
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [canceling, setCanceling] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
 
   // Live transitions bubbled up from the LogConsole stream so the pill updates
   // without re-fetching (D4).
@@ -163,6 +164,25 @@ export function RunPanel({
       alert(`Failed to cancel run: ${(err as Error).message}`);
     } finally {
       setCanceling(false);
+    }
+  };
+
+  // Re-run the job: starts a fresh run of the latest version (same code + GPU
+  // request), so it re-enters the GPU-fallback flow. We jump to the new run.
+  const onRunAgain = async () => {
+    if (rerunning) return;
+    setRerunning(true);
+    try {
+      const run = await api.createRun(svc.id);
+      setStreamUpdate(null);
+      setRuns((cur) => [run, ...cur]);
+      setSelectedRunId(run.runId);
+      setTab('Logs');
+      await loadRuns();
+    } catch (err) {
+      alert(`Failed to start a new run: ${(err as Error).message}`);
+    } finally {
+      setRerunning(false);
     }
   };
 
@@ -296,6 +316,18 @@ export function RunPanel({
             >
               <Icon name="x" size={11} />
               Cancel run
+            </AsyncButton>
+          )}
+          {!active && selectedRun && (
+            <AsyncButton
+              onClick={onRunAgain}
+              loading={rerunning}
+              loadingText="Starting…"
+              className="btn btn-primary btn-sm"
+              style={{ gap: 6 }}
+            >
+              <Icon name="refresh" size={11} color="#0A0A0F" />
+              Run again
             </AsyncButton>
           )}
         </div>
