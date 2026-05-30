@@ -40,6 +40,31 @@ describe('clampMaxWaitMs', () => {
   });
 });
 
+// Runs default wait-for-capacity ON, but with a shorter default budget than
+// deploys. waitPolicyConfig() and runWaitPolicyConfig() differ ONLY in
+// defaultMaxWaitMs; the floor/ceiling are shared. These cases lock that contract
+// at the pure layer (the configs themselves live in waiting-driver.ts, which
+// imports the DB and can't be unit-imported).
+describe('run vs deploy default budget', () => {
+  const deployCfg: WaitPolicyConfig = { ...cfg, defaultMaxWaitMs: 24 * HOUR };
+  const runCfg: WaitPolicyConfig = { ...cfg, defaultMaxWaitMs: 2 * HOUR };
+
+  it('a run with no explicit budget defaults to 2h, a deploy to 24h', () => {
+    expect(clampMaxWaitMs(undefined, runCfg)).toBe(2 * HOUR);
+    expect(clampMaxWaitMs(undefined, deployCfg)).toBe(24 * HOUR);
+  });
+
+  it('the shorter run default still sits inside the shared [floor, ceiling]', () => {
+    expect(clampMaxWaitMs(undefined, runCfg)).toBeGreaterThanOrEqual(runCfg.minWaitMs);
+    expect(clampMaxWaitMs(undefined, runCfg)).toBeLessThanOrEqual(runCfg.maxWaitMs);
+  });
+
+  it('an explicit per-run maxWaitMs overrides the run default (clamped)', () => {
+    expect(clampMaxWaitMs(6 * HOUR, runCfg)).toBe(6 * HOUR); // user extends past 2h
+    expect(clampMaxWaitMs(30 * 24 * HOUR, runCfg)).toBe(runCfg.maxWaitMs); // capped at 7d
+  });
+});
+
 describe('isWaitCapExceeded', () => {
   const waitingSince = new Date('2026-01-01T00:00:00Z');
 

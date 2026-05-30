@@ -85,6 +85,11 @@ const Schema = z.object({
   // ── Wait-for-capacity (delayed start) ──
   // Default wait budget when a deploy opts in without specifying one.
   WAIT_FOR_CAPACITY_DEFAULT_MAX_WAIT_MS: z.coerce.number().default(24 * 60 * 60_000), // 24h
+  // Runs default to wait-for-capacity ON (a GPU drought parks-and-retries instead
+  // of failing fast), but ephemeral jobs shouldn't silently park for a full day —
+  // so they get this shorter default budget. Still clamped to [MIN, MAX] and
+  // overridable per-run via maxWaitMs (UI hours field).
+  RUN_WAIT_FOR_CAPACITY_DEFAULT_MAX_WAIT_MS: z.coerce.number().default(2 * 60 * 60_000), // 2h
   // Hard ceiling — a user may extend up to here, never beyond.
   WAIT_FOR_CAPACITY_MAX_WAIT_MS: z.coerce.number().default(7 * 24 * 60 * 60_000), // 7d
   // Floor — a wait always gets at least this long (≥ one burst window) so an

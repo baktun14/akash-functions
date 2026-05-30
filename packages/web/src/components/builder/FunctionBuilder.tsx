@@ -196,10 +196,12 @@ export function FunctionBuilder({
   const [customRes, setCustomRes] = useState<ResourceForm | null>(null);
   const [confirmingNoMatch, setConfirmingNoMatch] = useState(false);
   const [deploying, setDeploying] = useState(false);
-  // Wait-for-capacity: opt in to parking the deploy in `waiting` (retried in the
-  // background) instead of failing when no provider/GPU is available right now.
-  const [waitForCapacity, setWaitForCapacity] = useState(false);
-  const [maxWaitHours, setMaxWaitHours] = useState(24);
+  // Wait-for-capacity: park in `waiting` (retried in the background) instead of
+  // failing when no provider/GPU is available right now. Python GPU runs default
+  // it ON with a shorter 2h budget — a drought shouldn't fail a run instantly;
+  // service deploys keep the opt-in default (OFF / 24h).
+  const [waitForCapacity, setWaitForCapacity] = useState(preset === 'python');
+  const [maxWaitHours, setMaxWaitHours] = useState(preset === 'python' ? 2 : 24);
 
   const sample = SAMPLES[preset];
   const isPython = preset === 'python';
@@ -263,8 +265,9 @@ export function FunctionBuilder({
     // with "0.25 vCPU" they picked under rest after switching to gpu.
     setCustomRes(null);
     setConfirmingNoMatch(false);
-    setWaitForCapacity(false);
-    setMaxWaitHours(24);
+    // Mirror the mount default: runs default wait-on (2h), deploys opt-in (24h).
+    setWaitForCapacity(next === 'python');
+    setMaxWaitHours(next === 'python' ? 2 : 24);
     // Allow the availability-aware GPU auto-pick to run again for the new preset.
     gpuAutoPicked.current = false;
   };
@@ -313,7 +316,11 @@ export function FunctionBuilder({
           source: { 'main.py': source, 'requirements.txt': PYTHON_REQUIREMENTS },
           resources,
           envVars: Object.keys(envOut).length > 0 ? envOut : undefined,
-          ...waitOpts,
+          // Send the choice EXPLICITLY: runs default ON server-side, so an
+          // unchecked box must post `waitForCapacity: false` to opt out (a
+          // missing field would otherwise re-enable waiting).
+          waitForCapacity,
+          ...(waitForCapacity ? { maxWaitMs: Math.round(maxWaitHours * 3.6e6) } : {}),
         });
       } else {
         await onDeploy(
