@@ -249,6 +249,13 @@ export type RunRecord = {
   exitCode?: number;
   provider?: string;
   dseq?: string;
+  /** GPU of the current/last deploy attempt. Changes across fallback attempts,
+   *  so it's tracked on the deployment row (not just the version) — drives the
+   *  run-summary GPU + cost display. */
+  gpu?: GpuSpec;
+  /** 0 = the originally-requested GPU; ≥1 = an availability-driven fallback
+   *  attempt. `state==='bidding' && gpuAttempt>0` is the "searching" signal. */
+  gpuAttempt?: number;
   /** Provisioning phase for the UI (D5) — derived from state + heartbeat. */
   startedAt?: string;
   finishedAt?: string;
@@ -282,7 +289,15 @@ export type CreateAndRunRequest = {
 // AgentChatChunk's shape so the client stream helper is near-identical.
 export type RunLogChunk =
   | { type: 'log'; seq: number; stream: 'stdout' | 'stderr'; text: string; ts: string }
-  | { type: 'state'; state: DeploymentState; runOutcome?: RunOutcome; exitCode?: number }
+  | {
+      type: 'state';
+      state: DeploymentState;
+      runOutcome?: RunOutcome;
+      exitCode?: number;
+      /** Set on terminal-failed frames so the UI's failure banner has the
+       *  message even though active-polling stops the instant state flips. */
+      errorMessage?: string;
+    }
   | { type: 'end' }
   | { type: 'error'; message: string };
 
@@ -323,6 +338,20 @@ export type GpuSpec = {
   model: string;       // e.g. 'a100', 'h100', 'rtx4090'
   units?: number;      // default 1
 };
+
+// Datacenter-class GPUs in rough capability order. Used by (a) the builder to
+// pick a sensible AVAILABLE default when the preset's hint (h100) is busy, and
+// (b) the server's GPU-fallback loop to choose the next model to try when the
+// requested one gets no bids. Shared so web and server can't drift.
+export const JOB_GPU_PREFERENCE = [
+  'h200',
+  'h100',
+  'a100',
+  'pro6000se',
+  'l40',
+  'l4',
+  'rtx5090',
+];
 
 export type ResourceRequest = {
   cpu: string;

@@ -71,6 +71,13 @@
       "when": 1780086198502,
       "tag": "0009_certain_goblin_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780100059451,
+      "tag": "0010_chubby_moonstone",
+      "breakpoints": true
     }
   ]
 }

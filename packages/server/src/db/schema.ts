@@ -151,6 +151,14 @@ export const deployments = pgTable('deployments', {
   // Process exit code reported by the runner on /complete (for the "Exit N"
   // display). -256..255.
   exitCode: integer('exit_code'),
+  // GPU of the current/last deploy attempt — for display + cost. For jobs this
+  // can change across availability-driven fallback attempts, so it lives on the
+  // deployment row (not just the version). gpu_attempt: 0 = the originally-
+  // requested GPU; ≥1 = a fallback attempt. `state='bidding' && gpu_attempt>0`
+  // is the UI's "searching for another GPU" signal.
+  gpuVendor: text('gpu_vendor'),
+  gpuModel: text('gpu_model'),
+  gpuAttempt: integer('gpu_attempt').notNull().default(0),
   // When the user's script actually started (first runner heartbeat) and
   // finished (runner /complete). Distinct from lease createdAt/closedAt.
   startedAt: timestamp('started_at', { withTimezone: true }),

@@ -5,6 +5,10 @@
 // 3. Submit the cheapest bid as a lease (the manifest goes to the provider here).
 // 4. Poll the deployment until lease.status.services[serviceName].uris is set.
 // 5. Mark live.
+//
+// The create→bid→lease step is factored into `createAndAcquireLease` (a single
+// attempt that returns a 'no-bid' result instead of throwing), so the Python-job
+// GPU-fallback loop in routes/runs.ts can retry it with a different GPU.
 
 import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client';
@@ -42,29 +46,42 @@ export function startDeployPipeline(args: StartDeployArgs): void {
 
 const JOB_BOOT_POLL_INTERVAL_MS = 3000;
 
-async function runPipeline({
+// Result of one create→bid→lease attempt. 'no-bid' is the expected "no provider
+// has this spec right now" signal — the row is left in `bidding`, NOT failed, so
+// the caller (GPU fallback) can close the dseq and retry on a different GPU.
+export type LeaseAttempt =
+  | { outcome: 'leased'; dseq: string; manifest: string; lease: Lease }
+  | { outcome: 'no-bid'; dseq: string }
+  | { outcome: 'error'; dseq?: string; message: string };
+
+// One deploy attempt: create the deployment, poll bids up to `bidTimeoutMs`, and
+// accept the cheapest eligible bid as a lease. Sets the row to `bidding` (with
+// dseq) then `leased` on success. Never marks the row `failed` — failure modes
+// are returned for the caller to handle.
+export async function createAndAcquireLease({
   apiKey,
   deploymentId,
   sdl,
-  serviceName,
-  runKind = 'service',
-  maxDurationMs,
-}: StartDeployArgs): Promise<void> {
-  const isJob = runKind === 'job';
-  const setState = async (
-    state: string,
-    extra: Partial<typeof deployments.$inferInsert> = {}
-  ) => {
+  bidTimeoutMs,
+}: {
+  apiKey: string;
+  deploymentId: string;
+  sdl: string;
+  bidTimeoutMs: number;
+}): Promise<LeaseAttempt> {
+  const setState = async (state: string, extra: Partial<typeof deployments.$inferInsert> = {}) => {
     await db.update(deployments).set({ state, ...extra }).where(eq(deployments.id, deploymentId));
   };
 
+  let dseq: string | undefined;
   try {
     // 1. Create deployment.
     const created = await consoleApi.createDeployment(apiKey, {
       sdl,
       deposit: env.DEPLOY_DEPOSIT,
     });
-    const { dseq, manifest } = created;
+    dseq = created.dseq;
+    const { manifest } = created;
     await setState('bidding', { dseq });
     log.info('deployment created', { deploymentId, dseq, txHash: created.signTx.transactionHash });
 
@@ -74,31 +91,43 @@ async function runPipeline({
     //    a warning on the row — the user is staring at a deploy spinner and a
     //    hard fail is worse UX than letting them retry on a known-flaky
     //    provider.
-    const { bid, usedFallback } = await pollUntil({
-      label: 'bids',
-      intervalMs: BID_POLL_INTERVAL_MS,
-      timeoutMs: BID_POLL_TIMEOUT_MS,
-      fn: async () => {
-        const bids = await consoleApi.getBids(apiKey, dseq);
-        const open = bids.filter((b) => b.state === 'open' || b.state === 'active');
-        if (!open.length) return undefined;
-        const blocklisted = await getBlocklistedProviders();
-        const eligible = open.filter((b) => !blocklisted.has(b.id.provider));
-        const byPrice = (a: Bid, b: Bid) => Number(a.price.amount) - Number(b.price.amount);
-        if (eligible.length > 0) {
-          return { bid: eligible.slice().sort(byPrice)[0]!, usedFallback: false };
-        }
-        return { bid: open.slice().sort(byPrice)[0]!, usedFallback: true };
-      },
-    });
-    if (usedFallback) {
-      log.warn('all candidate providers in cooldown; using cheapest available anyway', {
-        deploymentId,
-        provider: bid.id.provider,
+    let bid: Bid;
+    try {
+      const picked = await pollUntil({
+        label: 'bids',
+        intervalMs: BID_POLL_INTERVAL_MS,
+        timeoutMs: bidTimeoutMs,
+        fn: async () => {
+          const bids = await consoleApi.getBids(apiKey, dseq!);
+          const open = bids.filter((b) => b.state === 'open' || b.state === 'active');
+          if (!open.length) return undefined;
+          const blocklisted = await getBlocklistedProviders();
+          const eligible = open.filter((b) => !blocklisted.has(b.id.provider));
+          const byPrice = (a: Bid, b: Bid) => Number(a.price.amount) - Number(b.price.amount);
+          if (eligible.length > 0) {
+            return { bid: eligible.slice().sort(byPrice)[0]!, usedFallback: false };
+          }
+          return { bid: open.slice().sort(byPrice)[0]!, usedFallback: true };
+        },
       });
-      await setState('bidding', {
-        errorMessage: 'all candidate providers in cooldown; using cheapest available anyway',
-      });
+      bid = picked.bid;
+      if (picked.usedFallback) {
+        log.warn('all candidate providers in cooldown; using cheapest available anyway', {
+          deploymentId,
+          provider: bid.id.provider,
+        });
+        await setState('bidding', {
+          errorMessage: 'all candidate providers in cooldown; using cheapest available anyway',
+        });
+      }
+    } catch (err) {
+      // The bid poll only throws on timeout (getBids errors are swallowed and
+      // retried inside pollUntil). A timeout means no provider bid on this spec
+      // — return it as a recoverable no-bid rather than a hard failure.
+      if (err instanceof Error && err.message.startsWith('timeout waiting for')) {
+        return { outcome: 'no-bid', dseq };
+      }
+      throw err;
     }
     log.info('bid selected', { deploymentId, provider: bid.id.provider, price: bid.price });
 
@@ -123,39 +152,88 @@ async function runPipeline({
       oseq: ourLease.id.oseq,
     });
     log.info('lease accepted', { deploymentId, provider: ourLease.id.provider });
+    return { outcome: 'leased', dseq, manifest, lease: ourLease };
+  } catch (err) {
+    const message = err instanceof ConsoleApiError ? `${err.code}: ${err.message}` : String(err);
+    return { outcome: 'error', dseq, message };
+  }
+}
 
-    // 4-job. Jobs are port-less — there are no ingress URIs to poll for, and
-    //   HTTP-probing a job pod to death is exactly the failure the reconciler
-    //   guards against. Instead, wait for the runner's first heartbeat
-    //   (runnerSeenAt stamped by /api/runner/current), then mark `running`.
-    //   The boot timeout is generous (cold CUDA image pull + pip).
+// Jobs are port-less — there are no ingress URIs to poll for, and HTTP-probing a
+// job pod to death is exactly the failure the reconciler guards against. Instead,
+// wait for the runner's first heartbeat (runnerSeenAt stamped by
+// /api/runner/current), then mark `running`. The boot timeout is generous (cold
+// CUDA image pull + pip).
+export async function finishJobDeploy({
+  deploymentId,
+  lease,
+  maxDurationMs,
+}: {
+  deploymentId: string;
+  lease: Lease;
+  maxDurationMs?: number;
+}): Promise<void> {
+  await pollUntil({
+    label: 'job-runner-heartbeat',
+    intervalMs: JOB_BOOT_POLL_INTERVAL_MS,
+    timeoutMs: env.JOB_BOOT_TIMEOUT_MS,
+    fn: async () => {
+      const [row] = await db
+        .select({ runnerSeenAt: deployments.runnerSeenAt, state: deployments.state })
+        .from(deployments)
+        .where(eq(deployments.id, deploymentId))
+        .limit(1);
+      // A racing /complete (very fast job) may have already moved us past
+      // running — stop waiting in that case.
+      if (row && (row.state === 'closed' || row.state === 'running')) return true;
+      return isRunnerFresh(row?.runnerSeenAt ?? null) ? true : undefined;
+    },
+  });
+  // Only advance to running if a terminal report hasn't already landed.
+  await db
+    .update(deployments)
+    .set({
+      state: 'running',
+      startedAt: new Date(),
+      ...(maxDurationMs ? { maxDurationMs } : {}),
+    })
+    .where(and(eq(deployments.id, deploymentId), eq(deployments.state, 'leased')));
+  log.info('job running', { deploymentId, provider: lease.id.provider });
+}
+
+async function runPipeline({
+  apiKey,
+  deploymentId,
+  sdl,
+  serviceName,
+  runKind = 'service',
+  maxDurationMs,
+}: StartDeployArgs): Promise<void> {
+  const isJob = runKind === 'job';
+  const setState = async (
+    state: string,
+    extra: Partial<typeof deployments.$inferInsert> = {}
+  ) => {
+    await db.update(deployments).set({ state, ...extra }).where(eq(deployments.id, deploymentId));
+  };
+
+  // Single attempt — services and gpu-less jobs don't do GPU fallback.
+  const attempt = await createAndAcquireLease({
+    apiKey,
+    deploymentId,
+    sdl,
+    bidTimeoutMs: BID_POLL_TIMEOUT_MS,
+  });
+  if (attempt.outcome !== 'leased') {
+    const message = attempt.outcome === 'no-bid' ? 'timeout waiting for bids' : attempt.message;
+    log.error('pipeline failed', { deploymentId, err: message });
+    await setState('failed', { errorMessage: message }).catch(() => undefined);
+    return;
+  }
+
+  try {
     if (isJob) {
-      await pollUntil({
-        label: 'job-runner-heartbeat',
-        intervalMs: JOB_BOOT_POLL_INTERVAL_MS,
-        timeoutMs: env.JOB_BOOT_TIMEOUT_MS,
-        fn: async () => {
-          const [row] = await db
-            .select({ runnerSeenAt: deployments.runnerSeenAt, state: deployments.state })
-            .from(deployments)
-            .where(eq(deployments.id, deploymentId))
-            .limit(1);
-          // A racing /complete (very fast job) may have already moved us past
-          // running — stop waiting in that case.
-          if (row && (row.state === 'closed' || row.state === 'running')) return true;
-          return isRunnerFresh(row?.runnerSeenAt ?? null) ? true : undefined;
-        },
-      });
-      // Only advance to running if a terminal report hasn't already landed.
-      await db
-        .update(deployments)
-        .set({
-          state: 'running',
-          startedAt: new Date(),
-          ...(maxDurationMs ? { maxDurationMs } : {}),
-        })
-        .where(and(eq(deployments.id, deploymentId), eq(deployments.state, 'leased')));
-      log.info('job running', { deploymentId, provider: ourLease.id.provider });
+      await finishJobDeploy({ deploymentId, lease: attempt.lease, maxDurationMs });
       return;
     }
 
@@ -165,8 +243,8 @@ async function runPipeline({
       intervalMs: STATUS_POLL_INTERVAL_MS,
       timeoutMs: STATUS_POLL_TIMEOUT_MS,
       fn: async () => {
-        const detail = await consoleApi.getDeployment(apiKey, dseq);
-        const lease = pickLease(detail.leases, ourLease);
+        const detail = await consoleApi.getDeployment(apiKey, attempt.dseq);
+        const lease = pickLease(detail.leases, attempt.lease);
         const svc = lease?.status?.services?.[serviceName];
         if (svc?.uris && svc.uris.length > 0) return svc.uris;
         return undefined;
@@ -183,7 +261,7 @@ async function runPipeline({
     // should be conclusive for any healthy provider. For broken providers
     // (gcnlab.fyi pattern), this collapses the "Provider's ingress isn't
     // routing requests" surface time from minutes to seconds.
-    void scheduleEagerProbe(deploymentId, ourLease.id.provider, uris[0]).catch((err) =>
+    void scheduleEagerProbe(deploymentId, attempt.lease.id.provider, uris[0]).catch((err) =>
       log.warn('eager smoke probe failed to schedule', { deploymentId, err: String(err) })
     );
   } catch (err) {

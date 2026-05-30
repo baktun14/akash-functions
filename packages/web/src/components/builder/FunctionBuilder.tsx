@@ -17,6 +17,7 @@ import type {
   PresetId,
   ResourceRequest,
 } from '@shared/types';
+import { JOB_GPU_PREFERENCE } from '@shared/types';
 import { FnLogo, Icon } from '../icons';
 import { PRESETS, SAMPLES, PYTHON_REQUIREMENTS } from '../../data/presets';
 import { ResChip } from './ResChip';
@@ -78,10 +79,6 @@ function parseGpuHint(gpu: string): GpuSpec | null {
   if (!m) return null;
   return { vendor: m[1] as 'nvidia' | 'amd', model: m[2]! };
 }
-
-// Datacenter-class GPUs in rough capability order — used to pick a sensible
-// AVAILABLE default for a Python job when the preset's hint (h100) is busy.
-const JOB_GPU_PREFERENCE = ['h200', 'h100', 'a100', 'pro6000se', 'l40', 'l4', 'rtx5090'];
 
 // Choose an available GPU for a job: keep `preferred` if it has free capacity;
 // otherwise fall back through the preference list, then to the model with the

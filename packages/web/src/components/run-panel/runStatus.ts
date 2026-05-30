@@ -63,13 +63,14 @@ export function computeRunPill(
   return { label: 'Finished', tone: 'neutral', color: TONE_COLOR.neutral, active: false };
 }
 
-// D5 — map a provisioning lease state to a human phase label.
-export function phaseLabel(state: DeploymentState): string {
+// D5 — map a provisioning lease state to a human phase label. `gpuAttempt > 0`
+// means the first GPU got no bids and we're hunting an available alternative.
+export function phaseLabel(state: DeploymentState, gpuAttempt = 0): string {
   switch (state) {
     case 'pending':
       return 'Leasing';
     case 'bidding':
-      return 'Reserving GPU';
+      return gpuAttempt > 0 ? 'Searching for another GPU' : 'Reserving GPU';
     case 'leased':
       return 'Pulling image / installing deps';
     case 'running':
@@ -85,12 +86,29 @@ export function phaseLabel(state: DeploymentState): string {
   }
 }
 
-// Rough on-demand H100 price for a clearly-labeled client-side estimate. Not a
-// billing figure — just a back-of-envelope so the user sees order of magnitude.
-export const H100_HOURLY_USD = 2.5;
+// Rough on-demand $/hr by GPU class for a clearly-labeled client-side estimate.
+// Mirrors the server's pricing tiers (sdl.ts pricingAmount). Not a billing
+// figure — just order-of-magnitude. Datacenter rate is the default when the
+// model is unknown.
+const GPU_HOURLY_USD_DATACENTER = 2.5;
+const GPU_HOURLY_USD_MIDTIER = 0.8;
 
-export function estimateCostUsd(durationMs: number): number {
-  return (durationMs / 3_600_000) * H100_HOURLY_USD;
+export function gpuHourlyUsd(model?: string): number {
+  if (!model) return GPU_HOURLY_USD_DATACENTER;
+  const m = model.toLowerCase();
+  // Datacenter / hopper / ada-class — checked first (rtx5090/rtx6000 live here).
+  if (/^(h100|h200|a100|a40|l40|l4|pro6000|rtx6000|rtx5090)/.test(m)) {
+    return GPU_HOURLY_USD_DATACENTER;
+  }
+  // Mid-tier consumer / workstation.
+  if (/^(rtx|gtx|a5000|a4000|t4|p4|p40)/.test(m)) {
+    return GPU_HOURLY_USD_MIDTIER;
+  }
+  return GPU_HOURLY_USD_DATACENTER;
+}
+
+export function estimateCostUsd(durationMs: number, gpuModel?: string): number {
+  return (durationMs / 3_600_000) * gpuHourlyUsd(gpuModel);
 }
 
 // Live duration in ms: startedAt → finishedAt (or now while still running).

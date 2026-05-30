@@ -15,6 +15,7 @@ export type StreamUpdate = {
   state?: DeploymentState;
   runOutcome?: RunOutcome;
   exitCode?: number;
+  errorMessage?: string;
 };
 
 type Props = {
@@ -105,6 +106,7 @@ export function LogConsole({ fnId, runId, active, onStreamUpdate }: Props) {
           state: chunk.state,
           runOutcome: chunk.runOutcome,
           exitCode: chunk.exitCode,
+          errorMessage: chunk.errorMessage,
         });
       }
     };

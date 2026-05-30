@@ -72,6 +72,15 @@ const Schema = z.object({
   // snapshotted onto the deployment row at submit time. Now genuinely
   // enforceable because the reconciler holds the cached key (D1).
   JOB_MAX_DURATION_MS: z.coerce.number().default(6 * 60 * 60_000),
+
+  // ── Python job GPU fallback ──
+  // Per-attempt bid wait for a GPU job. Shorter than the service 60s ceiling so
+  // an unavailable GPU is detected fast and we move to the next candidate.
+  GPU_FALLBACK_BID_TIMEOUT_MS: z.coerce.number().default(20_000),
+  // Max GPUs to try (requested + alternates) before giving up. Keep
+  // MAX_ATTEMPTS × BID_TIMEOUT well under JOB_BOOT_TIMEOUT_MS so the reconciler
+  // (which ages a job from createdAt) doesn't fail a still-searching run.
+  GPU_FALLBACK_MAX_ATTEMPTS: z.coerce.number().int().positive().default(6),
 });
 
 export const env = Schema.parse(process.env);
