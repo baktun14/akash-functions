@@ -28,7 +28,10 @@ import type {
 } from '@shared/types';
 import { closeDseqBestEffort, createAndAcquireLease, finishJobDeploy, startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
-import { getAvailableGpuModels, gpuKey, pickNextGpu } from '../akash/gpu-inventory';
+import { buildMultiGroupGpuCandidates, getAvailableGpuModels, gpuKey, pickNextGpu } from '../akash/gpu-inventory';
+import { groupBidsByCandidate, multiGroupPollOutcome, selectGpuWinner, type GpuWinnerAttempt } from '../akash/bid-select';
+import { consoleApi } from '../akash/console-client';
+import { getBlocklistedProviders } from '../akash/provider-health';
 import { cacheWalletKey } from '../akash/key-cache';
 import { enterWaitingOrFail, waitPolicyConfig } from '../akash/waiting-driver';
 import { clampMaxWaitMs } from '../akash/wait-policy';
@@ -386,8 +389,8 @@ async function launchRun(
   // Detached: the route returns 201 immediately; deploy work runs in the
   // background. A crash in the loop fails the row rather than wedging it.
   if (resources.gpu) {
-    void runGpuFallback({ fnId, versionId, deploymentId, resources, akashKey, waitForCapacity }).catch(async (err) => {
-      log.error('gpu fallback crashed', { fnId, deploymentId, err: String(err) });
+    void runGpuMultiGroup({ fnId, versionId, deploymentId, resources, akashKey, waitForCapacity }).catch(async (err) => {
+      log.error('gpu multi-group crashed', { fnId, deploymentId, err: String(err) });
       await failRun(deploymentId, String(err));
     });
     return;
@@ -538,6 +541,185 @@ export async function runGpuFallback(args: {
     ' Please try again in a few minutes.';
   await enterWaitingOrFail({ deploymentId, waitForCapacity, failMessage: message });
   log.error('gpu fallback exhausted', { deploymentId, tried: list, waitForCapacity });
+}
+
+const MULTIGROUP_BID_POLL_INTERVAL_MS = 2000;
+const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// Initial-launch GPU acquisition via a SINGLE multi-group deployment: offer the
+// requested GPU + available datacenter-class alternates as N placement groups in
+// ONE deployment, poll bids across all groups, accept the best (requested first,
+// else best JOB_GPU_PREFERENCE rank, cheapest eligible provider within the
+// winning group), and let the unaccepted groups' bids expire. One dseq / one
+// escrow / one create tx — the proven single-deployment crash-safety (reconciler
+// + teardown + burst supervisor) covers it unchanged. Only launchRun uses this;
+// reconciler retry bursts keep the sequential runGpuFallback (cheap escrow on the
+// patient path). gseq↔candidate mapping is by placement-name order (see
+// groupBidsByCandidate); accept uses the bid's own gseq/oseq/provider.
+export async function runGpuMultiGroup(args: {
+  fnId: string;
+  versionId: string;
+  deploymentId: string;
+  resources: z.infer<typeof ResourceSchema>;
+  akashKey: string;
+  waitForCapacity?: boolean;
+}): Promise<void> {
+  const { fnId, versionId, deploymentId, resources, akashKey, waitForCapacity = false } = args;
+  const requested = resources.gpu;
+  if (!requested) {
+    await failRun(deploymentId, 'internal: GPU multi-group invoked without a GPU');
+    return;
+  }
+  if (await runIsTerminal(deploymentId)) return;
+
+  // Candidates: requested first, then available datacenter-class alternates.
+  let available: GpuModelOption[] = [];
+  try {
+    available = await getAvailableGpuModels(akashKey);
+  } catch (err) {
+    log.warn('multi-group: GPU inventory load failed; offering requested only', {
+      deploymentId,
+      err: String(err),
+    });
+  }
+  const candidates = buildMultiGroupGpuCandidates(available, requested);
+
+  // No alternates to fan out → use the proven sequential single-attempt path
+  // (which also owns the wait-for-capacity exhaustion handling).
+  if (candidates.length < 2) {
+    await runGpuFallback(args);
+    return;
+  }
+
+  // Reflect the requested GPU on the row; attempt 0 drives the UI's "Reserving
+  // GPU" sub-status. Guarded against a racing cancel.
+  const claimed = await db
+    .update(deployments)
+    .set({ gpuVendor: requested.vendor, gpuModel: requested.model, gpuAttempt: 0, state: 'bidding' })
+    .where(and(eq(deployments.id, deploymentId), notInArray(deployments.state, ['closed', 'failed'])))
+    .returning({ id: deployments.id });
+  if (claimed.length === 0) return;
+
+  const runnerToken = signRunner({ fnId });
+  const sdl = await buildSdl({
+    functionId: fnId,
+    initialVersionId: versionId,
+    runnerToken,
+    resources,
+    executionKind: 'job',
+    deploymentId,
+    gpuGroups: candidates,
+  });
+
+  // One create tx for all groups.
+  const created = await consoleApi
+    .createDeployment(akashKey, { sdl, deposit: env.DEPLOY_DEPOSIT })
+    .catch(async (err) => {
+      await enterWaitingOrFail({
+        deploymentId,
+        waitForCapacity,
+        failMessage: `Could not create GPU deployment: ${String(err)}`,
+      });
+      return null;
+    });
+  if (!created) return;
+  const { dseq, manifest } = created;
+  // Persist dseq immediately so the reconciler can sweep this row if we crash
+  // mid-poll (boot-timeout → teardown, or → waiting under wait-for-capacity).
+  await db.update(deployments).set({ dseq }).where(eq(deployments.id, deploymentId));
+
+  const offered = candidates.map((c) => c.model).join(', ');
+  const closeAndExit = async (failMessage: string) => {
+    await closeDseqBestEffort(akashKey, dseq);
+    await enterWaitingOrFail({ deploymentId, waitForCapacity, failMessage });
+  };
+  const exitIfCanceled = async (): Promise<boolean> => {
+    if (!(await runIsTerminal(deploymentId))) return false;
+    await closeDseqBestEffort(akashKey, dseq);
+    await db
+      .update(deployments)
+      .set({ state: 'closed' })
+      .where(and(eq(deployments.id, deploymentId), isNotNull(deployments.runOutcome)));
+    return true;
+  };
+
+  try {
+    // Poll bids across all groups until the requested group bids (short-circuit)
+    // or the collection window closes; bounded by GPU_PARALLEL_BID_TIMEOUT_MS.
+    const deadline = Date.now() + env.GPU_PARALLEL_BID_TIMEOUT_MS;
+    let windowStartedAt: number | null = null;
+    let ranked: GpuWinnerAttempt[] = [];
+    while (Date.now() < deadline) {
+      if (await exitIfCanceled()) return;
+      const bids = await consoleApi.getBids(akashKey, dseq);
+      const blocklisted = await getBlocklistedProviders();
+      ranked = selectGpuWinner(groupBidsByCandidate(bids, candidates), blocklisted);
+      const outcome = multiGroupPollOutcome(ranked, 1, windowStartedAt, Date.now(), env.GPU_PARALLEL_BID_WINDOW_MS);
+      if (outcome === 'accept') break;
+      if (outcome === 'open-window') windowStartedAt = Date.now();
+      await sleepMs(MULTIGROUP_BID_POLL_INTERVAL_MS);
+    }
+
+    if (await exitIfCanceled()) return;
+
+    // No eligible bid on any group within the window → close + park/fail.
+    if (!ranked.length) {
+      await closeAndExit(
+        `No GPU available — offered ${offered}; none had free capacity right now. Please try again in a few minutes.`
+      );
+      log.error('multi-group exhausted', { deploymentId, dseq, offered, waitForCapacity });
+      return;
+    }
+
+    // Accept the first lease that succeeds, walking ranked attempts in order
+    // (fall through to the next candidate on accept error).
+    for (const attempt of ranked) {
+      try {
+        const leaseResp = await consoleApi.acceptLeases(akashKey, {
+          manifest,
+          leases: [
+            { dseq, gseq: attempt.bid.id.gseq, oseq: attempt.bid.id.oseq, provider: attempt.bid.id.provider },
+          ],
+        });
+        const lease = leaseResp.leases[0];
+        if (!lease) throw new Error('lease accept returned no leases');
+        if (await exitIfCanceled()) return;
+        await db
+          .update(deployments)
+          .set({
+            state: 'leased',
+            provider: lease.id.provider,
+            gseq: lease.id.gseq,
+            oseq: lease.id.oseq,
+            gpuVendor: attempt.gpu.vendor,
+            gpuModel: attempt.gpu.model,
+          })
+          .where(and(eq(deployments.id, deploymentId), notInArray(deployments.state, ['closed', 'failed'])));
+        await finishJobDeploy({ deploymentId, lease, maxDurationMs: env.JOB_MAX_DURATION_MS });
+        log.info('multi-group leased', {
+          deploymentId,
+          dseq,
+          provider: lease.id.provider,
+          gpu: `${attempt.gpu.vendor} ${attempt.gpu.model}`,
+        });
+        return;
+      } catch (err) {
+        log.warn('multi-group: accept failed, trying next candidate', {
+          deploymentId,
+          dseq,
+          gpu: attempt.gpu.model,
+          err: String(err),
+        });
+      }
+    }
+
+    // Every ranked accept failed → close + park/fail.
+    await closeAndExit('GPU lease accept failed on all bidding providers; retry shortly.');
+    log.error('multi-group: all accepts failed', { deploymentId, dseq, offered });
+  } catch (err) {
+    await closeAndExit(`multi-group acquisition error: ${String(err)}`);
+    log.error('multi-group crashed mid-poll', { deploymentId, dseq, err: String(err) });
+  }
 }
 
 // True once a run has reached a terminal/closed state (e.g. the user canceled),

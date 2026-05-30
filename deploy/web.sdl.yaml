@@ -31,11 +31,9 @@ profiles:
           size: 512Mi
   placement:
     dcloud:
-      attributes:
-        host: akash
       pricing:
         web:
-          denom: uakt
+          denom: uact
           amount: 1000
 
 deployment:

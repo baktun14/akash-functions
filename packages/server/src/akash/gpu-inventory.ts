@@ -102,7 +102,8 @@ export function gpuKey(g: { vendor: string; model: string }): string {
 // Datacenter / hopper / ada-class GPUs — kept in sync with the pricing tier in
 // sdl.ts (pricingAmount). The fallback only ever substitutes within this class
 // so a job is never silently dropped onto a small consumer card (rtx3060, t4…).
-function isDatacenterClassGpu(model: string): boolean {
+// Exported for the multi-group fan-out (buildMultiGroupGpuCandidates / runGpuMultiGroup).
+export function isDatacenterClassGpu(model: string): boolean {
   return /^(h100|h200|a100|a40|l40|l4|pro6000|rtx6000|rtx5090)/.test(model.toLowerCase());
 }
 
@@ -121,4 +122,36 @@ export function pickNextGpu(models: GpuModelOption[], tried: Set<string>): GpuSp
     .filter((m) => isDatacenterClassGpu(m.model))
     .sort((a, b) => b.available - a.available);
   return dc[0] ? { vendor: dc[0].vendor, model: dc[0].model } : null;
+}
+
+// Ordered candidate list for the multi-group fan-out: the requested GPU first
+// (honor the user's pick), then every AVAILABLE datacenter-class model in
+// JOB_GPU_PREFERENCE order (ties by most-available), deduped against the
+// requested one and capped at `maxGroups`. Alternates inherit the requested
+// unit count so every group asks for the same GPU count. runGpuMultiGroup emits
+// one placement group per returned candidate, in this order.
+export function buildMultiGroupGpuCandidates(
+  available: GpuModelOption[],
+  requested: GpuSpec,
+  maxGroups = 6
+): GpuSpec[] {
+  const candidates: GpuSpec[] = [requested];
+  const seen = new Set<string>([gpuKey(requested)]);
+  const alternates = available
+    .filter((m) => m.available > 0 && isDatacenterClassGpu(m.model) && !seen.has(gpuKey(m)))
+    .sort((a, b) => {
+      const ra = JOB_GPU_PREFERENCE.indexOf(a.model.toLowerCase());
+      const rb = JOB_GPU_PREFERENCE.indexOf(b.model.toLowerCase());
+      const pa = ra < 0 ? JOB_GPU_PREFERENCE.length : ra;
+      const pb = rb < 0 ? JOB_GPU_PREFERENCE.length : rb;
+      if (pa !== pb) return pa - pb;
+      return b.available - a.available;
+    });
+  for (const m of alternates) {
+    if (candidates.length >= maxGroups) break;
+    if (seen.has(gpuKey(m))) continue;
+    seen.add(gpuKey(m));
+    candidates.push({ vendor: m.vendor, model: m.model, units: requested.units });
+  }
+  return candidates;
 }

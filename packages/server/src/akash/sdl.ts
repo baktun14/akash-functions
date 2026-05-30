@@ -4,7 +4,7 @@
 // new versions without re-leasing the deployment.
 //
 // CPU/memory/storage come from function_versions.resources. Pricing amount
-// (uakt) and the runner image come from env. User-defined env vars (e.g.
+// (uact) and the runner image come from env. User-defined env vars (e.g.
 // AKASHML_API_KEY, DATABASE_URL) are NOT emitted here — the SDL manifest is
 // visible to providers and is unsuitable for secrets. The runner instead
 // fetches them from /api/runner/env/:fnId at boot and on poll-detected
@@ -47,6 +47,11 @@ export type BuildSdlArgs = {
   /** Deployment (run) row id — REQUIRED for jobs; injected as DEPLOYMENT_ID so
    *  the runner's /logs and /complete callbacks address the right run. */
   deploymentId?: string;
+  /** Multi-group GPU fan-out: one placement group per entry, in this order,
+   *  each a different GPU compute profile, all under the single `fn` service.
+   *  2+ entries → multi-group SDL; 0–1 entries → today's single-group SDL.
+   *  cpu/memory/storage come from `resources`; only the GPU differs per group. */
+  gpuGroups?: GpuSpec[];
 };
 
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
@@ -56,27 +61,30 @@ function normalizeCpu(input: string): number {
   return Number.isFinite(num) && num > 0 ? num : 0.5;
 }
 
-// Pricing cap (uakt/block) — providers bid at-or-below this. Setting it
+// Pricing cap (uact/block — ACT is the deployment-payment denom; uakt pricing
+// is no longer accepted on-chain) — providers bid at-or-below this. Setting it
 // higher costs nothing unless the bid actually lands above the previous cap
 // (lowest bid wins). GPU providers floor much higher than CPU providers, so
-// the CPU baseline (env.DEPLOY_PRICING_AMOUNT, ~1000 uakt/block ≈ $0.78/hr)
-// is below most GPU providers' floor and produces 0 bids on GPU SDLs.
+// the CPU baseline (env.DEPLOY_PRICING_AMOUNT, ~1000 uact/block) is below most
+// GPU providers' floor and produces 0 bids on GPU SDLs.
 //
 // We don't fetch live pricing — the Console API doesn't expose per-model
-// floors. The numbers below are conservative ceilings derived from observed
-// provider listings (community + Console pricing pages, early 2026). They
-// stay well clear of the chain's max-bid ceiling (1e18 uakt).
+// floors. The numbers below are conservative ceilings. NOTE: they were
+// calibrated against uakt and carried over unchanged when pricing moved to
+// uact — re-validate against live ACT floors, since a ceiling below floor
+// silently yields 0 bids. They stay well clear of the chain's max-bid ceiling.
 function pricingAmount(gpu: GpuSpec | undefined): number {
   const base = env.DEPLOY_PRICING_AMOUNT;
   if (!gpu) return base;
   const model = gpu.model.toLowerCase();
   // Datacenter / hopper / ada-class — H100/H200/A100/L40/RTX 6000 Pro etc.
-  // Floor ~$1.50–$3.00/hr; 100,000 uakt/block ≈ $2.30/hr at $1.30/AKT.
+  // Provider floor ~$1.50–$3.00/hr (USD). 100,000 ceiling carried over from
+  // uakt — re-validate against live ACT floors.
   if (/^(h100|h200|a100|a40|l40|l4|pro6000|rtx6000|rtx5090)/.test(model)) {
     return Math.max(base, 100_000);
   }
   // Mid-tier consumer / workstation — RTX 4090, RTX 5070, A5000, etc.
-  // Floor ~$0.30–$1.00/hr; 30,000 uakt/block ≈ $0.70/hr.
+  // Provider floor ~$0.30–$1.00/hr (USD). 30,000 ceiling carried over from uakt.
   if (/^(rtx|gtx|a5000|a4000|t4|p4|p40)/.test(model)) {
     return Math.max(base, 30_000);
   }
@@ -97,13 +105,21 @@ function normalizeSize(input: string): string {
 }
 
 export async function buildSdl(args: BuildSdlArgs): Promise<string> {
-  const backendBaseUrl = (args.backendBaseUrl ?? env.CODE_HOST_BASE).replace(/\/$/, '');
-  const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const executionKind = args.executionKind ?? 'service';
-  const isJob = executionKind === 'job';
+  const isJob = (args.executionKind ?? 'service') === 'job';
   // Jobs run the Python+CUDA image (which bakes the byte-identical supervisor);
   // services run the lean Bun image.
   const runnerImage = isJob ? await resolvePythonRunnerImage() : await resolveRunnerImage();
+  return buildSdlString(args, runnerImage);
+}
+
+// Pure SDL emitter — takes the already-resolved runner image so it has no I/O
+// and is unit-testable. Emits today's single-group shape by default; when
+// `gpuGroups` has 2+ entries it emits the multi-group GPU fan-out: one `fn`
+// service under N placement groups, one GPU compute profile each.
+export function buildSdlString(args: BuildSdlArgs, runnerImage: string): string {
+  const backendBaseUrl = (args.backendBaseUrl ?? env.CODE_HOST_BASE).replace(/\/$/, '');
+  const pollIntervalMs = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const isJob = (args.executionKind ?? 'service') === 'job';
 
   if (isJob && !args.deploymentId) {
     throw new Error('buildSdl: deploymentId is required for job execution kind');
@@ -126,67 +142,72 @@ export async function buildSdl(args: BuildSdlArgs): Promise<string> {
     envVars.push('EXECUTION_KIND=job', `DEPLOYMENT_ID=${args.deploymentId}`);
   }
 
-  // Inline the GPU block only when requested. Akash SDL expects:
-  //   gpu:
-  //     units: <n>
-  //     attributes:
-  //       vendor:
-  //         <vendor>:
-  //           - model: <model>
+  // Per-group compute block. cpu/memory/storage are identical across groups;
+  // only the GPU model differs. Akash SDL expects:
+  //   gpu: { units, attributes: { vendor: { <vendor>: [{ model }] } } }
   // Providers that don't expose this exact model won't bid.
-  const computeResources: Record<string, unknown> = {
-    cpu: { units: normalizeCpu(args.resources.cpu) },
-    memory: { size: normalizeSize(args.resources.memory) },
-    storage: { size: normalizeSize(args.resources.storage) },
-  };
-  if (args.resources.gpu) {
-    const { vendor, model, units } = args.resources.gpu;
-    computeResources.gpu = {
-      units: units ?? 1,
-      attributes: {
-        vendor: {
-          [vendor]: [{ model }],
-        },
-      },
+  const computeResourcesFor = (gpu: GpuSpec | undefined): Record<string, unknown> => {
+    const r: Record<string, unknown> = {
+      cpu: { units: normalizeCpu(args.resources.cpu) },
+      memory: { size: normalizeSize(args.resources.memory) },
+      storage: { size: normalizeSize(args.resources.storage) },
     };
+    if (gpu) {
+      r.gpu = {
+        units: gpu.units ?? 1,
+        attributes: { vendor: { [gpu.vendor]: [{ model: gpu.model }] } },
+      };
+    }
+    return r;
+  };
+
+  const service = {
+    image: runnerImage,
+    expose: [{ port: 3000, as: 80, to: [{ global: true }] }],
+    env: envVars,
+  };
+
+  const groups = args.gpuGroups;
+  if (groups && groups.length >= 2) {
+    // Multi-group fan-out. The chain assigns gseq 1..N in ALPHABETICAL order of
+    // placement name (chain-sdk SDL.v3Groups sorts the placement keys), so we
+    // name the groups g00, g01, … in candidate order — alphabetical order then
+    // equals candidate order, and gseq i+1 maps back to candidate[i].
+    const compute: Record<string, unknown> = {};
+    const placement: Record<string, unknown> = {};
+    const deploy: Record<string, unknown> = {};
+    groups.forEach((gpu, i) => {
+      const g = `g${String(i).padStart(2, '0')}`;
+      compute[g] = { resources: computeResourcesFor(gpu) };
+      placement[g] = { pricing: { [g]: { denom: 'uact', amount: pricingAmount(gpu) } } };
+      deploy[g] = { profile: g, count: 1 };
+    });
+    return yaml.dump(
+      {
+        version: '2.0',
+        services: { fn: service },
+        profiles: { compute, placement },
+        deployment: { fn: deploy },
+      },
+      { noRefs: true, lineWidth: 1000 }
+    );
   }
 
-  const sdl = {
-    version: '2.0',
-    services: {
-      fn: {
-        image: runnerImage,
-        expose: [
-          {
-            port: 3000,
-            as: 80,
-            to: [{ global: true }],
-          },
-        ],
-        env: envVars,
-      },
-    },
-    profiles: {
-      compute: {
-        fn: {
-          resources: computeResources,
+  // Single-group (default; also the sequential GPU-fallback retry path). Use the
+  // lone gpuGroups entry when given, else resources.gpu.
+  const gpu = groups && groups.length === 1 ? groups[0] : args.resources.gpu;
+  return yaml.dump(
+    {
+      version: '2.0',
+      services: { fn: service },
+      profiles: {
+        compute: { fn: { resources: computeResourcesFor(gpu) } },
+        placement: {
+          dcloud: { pricing: { fn: { denom: 'uact', amount: pricingAmount(gpu) } } },
         },
       },
-      placement: {
-        dcloud: {
-          attributes: { host: 'akash' },
-          pricing: {
-            fn: { denom: 'uakt', amount: pricingAmount(args.resources.gpu) },
-          },
-        },
-      },
+      deployment: { fn: { dcloud: { profile: 'fn', count: 1 } } },
     },
-    deployment: {
-      fn: {
-        dcloud: { profile: 'fn', count: 1 },
-      },
-    },
-  };
-
-  return yaml.dump(sdl, { noRefs: true, lineWidth: 1000 });
+    { noRefs: true, lineWidth: 1000 }
+  );
 }
