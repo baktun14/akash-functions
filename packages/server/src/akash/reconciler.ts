@@ -43,6 +43,8 @@ import { env } from '../env';
 import { log } from '../lib/log';
 import { recordProviderFailure, recordProviderSuccess } from './provider-health';
 import { requestTeardown } from './teardown';
+import { driveWaitingRows, superviseStuckBurst, waitPolicyConfig } from './waiting-driver';
+import { isBurstStale } from './wait-policy';
 
 // Reserved path the runner answers directly (bypasses USER_PORT). Probing it
 // through the provider ingress verifies the provider can route arbitrary
@@ -90,9 +92,15 @@ async function reconcileOnce(): Promise<void> {
     .where(notInArray(deployments.state, ['closed', 'failed']));
 
   await Promise.allSettled(rows.map((row) => reconcileRow(row)));
+
+  // Wait-for-capacity: retry parked `waiting` rows (oldest-first, capped bursts).
+  await driveWaitingRows();
 }
 
 async function reconcileRow(row: DeploymentRow): Promise<void> {
+  // `waiting` rows are owned by driveWaitingRows (above) — no watchdog touches
+  // them, so the wait cap is the only thing that ends a wait.
+  if (row.state === 'waiting') return;
   // Jobs are port-less run-to-completion pods. They must NEVER hit the HTTP
   // reachability probe (there's no ingress to probe — that would HTTP-probe a
   // port-less pod to death) and they have their own watchdog (D1).
@@ -105,6 +113,17 @@ async function reconcileRow(row: DeploymentRow): Promise<void> {
     return;
   }
   if (row.state === 'pending' || row.state === 'bidding' || row.state === 'leased') {
+    // Wait-for-capacity rows age on the per-burst anchor (burstStartedAt),
+    // falling back to createdAt for a never-parked first attempt — NOT the
+    // createdAt stuck-deploy timeout, which a long waiter's old createdAt would
+    // trip the instant a retry burst flips it to bidding. A burst past the
+    // supervisor timeout is reclaimed to `waiting` (or cap-failed), not failed.
+    if (row.waitForCapacity) {
+      if (isBurstStale({ burstStartedAt: row.burstStartedAt ?? row.createdAt, now: new Date() }, waitPolicyConfig())) {
+        await superviseStuckBurst(row);
+      }
+      return;
+    }
     const ageMs = Date.now() - row.createdAt.getTime();
     if (ageMs > STUCK_DEPLOY_TIMEOUT_MS) {
       await failStuckDeploy(row, ageMs);
@@ -123,6 +142,11 @@ async function reconcileRow(row: DeploymentRow): Promise<void> {
 //     generous JOB_BOOT_TIMEOUT_MS → fail + teardown.
 async function reconcileJobRow(row: DeploymentRow): Promise<void> {
   const now = Date.now();
+
+  // `waiting` rows are owned by driveWaitingRows; the boot-timeout below must
+  // never see them (and a hung retry burst is handled in the pending/bidding
+  // branch via the burst supervisor).
+  if (row.state === 'waiting') return;
 
   // Orphan: the run finished (outcome recorded) but the lease is still open and
   // teardown hasn't completed. Nudge the teardown driver again.
@@ -148,6 +172,14 @@ async function reconcileJobRow(row: DeploymentRow): Promise<void> {
   }
 
   if (row.state === 'pending' || row.state === 'bidding' || row.state === 'leased') {
+    // Wait-for-capacity rows are supervised on the per-burst anchor and reclaimed
+    // to `waiting` (not failed) — see reconcileRow for the rationale.
+    if (row.waitForCapacity) {
+      if (isBurstStale({ burstStartedAt: row.burstStartedAt ?? row.createdAt, now: new Date() }, waitPolicyConfig())) {
+        await superviseStuckBurst(row);
+      }
+      return;
+    }
     // Pre-heartbeat boot grace — cold CUDA pull + pip is slow, so jobs get a
     // much longer leash than the service stuck-deploy timeout.
     const ageMs = now - row.createdAt.getTime();

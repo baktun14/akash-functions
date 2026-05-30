@@ -13,7 +13,7 @@ import { ensureHttpScheme } from '../../../lib/url';
 import { RoutesPanel, routeKeyOf } from '../RoutesPanel';
 import { UseThisFunction } from '../UseThisFunction';
 
-const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased', 'running'];
+const TRANSIENT_STATES: DeploymentState[] = ['pending', 'bidding', 'leased', 'running', 'waiting'];
 const POLL_INTERVAL_MS = 2000;
 const ERROR_BACKOFF_MS = 5000;
 
@@ -71,6 +71,21 @@ type StateMeta = {
   tone: 'ok' | 'warn' | 'error' | 'neutral';
 };
 
+// "waited 3h12m / 24h" for a wait-for-capacity row, falling back to a plain
+// retry message when timing data isn't present yet.
+function describeWait(dep: DeploymentRecord): string {
+  const anchor = dep.waitingSince ?? dep.createdAt;
+  const fmt = (ms: number): string => {
+    const m = Math.floor(ms / 60_000);
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h${m % 60 ? `${m % 60}m` : ''}`;
+  };
+  const elapsed = Date.now() - new Date(anchor).getTime();
+  const waited = elapsed >= 60_000 ? `Waited ${fmt(elapsed)}` : 'Retrying';
+  const total = dep.maxWaitMs ? ` / ${fmt(dep.maxWaitMs)}` : '';
+  return `${waited}${total} — retrying until a provider is available`;
+}
+
 function describe(dep: DeploymentRecord | null): StateMeta {
   if (!dep) {
     return { label: 'Unknown', pillClass: 'pill', body: 'No deployment yet', tone: 'neutral' };
@@ -82,6 +97,15 @@ function describe(dep: DeploymentRecord | null): StateMeta {
       return { label: 'Reserving', pillClass: 'pill', body: 'Allocating compute resources', tone: 'warn' };
     case 'leased':
       return { label: 'Starting', pillClass: 'pill', body: 'Bringing your function online', tone: 'warn' };
+    case 'waiting':
+      // Wait-for-capacity: parked, retrying until a provider/GPU is available.
+      // 'warn' reuses the existing amber chrome + shimmer.
+      return {
+        label: 'Waiting for capacity',
+        pillClass: 'pill',
+        body: describeWait(dep),
+        tone: 'warn',
+      };
     case 'live':
       return { label: 'Active', pillClass: 'pill pill-ok', body: 'ready to receive traffic', tone: 'ok' };
     case 'running':

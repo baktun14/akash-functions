@@ -21,6 +21,7 @@ type TabName = (typeof TABS)[number];
 const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
   online:   { color: 'var(--ok)',              label: 'Online' },
   pending:  { color: 'var(--warn, #f5a524)',   label: 'Deploying' },
+  waiting:  { color: 'var(--warn, #f5a524)',   label: 'Waiting for capacity' },
   degraded: { color: 'var(--warn, #f5a524)',   label: 'Degraded' },
   offline:  { color: 'var(--err, #e5484d)',    label: 'Failed' },
   idle:     { color: 'var(--fg-subtle, #777)', label: 'Not deployed' },

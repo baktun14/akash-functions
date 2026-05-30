@@ -26,6 +26,7 @@ import type {
   RunRecord,
   CreateRunRequest,
   CreateAndRunRequest,
+  WaitForCapacityRequest,
   RunLogChunk,
 } from '@shared/types';
 import {
@@ -62,7 +63,8 @@ export interface ApiClient {
   deploy(
     sample: CodeSample,
     customResources?: ResourceRequest,
-    envVars?: Record<string, string>
+    envVars?: Record<string, string>,
+    opts?: WaitForCapacityRequest
   ): Promise<FunctionRecord>;
 
   /** Live GPU inventory across online+audited providers. */
@@ -318,7 +320,8 @@ class MockApi implements ApiClient {
   async deploy(
     sample: CodeSample,
     customResources?: ResourceRequest,
-    envVars?: Record<string, string>
+    envVars?: Record<string, string>,
+    opts?: WaitForCapacityRequest
   ): Promise<FunctionRecord> {
     await delay(900);
     const services = (await this.listServices()).slice();
@@ -330,7 +333,8 @@ class MockApi implements ApiClient {
       kind: 'function',
       ingressUrl: `${baseName}-prod.akash-functions.io`,
       image: `ghcr.io/akash-network/${baseName}:1.0.0`,
-      status: 'online',
+      // Mock mode exercises the waiting UI when delayed start is requested.
+      status: opts?.waitForCapacity ? 'waiting' : 'online',
       deploymentId: 'dep-' + Math.random().toString(36).slice(2, 8),
     };
     services.push(svc);
@@ -678,23 +682,25 @@ class MockApi implements ApiClient {
 
   // ── Python GPU runs ──
 
-  private synthRun(fnId: string, versionId: string): RunRecord {
+  private synthRun(fnId: string, versionId: string, waitForCapacity = false): RunRecord {
     return {
       runId: 'run-' + Math.random().toString(36).slice(2, 9),
       functionId: fnId,
       versionId,
-      state: 'pending',
+      // Mock mode exercises the waiting UI when delayed start is requested.
+      state: waitForCapacity ? 'waiting' : 'pending',
       provider: 'akash1mockprovider',
-      dseq: String(1_000_000 + Math.floor(Math.random() * 9_000_000)),
+      dseq: waitForCapacity ? undefined : String(1_000_000 + Math.floor(Math.random() * 9_000_000)),
       maxDurationMs: 30 * 60_000,
+      ...(waitForCapacity ? { waitingSince: new Date().toISOString(), maxWaitMs: 24 * 60 * 60_000 } : {}),
       createdAt: new Date().toISOString(),
     };
   }
 
-  async createRun(fnId: string, _body?: CreateRunRequest): Promise<RunRecord> {
+  async createRun(fnId: string, body?: CreateRunRequest): Promise<RunRecord> {
     await delay(500);
     const versions = seedMockVersionsIfEmpty(fnId);
-    const run = this.synthRun(fnId, versions[0]?.id ?? 'mock');
+    const run = this.synthRun(fnId, versions[0]?.id ?? 'mock', body?.waitForCapacity ?? false);
     writeMockRuns(fnId, [run, ...readMockRuns(fnId)]);
     return run;
   }
@@ -709,7 +715,7 @@ class MockApi implements ApiClient {
       name: baseName,
       kind: 'python-job',
       image: 'ghcr.io/akash-network/python-runner:1.0.0',
-      status: 'pending',
+      status: body.waitForCapacity ? 'waiting' : 'pending',
     };
     services.push(svc);
     writeJSON(SERVICES_KEY, services);
@@ -729,7 +735,7 @@ class MockApi implements ApiClient {
     };
     writeMockVersions(id, [initial]);
 
-    const run = this.synthRun(id, versionId);
+    const run = this.synthRun(id, versionId, body.waitForCapacity ?? false);
     writeMockRuns(id, [run]);
     return run;
   }
@@ -892,7 +898,8 @@ class LiveApi implements ApiClient {
   async deploy(
     sample: CodeSample,
     customResources?: ResourceRequest,
-    envVars?: Record<string, string>
+    envVars?: Record<string, string>,
+    opts?: WaitForCapacityRequest
   ): Promise<FunctionRecord> {
     // Two-phase: create the function record, then trigger the deploy pipeline.
     // If the second call fails, tombstone the function so it doesn't show up
@@ -917,7 +924,14 @@ class LiveApi implements ApiClient {
     try {
       const dep = await this.req<DeploymentRecord>(
         `/api/functions/${fn.id}/deploy`,
-        { method: 'POST', body: JSON.stringify({}) }
+        {
+          method: 'POST',
+          body: JSON.stringify(
+            opts?.waitForCapacity
+              ? { waitForCapacity: true, ...(opts.maxWaitMs ? { maxWaitMs: opts.maxWaitMs } : {}) }
+              : {}
+          ),
+        }
       );
       return { ...fn, deploymentId: dep.id };
     } catch (err) {

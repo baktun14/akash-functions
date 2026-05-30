@@ -154,7 +154,13 @@ export function RunPanel({
 
   const onCancelRun = async () => {
     if (!selectedRun || canceling) return;
-    if (!confirm('Cancel this run? The GPU lease is torn down immediately.')) return;
+    // While waiting for capacity there's no lease yet — branch the copy so the
+    // confirm matches reality.
+    const confirmMsg =
+      merged.state === 'waiting'
+        ? 'Stop waiting for a GPU? No lease has been acquired yet.'
+        : 'Cancel this run? The GPU lease is torn down immediately.';
+    if (!confirm(confirmMsg)) return;
     setCanceling(true);
     try {
       await api.cancelRun(svc.id, selectedRun.runId);

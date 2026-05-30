@@ -22,6 +22,7 @@ import type {
   ResourceRequest,
   Session,
   ToastMsg,
+  WaitForCapacityRequest,
 } from '@shared/types';
 import { Sidebar } from './components/shell/Sidebar';
 import { TopBar } from './components/shell/TopBar';
@@ -198,13 +199,20 @@ function Layout({
     sample: CodeSample,
     customResources?: ResourceRequest,
     envVars?: Record<string, string>,
+    opts?: WaitForCapacityRequest,
   ) => {
     try {
-      const svc = await api.deploy(sample, customResources, envVars);
-      setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
+      const svc = await api.deploy(sample, customResources, envVars, opts);
+      // Optimistically reflect the waiting state so the card doesn't flash
+      // "Deploying" before the first poll when delayed start is on.
+      const optimistic = opts?.waitForCapacity ? { ...svc, status: 'waiting' as const } : svc;
+      setLocal((cur) => [optimistic, ...cur.filter((s) => s.id !== optimistic.id)]);
       sessionDeploys.mark(svc.id);
       setBuilderOpen(false);
-      setToast({ kind: 'ok', text: `Deploying ${svc.name}…` });
+      setToast({
+        kind: 'ok',
+        text: opts?.waitForCapacity ? `Waiting for capacity for ${svc.name}…` : `Deploying ${svc.name}…`,
+      });
       setTimeout(() => setToast(null), 3500);
       // Jump to the detail page so the user sees the live deployment progress.
       navigate(`/functions/${svc.id}`);
@@ -228,14 +236,17 @@ function Layout({
         name: body.name,
         kind: 'python-job',
         image: 'ghcr.io/akash-network/python-runner',
-        status: 'pending',
+        status: body.waitForCapacity ? 'waiting' : 'pending',
         deploymentId: run.runId,
         latestDeploymentId: run.runId,
       };
       setLocal((cur) => [svc, ...cur.filter((s) => s.id !== svc.id)]);
       sessionDeploys.mark(svc.id);
       setBuilderOpen(false);
-      setToast({ kind: 'ok', text: `Running ${body.name}…` });
+      setToast({
+        kind: 'ok',
+        text: body.waitForCapacity ? `Waiting for a GPU for ${body.name}…` : `Running ${body.name}…`,
+      });
       setTimeout(() => setToast(null), 3500);
       navigate(`/functions/${svc.id}`);
       refresh().catch(() => undefined);
