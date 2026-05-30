@@ -18,6 +18,7 @@ import { log } from '../lib/log';
 import { ConsoleApiError, consoleApi, type Bid, type Lease } from './console-client';
 import { getBlocklistedProviders, recordProviderFailure } from './provider-health';
 import { isRunnerFresh, probeIngress, RUNNER_HEALTH_PATH, toFetchUrl } from './reconciler';
+import { enterWaitingOrFail } from './waiting-driver';
 
 export type StartDeployArgs = {
   apiKey: string;
@@ -31,7 +32,28 @@ export type StartDeployArgs = {
   runKind?: 'service' | 'job';
   /** Runaway backstop for jobs (snapshotted onto the row). */
   maxDurationMs?: number;
+  /** Wait-for-capacity: on a no-bid, park the row in `waiting` and retry in the
+   *  background instead of failing. A real error still fails fast. */
+  waitForCapacity?: boolean;
 };
+
+// Close a no-bid deployment to reclaim its escrow deposit. Best-effort with one
+// retry; never throws (a failed close must not block the next attempt). Shared
+// by the GPU fallback loop (runs.ts), Seam B below, and the waiting driver.
+export async function closeDseqBestEffort(
+  akashKey: string,
+  dseq: string | undefined
+): Promise<void> {
+  if (!dseq) return;
+  for (let i = 0; i < 2; i++) {
+    try {
+      await consoleApi.closeDeployment(akashKey, dseq);
+      return;
+    } catch (err) {
+      log.warn('closeDseqBestEffort: closeDeployment failed', { dseq, attempt: i, err: String(err) });
+    }
+  }
+}
 
 const BID_POLL_INTERVAL_MS = 2000;
 const BID_POLL_TIMEOUT_MS = 60_000;
@@ -208,6 +230,7 @@ async function runPipeline({
   serviceName,
   runKind = 'service',
   maxDurationMs,
+  waitForCapacity = false,
 }: StartDeployArgs): Promise<void> {
   const isJob = runKind === 'job';
   const setState = async (
@@ -226,6 +249,17 @@ async function runPipeline({
   });
   if (attempt.outcome !== 'leased') {
     const message = attempt.outcome === 'no-bid' ? 'timeout waiting for bids' : attempt.message;
+    // Seam B — service / CPU-job no-bid. With wait-for-capacity, park in
+    // `waiting` and retry in the background instead of failing. A real error
+    // (provider/Console fault) still fails fast — we only wait on no-bid.
+    // Close the dseq first: unlike the GPU path, the service no-bid path
+    // otherwise leaves the created deployment open on-chain (escrow leak), which
+    // would compound per retry while waiting.
+    if (attempt.outcome === 'no-bid' && waitForCapacity) {
+      await closeDseqBestEffort(apiKey, attempt.dseq);
+      await enterWaitingOrFail({ deploymentId, waitForCapacity, failMessage: message });
+      return;
+    }
     log.error('pipeline failed', { deploymentId, err: message });
     await setState('failed', { errorMessage: message }).catch(() => undefined);
     return;

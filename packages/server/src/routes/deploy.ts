@@ -9,6 +9,9 @@ import { z } from 'zod';
 import { zValidator } from '@hono/zod-validator';
 import type { DeploymentRecord, FunctionRoute } from '@shared/types';
 import { startDeployPipeline } from '../akash/pipeline';
+import { cacheWalletKey } from '../akash/key-cache';
+import { clampMaxWaitMs } from '../akash/wait-policy';
+import { waitPolicyConfig } from '../akash/waiting-driver';
 import { isRunnerFresh, probeIngress, toFetchUrl } from '../akash/reconciler';
 import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
@@ -22,6 +25,9 @@ import { extractRoutes } from './extract-routes';
 
 const Body = z.object({
   versionId: z.string().uuid().optional(),
+  // Wait-for-capacity opt-in (default OFF). maxWaitMs is clamped server-side.
+  waitForCapacity: z.boolean().optional(),
+  maxWaitMs: z.number().int().positive().optional(),
 });
 
 export const deployRouter = new Hono<{ Variables: AuthVars }>();
@@ -95,6 +101,8 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
     resources: version.resources,
   });
 
+  const waitForCapacity = body.waitForCapacity ?? false;
+
   // Persist deployment row so the frontend has something to poll.
   const [dep] = await db
     .insert(deployments)
@@ -102,13 +110,23 @@ deployRouter.post('/:id/deploy', zValidator('json', Body), async (c) => {
       functionId: fn.id,
       versionId: version.id,
       state: 'pending',
+      waitForCapacity,
+      maxWaitMs: waitForCapacity ? clampMaxWaitMs(body.maxWaitMs, waitPolicyConfig()) : null,
     })
     .returning();
   if (!dep) throw new HTTPException(500, { message: 'Failed to record deployment' });
 
+  // Cache the Console key (encrypted) ONLY for delayed-start services — the
+  // reconciler's retry bursts need it. A fail-fast service never waits, so we
+  // don't broaden credential-at-rest exposure (D1 threat model). Jobs cache
+  // unconditionally (teardown needs it); a plain service deploy does not.
+  if (waitForCapacity) {
+    await cacheWalletKey(walletAddress, akashKey);
+  }
+
   // Fire-and-forget the pipeline. The frontend polls /:id/deployments/:depId.
   // serviceName must match the SDL's `services.<name>` key — we use 'fn'.
-  startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn' });
+  startDeployPipeline({ apiKey: akashKey, deploymentId: dep.id, sdl, serviceName: 'fn', waitForCapacity });
 
   return c.json(toRecord(dep), 202);
 });
@@ -269,6 +287,8 @@ function toRecord(
     expectedRunnerVersion: EXPECTED_RUNNER_VERSION,
     runnerOutdated: isRunnerOutdated(dep.runnerVersion, dep.liveAt),
     runnerStale: isRunnerStale(dep.runnerSeenAt, dep.liveAt, dep.state),
+    waitingSince: dep.waitingSince?.toISOString(),
+    maxWaitMs: dep.maxWaitMs ?? undefined,
     createdAt: dep.createdAt.toISOString(),
     liveAt: dep.liveAt?.toISOString(),
     closedAt: dep.closedAt?.toISOString(),

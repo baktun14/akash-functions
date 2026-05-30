@@ -28,7 +28,12 @@ export function FunctionDetailPage(): ReactElement {
   // current runner image (e.g. to migrate off a 1.x pod onto 2.x hot-reload).
   const handleCloseDeployment = async () => {
     if (!id) return;
-    if (!confirm('Close this deployment on Akash? The function and its code stay; only the running pod is torn down.')) {
+    // A waiting deployment holds no lease yet — stopping it just ends the wait.
+    const msg =
+      svc?.status === 'waiting'
+        ? 'Stop waiting for capacity? No lease has been acquired yet; the function and its code stay.'
+        : 'Close this deployment on Akash? The function and its code stay; only the running pod is torn down.';
+    if (!confirm(msg)) {
       return;
     }
     try {

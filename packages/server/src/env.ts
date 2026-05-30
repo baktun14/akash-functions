@@ -81,6 +81,24 @@ const Schema = z.object({
   // MAX_ATTEMPTS × BID_TIMEOUT well under JOB_BOOT_TIMEOUT_MS so the reconciler
   // (which ages a job from createdAt) doesn't fail a still-searching run.
   GPU_FALLBACK_MAX_ATTEMPTS: z.coerce.number().int().positive().default(6),
+
+  // ── Wait-for-capacity (delayed start) ──
+  // Default wait budget when a deploy opts in without specifying one.
+  WAIT_FOR_CAPACITY_DEFAULT_MAX_WAIT_MS: z.coerce.number().default(24 * 60 * 60_000), // 24h
+  // Hard ceiling — a user may extend up to here, never beyond.
+  WAIT_FOR_CAPACITY_MAX_WAIT_MS: z.coerce.number().default(7 * 24 * 60 * 60_000), // 7d
+  // Floor — a wait always gets at least this long (≥ one burst window) so an
+  // opt-in deploy never auto-fails near-instantly.
+  WAIT_FOR_CAPACITY_MIN_WAIT_MS: z.coerce.number().default(5 * 60_000), // 5m
+  // Per reconciler tick, fire at most this many bursts (oldest-waiter-first) so
+  // a freed slot doesn't trigger a thundering herd of create/close cycles.
+  WAIT_FOR_CAPACITY_MAX_BURSTS_PER_TICK: z.coerce.number().int().positive().default(8),
+  // A burst running longer than this is presumed dead/hung; the watchdog
+  // reclaims the row to `waiting`. MUST exceed worst-case live burst wall-time
+  // (GPU_FALLBACK_MAX_ATTEMPTS × GPU_FALLBACK_BID_TIMEOUT_MS ≈ 120s) so a
+  // still-running burst is never reclaimed (which would double-create), and stay
+  // below JOB_BOOT_TIMEOUT_MS.
+  WAIT_FOR_CAPACITY_BURST_TIMEOUT_MS: z.coerce.number().default(5 * 60_000), // 5m
 });
 
 export const env = Schema.parse(process.env);

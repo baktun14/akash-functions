@@ -13,7 +13,11 @@ export type Session = {
 // online — deployment is live
 // degraded — deployment alive but unhealthy (reserved; not used yet)
 // offline — deployment failed or closed
-export type ServiceStatus = 'online' | 'degraded' | 'offline' | 'pending' | 'idle';
+// waiting — wait-for-capacity: no provider/GPU available yet, retrying in the
+//           background (zero on-chain cost). DISTINCT from pending — a 24h wait
+//           must not look like a 10s bid (own pill copy, cancel affordance, poll
+//           cadence).
+export type ServiceStatus = 'online' | 'degraded' | 'offline' | 'pending' | 'waiting' | 'idle';
 
 // `function` — a long-lived HTTP service (the original product).
 // `python-job` — an ephemeral Python run: executes to completion on a GPU,
@@ -152,8 +156,11 @@ export type Template = {
 // (D4), because teardown flips `state` to `closed` within seconds of a job
 // finishing and would otherwise clobber the result. Service deployments never
 // enter `running`; they go straight to `live`.
+// `waiting` — wait-for-capacity: the deploy got no bid/GPU and is parked with NO
+//   on-chain deployment (dseq null, zero cost), retried by the reconciler until a
+//   lease lands, the user cancels, or the max-wait cap elapses.
 export type DeploymentState =
-  | 'pending' | 'bidding' | 'leased' | 'live' | 'running' | 'failed' | 'closed';
+  | 'pending' | 'bidding' | 'leased' | 'live' | 'running' | 'waiting' | 'failed' | 'closed';
 
 // What the user's script did, independent of the lease lifecycle (D4). Written
 // only by /complete and cancel; survives the lease close.
@@ -227,6 +234,11 @@ export type DeploymentRecord = {
   finishedAt?: string;
   /** Runaway backstop snapshotted at submit time. */
   maxDurationMs?: number;
+  /** When the deployment first entered `waiting` (wait-for-capacity); drives the
+   *  elapsed/total display. */
+  waitingSince?: string;
+  /** Enforced wait cap (clamped) — pairs with waitingSince for the UI total. */
+  maxWaitMs?: number;
   createdAt: string;
   liveAt?: string;
   closedAt?: string;
@@ -261,6 +273,11 @@ export type RunRecord = {
   finishedAt?: string;
   maxDurationMs?: number;
   errorMessage?: string;
+  /** When this run first entered `waiting` (wait-for-capacity). Drives the
+   *  "waited 3h12m / 24h" display; also the cap + FIFO anchor server-side. */
+  waitingSince?: string;
+  /** Enforced wait cap (clamped) — pairs with waitingSince for the UI total. */
+  maxWaitMs?: number;
   createdAt: string;
   closedAt?: string;
 };
@@ -273,6 +290,16 @@ export type CreateRunRequest = {
    *  teardown (D1). Carried on the authed request; reused from the bearer
    *  token when omitted. */
   akashKey?: string;
+} & WaitForCapacityRequest;
+
+// Opt-in wait-for-capacity fields, mixed into every deploy/run request shape.
+export type WaitForCapacityRequest = {
+  /** When true, a no-bid/no-GPU result parks the deploy in `waiting` and retries
+   *  in the background instead of failing. Default false (fail-fast). */
+  waitForCapacity?: boolean;
+  /** Max time to wait before auto-failing. Clamped server-side to [floor,
+   *  ceiling]; null/omitted → env default (~24h). */
+  maxWaitMs?: number;
 };
 
 // Create a job-function AND its first version AND kick off the first run, in one
@@ -283,7 +310,7 @@ export type CreateAndRunRequest = {
   source: Record<string, string>; // path → contents (main.py, requirements.txt)
   resources: ResourceRequest;
   envVars?: Record<string, string>;
-};
+} & WaitForCapacityRequest;
 
 // Streamed run-log chunks emitted as SSE `data: {json}` frames. Mirrors
 // AgentChatChunk's shape so the client stream helper is near-identical.
@@ -398,7 +425,7 @@ export type FeasibilityCheck = {
 export type DeployRequest = {
   versionId?: string;
   akashmlKey?: string;
-};
+} & WaitForCapacityRequest;
 
 export type FunctionVersionSummary = {
   id: string;

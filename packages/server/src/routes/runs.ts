@@ -26,11 +26,12 @@ import type {
   RunOutcome,
   RunRecord,
 } from '@shared/types';
-import { createAndAcquireLease, finishJobDeploy, startDeployPipeline } from '../akash/pipeline';
+import { closeDseqBestEffort, createAndAcquireLease, finishJobDeploy, startDeployPipeline } from '../akash/pipeline';
 import { buildSdl } from '../akash/sdl';
-import { consoleApi } from '../akash/console-client';
 import { getAvailableGpuModels, gpuKey, pickNextGpu } from '../akash/gpu-inventory';
 import { cacheWalletKey } from '../akash/key-cache';
+import { enterWaitingOrFail, waitPolicyConfig } from '../akash/waiting-driver';
+import { clampMaxWaitMs } from '../akash/wait-policy';
 import { cancelRunLease } from '../akash/teardown';
 import { db } from '../db/client';
 import { deployments, functionVariables, functionVersions, functions, runLogs } from '../db/schema';
@@ -66,16 +67,25 @@ const ResourceSchema = z.object({
     .optional(),
 });
 
+// Wait-for-capacity opt-in, shared by both create shapes. maxWaitMs is clamped
+// to [floor, ceiling] at insert time via clampMaxWaitMs.
+const WaitForCapacityShape = {
+  waitForCapacity: z.boolean().optional(),
+  maxWaitMs: z.number().int().positive().optional(),
+};
+
 const CreateAndRunBody = z.object({
   name: z.string().min(1).max(80),
   prompt: z.string().max(4000).optional(),
   source: SourceSchema,
   resources: ResourceSchema,
   envVars: z.record(z.string(), z.string()).optional(),
+  ...WaitForCapacityShape,
 });
 
 const CreateRunBody = z.object({
   versionId: z.string().uuid().optional(),
+  ...WaitForCapacityShape,
 });
 
 // ── createAndRun: function + version + first run, in one go ──
@@ -133,6 +143,8 @@ runsRouter.post('/runs', zValidator('json', CreateAndRunBody), async (c) => {
         state: 'pending',
         runKind: 'job',
         maxDurationMs: env.JOB_MAX_DURATION_MS,
+        waitForCapacity: body.waitForCapacity ?? false,
+        maxWaitMs: body.waitForCapacity ? clampMaxWaitMs(body.maxWaitMs, waitPolicyConfig()) : null,
         // Seed the requested GPU so the run summary shows it before the pipeline
         // runs; the fallback loop updates it per attempt.
         gpuVendor: resources.gpu?.vendor ?? null,
@@ -144,7 +156,7 @@ runsRouter.post('/runs', zValidator('json', CreateAndRunBody), async (c) => {
     return { fn, version, dep };
   });
 
-  await launchRun(created.fn.id, created.version.id, created.dep.id, resources, akashKey);
+  await launchRun(created.fn.id, created.version.id, created.dep.id, resources, akashKey, body.waitForCapacity ?? false);
   return c.json(toRunRecord(created.dep), 201);
 });
 
@@ -186,13 +198,15 @@ runsRouter.post('/:id/runs', zValidator('json', CreateRunBody), async (c) => {
       state: 'pending',
       runKind: 'job',
       maxDurationMs: env.JOB_MAX_DURATION_MS,
+      waitForCapacity: body.waitForCapacity ?? false,
+      maxWaitMs: body.waitForCapacity ? clampMaxWaitMs(body.maxWaitMs, waitPolicyConfig()) : null,
       gpuVendor: resources.gpu?.vendor ?? null,
       gpuModel: resources.gpu?.model ?? null,
     })
     .returning();
   if (!dep) throw new HTTPException(500, { message: 'Failed to record run' });
 
-  await launchRun(fn.id, version.id, dep.id, resources, akashKey);
+  await launchRun(fn.id, version.id, dep.id, resources, akashKey, body.waitForCapacity ?? false);
   return c.json(toRunRecord(dep), 201);
 });
 
@@ -366,12 +380,13 @@ async function launchRun(
   versionId: string,
   deploymentId: string,
   resources: z.infer<typeof ResourceSchema>,
-  akashKey: string
+  akashKey: string,
+  waitForCapacity: boolean
 ): Promise<void> {
   // Detached: the route returns 201 immediately; deploy work runs in the
   // background. A crash in the loop fails the row rather than wedging it.
   if (resources.gpu) {
-    void runGpuFallback({ fnId, versionId, deploymentId, resources, akashKey }).catch(async (err) => {
+    void runGpuFallback({ fnId, versionId, deploymentId, resources, akashKey, waitForCapacity }).catch(async (err) => {
       log.error('gpu fallback crashed', { fnId, deploymentId, err: String(err) });
       await failRun(deploymentId, String(err));
     });
@@ -394,6 +409,7 @@ async function launchRun(
       serviceName: 'fn',
       runKind: 'job',
       maxDurationMs: env.JOB_MAX_DURATION_MS,
+      waitForCapacity,
     });
   } catch (err) {
     log.error('failed to launch run', { fnId, deploymentId, err: String(err) });
@@ -407,14 +423,17 @@ async function launchRun(
 // candidates are exhausted. `state` stays `bidding` across attempts and
 // `gpu_attempt > 0` is the UI's "searching for another GPU" signal. All writes
 // are guarded against a concurrent cancel (which sets state→closed).
-async function runGpuFallback(args: {
+export async function runGpuFallback(args: {
   fnId: string;
   versionId: string;
   deploymentId: string;
   resources: z.infer<typeof ResourceSchema>;
   akashKey: string;
+  /** When true, GPU exhaustion parks the run in `waiting` (retried by the
+   *  reconciler) instead of failing. Default false (fail-fast). */
+  waitForCapacity?: boolean;
 }): Promise<void> {
-  const { fnId, versionId, deploymentId, resources, akashKey } = args;
+  const { fnId, versionId, deploymentId, resources, akashKey, waitForCapacity = false } = args;
   const requested = resources.gpu;
   if (!requested) {
     // Defensive — launchRun only routes GPU jobs here.
@@ -510,14 +529,15 @@ async function runGpuFallback(args: {
     await closeDseqBestEffort(akashKey, res.dseq);
   }
 
-  // Exhausted all candidates without a lease.
+  // Exhausted all candidates without a lease. Seam A — with wait-for-capacity,
+  // park in `waiting` and let the reconciler retry; otherwise fail as today.
   const list = triedLabels.join(', ');
   const message =
     `No GPU available — tried ${list || requested.model}; none had free capacity right now.` +
     (lastError ? ` Last error: ${lastError}.` : '') +
     ' Please try again in a few minutes.';
-  await failRun(deploymentId, message);
-  log.error('gpu fallback exhausted', { deploymentId, tried: list });
+  await enterWaitingOrFail({ deploymentId, waitForCapacity, failMessage: message });
+  log.error('gpu fallback exhausted', { deploymentId, tried: list, waitForCapacity });
 }
 
 // True once a run has reached a terminal/closed state (e.g. the user canceled),
@@ -530,20 +550,6 @@ async function runIsTerminal(deploymentId: string): Promise<boolean> {
     .limit(1);
   if (!row) return true;
   return row.runOutcome != null || row.state === 'closed' || row.state === 'failed';
-}
-
-// Close a no-bid deployment to reclaim its escrow deposit. Best-effort with one
-// retry; never throws (a failed close must not block the next attempt).
-async function closeDseqBestEffort(akashKey: string, dseq: string | undefined): Promise<void> {
-  if (!dseq) return;
-  for (let i = 0; i < 2; i++) {
-    try {
-      await consoleApi.closeDeployment(akashKey, dseq);
-      return;
-    } catch (err) {
-      log.warn('gpu fallback: closeDeployment failed', { dseq, attempt: i, err: String(err) });
-    }
-  }
 }
 
 // Mark a run failed with a message, without clobbering a terminal state a cancel
@@ -578,7 +584,7 @@ function encryptEnvVars(
 }
 
 // Floor a job's storage so cold CUDA wheels fit. Only bumps; never shrinks.
-function withJobStorageFloor<T extends { storage: string }>(resources: T): T {
+export function withJobStorageFloor<T extends { storage: string }>(resources: T): T {
   const gi = parseGi(resources.storage);
   if (gi != null && gi >= JOB_STORAGE_FLOOR_GI) return resources;
   return { ...resources, storage: `${JOB_STORAGE_FLOOR_GI}Gi` };
@@ -617,6 +623,8 @@ function toRunRecord(dep: typeof deployments.$inferSelect): RunRecord {
     finishedAt: dep.finishedAt?.toISOString(),
     maxDurationMs: dep.maxDurationMs ?? undefined,
     errorMessage: dep.errorMessage ?? undefined,
+    waitingSince: dep.waitingSince?.toISOString(),
+    maxWaitMs: dep.maxWaitMs ?? undefined,
     createdAt: dep.createdAt.toISOString(),
     closedAt: dep.closedAt?.toISOString(),
   };

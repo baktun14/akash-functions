@@ -24,7 +24,9 @@ const TONE_COLOR: Record<RunPillTone, string> = {
   neutral: 'var(--fg-subtle, #777)',
 };
 
-const ACTIVE_STATES: DeploymentState[] = ['pending', 'bidding', 'leased', 'running'];
+// 'waiting' (wait-for-capacity) is active — keep the Cancel button + poll on so
+// the user can stop a wait, and the pill keeps shimmering.
+const ACTIVE_STATES: DeploymentState[] = ['pending', 'bidding', 'leased', 'running', 'waiting'];
 
 export function isRunActive(state: DeploymentState, outcome?: RunOutcome): boolean {
   // A terminal outcome wins even if the lease hasn't closed yet.
@@ -53,6 +55,9 @@ export function computeRunPill(
     return { label: 'Canceled', tone: 'neutral', color: TONE_COLOR.neutral, active: false };
   }
   // No outcome yet — derive from lease state.
+  if (state === 'waiting') {
+    return { label: 'Waiting for GPU', tone: 'running', color: TONE_COLOR.running, active: true };
+  }
   if (ACTIVE_STATES.includes(state)) {
     return { label: 'Running', tone: 'running', color: TONE_COLOR.running, active: true };
   }
@@ -71,6 +76,8 @@ export function phaseLabel(state: DeploymentState, gpuAttempt = 0): string {
       return 'Leasing';
     case 'bidding':
       return gpuAttempt > 0 ? 'Searching for another GPU' : 'Reserving GPU';
+    case 'waiting':
+      return 'Waiting for an available GPU';
     case 'leased':
       return 'Pulling image / installing deps';
     case 'running':

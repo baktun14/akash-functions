@@ -18,6 +18,7 @@ import type {
 import { validateVariableKey } from '@shared/reserved-vars';
 import { ConsoleApiError, consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
+import { evictWalletKeyIfIdle } from '../akash/key-cache';
 import { drainPendingTeardowns } from '../akash/teardown';
 import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
@@ -963,6 +964,20 @@ async function closeAllActiveDeployments(
       .where(eq(deployments.id, dep.id));
     closed += 1;
   }
+
+  // A closed waiting service was pinning the cached key (key-cache.ts broadens
+  // eviction to `state='waiting'`). Services have no teardown driver to evict
+  // for them, so do it here once the function's deployments are all closed.
+  // Wallet-wide and best-effort: it no-ops if another job/waiting row remains.
+  if (closed > 0) {
+    const [fn] = await db
+      .select({ walletAddress: functions.walletAddress })
+      .from(functions)
+      .where(eq(functions.id, functionId))
+      .limit(1);
+    if (fn?.walletAddress) await evictWalletKeyIfIdle(fn.walletAddress);
+  }
+
   return closed;
 }
 
@@ -1011,6 +1026,11 @@ function stateToStatus(state: string, errorMessage: string | null = null): Funct
     case 'bidding':
     case 'leased':
       return 'pending';
+    case 'waiting':
+      // Wait-for-capacity: parked, retrying in the background. Distinct from
+      // 'pending' — the dashboard surfaces its own amber "waiting" affordance
+      // and poll cadence. This mapping is the sole notification surface.
+      return 'waiting';
     case 'failed':
     case 'closed':
       return 'offline';

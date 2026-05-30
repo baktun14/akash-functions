@@ -13,7 +13,7 @@
 // Bounded by encryption-at-rest (same AES-256-GCM envelope as function
 // variables) plus eviction when no runs are active.
 
-import { and, eq, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, eq, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { deployments, functions, walletConsoleKeys } from '../db/schema';
 import { secrets } from '../lib/secrets';
@@ -101,7 +101,9 @@ export async function evictWalletKeyIfIdle(walletAddress: string): Promise<void>
       .where(
         and(
           eq(functions.walletAddress, walletAddress),
-          eq(deployments.runKind, 'job'),
+          // Jobs need the key for teardown; a `waiting` service (or job) needs it
+          // for the reconciler's retry bursts. A normal live service does not.
+          or(eq(deployments.runKind, 'job'), eq(deployments.state, 'waiting')),
           notInArray(deployments.state, ['closed', 'failed']),
           // Only runs whose teardown isn't done yet keep the key alive.
           isNull(deployments.closedAt)

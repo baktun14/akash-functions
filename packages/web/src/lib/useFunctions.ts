@@ -6,7 +6,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { FunctionRecord, ServiceStatus } from '@shared/types';
 import { api } from './api';
 
-const TRANSIENT: ServiceStatus[] = ['pending'];
+// 'waiting' (wait-for-capacity) is transient too — keep polling so the card
+// flips to online the moment a retry burst lands a lease.
+const TRANSIENT: ServiceStatus[] = ['pending', 'waiting'];
 const ACTIVE_POLL_MS = 3000;
 const IDLE_POLL_MS = 30_000;
 

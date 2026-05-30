@@ -2,6 +2,7 @@ import { sql, desc } from 'drizzle-orm';
 import {
   bigint,
   bigserial,
+  boolean,
   check,
   index,
   integer,
@@ -166,6 +167,22 @@ export const deployments = pgTable('deployments', {
   // Runaway backstop snapshotted onto the row at submit time (D5/D6). The
   // reconciler force-terminates a job that overruns this.
   maxDurationMs: integer('max_duration_ms'),
+  // ── Wait-for-capacity (delayed start) ──
+  // Opt-in: on no-bid, enter the durable `waiting` state instead of `failed`,
+  // and let the reconciler retry until a lease lands / cancel / cap. Default
+  // OFF preserves today's fail-fast.
+  waitForCapacity: boolean('wait_for_capacity').notNull().default(false),
+  // Per-row wait budget; null → env default. Clamped to [floor, ceiling].
+  maxWaitMs: integer('max_wait_ms'),
+  // Cap + FIFO-fairness anchor. Set ONCE on first entry to `waiting` (COALESCE),
+  // never reset in v1, so it serves both the timeout cap and oldest-first
+  // ordering. Distinct from createdAt (which the boot/stuck watchdogs age on).
+  waitingSince: timestamp('waiting_since', { withTimezone: true }),
+  // Watchdog + backoff anchor: stamped on each waiting→bidding burst claim. The
+  // boot/stuck watchdogs age waitForCapacity rows on THIS (not createdAt, which
+  // is hours-old for a long waiter) so a retry burst isn't instantly failed; a
+  // burst past WAIT_FOR_CAPACITY_BURST_TIMEOUT_MS is reclaimed to `waiting`.
+  burstStartedAt: timestamp('burst_started_at', { withTimezone: true }),
   // Autonomous-teardown state machine (D1): null | requested | closing | done.
   // CAS-claimed by the teardown driver so /complete and the reconciler
   // watchdog can't double-close.

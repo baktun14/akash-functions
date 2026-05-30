@@ -78,6 +78,13 @@
       "when": 1780100059451,
       "tag": "0010_chubby_moonstone",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1780108027955,
+      "tag": "0011_panoramic_cannonball",
+      "breakpoints": true
     }
   ]
 }

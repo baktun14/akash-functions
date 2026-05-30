@@ -16,6 +16,7 @@ import type {
   GpuSpec,
   PresetId,
   ResourceRequest,
+  WaitForCapacityRequest,
 } from '@shared/types';
 import { JOB_GPU_PREFERENCE } from '@shared/types';
 import { FnLogo, Icon } from '../icons';
@@ -44,6 +45,7 @@ type Props = {
     sample: CodeSample,
     customResources?: ResourceRequest,
     envVars?: Record<string, string>,
+    opts?: WaitForCapacityRequest,
   ) => Promise<void>;
   /** Python-job primary action. When the active preset is `python`, the
    *  builder's primary button reads "Run" and calls this instead of onDeploy.
@@ -194,6 +196,10 @@ export function FunctionBuilder({
   const [customRes, setCustomRes] = useState<ResourceForm | null>(null);
   const [confirmingNoMatch, setConfirmingNoMatch] = useState(false);
   const [deploying, setDeploying] = useState(false);
+  // Wait-for-capacity: opt in to parking the deploy in `waiting` (retried in the
+  // background) instead of failing when no provider/GPU is available right now.
+  const [waitForCapacity, setWaitForCapacity] = useState(false);
+  const [maxWaitHours, setMaxWaitHours] = useState(24);
 
   const sample = SAMPLES[preset];
   const isPython = preset === 'python';
@@ -257,6 +263,8 @@ export function FunctionBuilder({
     // with "0.25 vCPU" they picked under rest after switching to gpu.
     setCustomRes(null);
     setConfirmingNoMatch(false);
+    setWaitForCapacity(false);
+    setMaxWaitHours(24);
     // Allow the availability-aware GPU auto-pick to run again for the new preset.
     gpuAutoPicked.current = false;
   };
@@ -266,7 +274,10 @@ export function FunctionBuilder({
     // If the user customized resources AND 0 providers match, require a
     // second click before we submit. Otherwise the bid pool will be empty
     // and the deployment sits in `bidding` until something comes online.
+    // Wait-for-capacity bypasses this gate — waiting IS the answer to "no
+    // providers right now."
     if (
+      !waitForCapacity &&
       customResourceRequest &&
       feasibility.status === 'ready' &&
       feasibility.result.matchingProviders === 0 &&
@@ -275,6 +286,9 @@ export function FunctionBuilder({
       setConfirmingNoMatch(true);
       return;
     }
+    const waitOpts: WaitForCapacityRequest | undefined = waitForCapacity
+      ? { waitForCapacity: true, maxWaitMs: Math.round(maxWaitHours * 3.6e6) }
+      : undefined;
     // Filter envValues down to currently-detected keys so a stale value left
     // behind from a previous source revision doesn't get sent.
     const envOut: Record<string, string> = {};
@@ -299,12 +313,14 @@ export function FunctionBuilder({
           source: { 'main.py': source, 'requirements.txt': PYTHON_REQUIREMENTS },
           resources,
           envVars: Object.keys(envOut).length > 0 ? envOut : undefined,
+          ...waitOpts,
         });
       } else {
         await onDeploy(
           { ...sample, name: trimmedName, source, prompt },
           customResourceRequest ?? undefined,
           Object.keys(envOut).length > 0 ? envOut : undefined,
+          waitOpts,
         );
       }
     } finally {
@@ -531,6 +547,57 @@ export function FunctionBuilder({
               </button>
             </div>
           </div>
+
+          {/* Wait-for-capacity: park the deploy in `waiting` and retry in the
+              background instead of failing when nothing is available now. */}
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              marginTop: 12,
+              fontSize: 12.5,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={waitForCapacity}
+              onChange={(e) => {
+                setWaitForCapacity(e.target.checked);
+                setConfirmingNoMatch(false);
+              }}
+            />
+            <span>
+              Wait for capacity{' '}
+              <span style={{ color: 'var(--fg-subtle)' }}>(don't fail if unavailable)</span>
+            </span>
+          </label>
+          {waitForCapacity && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginTop: 8,
+                fontSize: 12,
+                color: 'var(--fg-subtle)',
+              }}
+            >
+              <span>Give up after</span>
+              <input
+                type="number"
+                min={1}
+                max={168}
+                value={maxWaitHours}
+                onChange={(e) =>
+                  setMaxWaitHours(Math.min(168, Math.max(1, Number(e.target.value) || 1)))
+                }
+                style={{ width: 64, padding: '3px 6px' }}
+              />
+              <span>hours</span>
+            </div>
+          )}
 
           <div style={{ flex: 1, minHeight: 18 }} />
 
