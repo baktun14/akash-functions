@@ -47,6 +47,13 @@ export function waitPolicyConfig(): WaitPolicyConfig {
   };
 }
 
+// Runs default wait-for-capacity ON, but with a shorter default budget than
+// deploys (ephemeral jobs shouldn't park for a day). Only the default differs —
+// the [min, max] clamp and burst timeout are shared with deploys.
+export function runWaitPolicyConfig(): WaitPolicyConfig {
+  return { ...waitPolicyConfig(), defaultMaxWaitMs: env.RUN_WAIT_FOR_CAPACITY_DEFAULT_MAX_WAIT_MS };
+}
+
 // Called from both transition seams when a deploy got no bid/GPU.
 //   - !waitForCapacity → fail exactly as today (preserves fail-fast).
 //   - else → park the row in `waiting` (guarded against a racing cancel/complete

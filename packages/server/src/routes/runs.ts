@@ -33,7 +33,7 @@ import { groupBidsByCandidate, multiGroupPollOutcome, selectGpuWinner, type GpuW
 import { consoleApi } from '../akash/console-client';
 import { getBlocklistedProviders } from '../akash/provider-health';
 import { cacheWalletKey } from '../akash/key-cache';
-import { enterWaitingOrFail, waitPolicyConfig } from '../akash/waiting-driver';
+import { enterWaitingOrFail, runWaitPolicyConfig } from '../akash/waiting-driver';
 import { clampMaxWaitMs } from '../akash/wait-policy';
 import { cancelRunLease } from '../akash/teardown';
 import { db } from '../db/client';
@@ -103,6 +103,10 @@ runsRouter.post('/runs', zValidator('json', CreateAndRunBody), async (c) => {
 
   const encryptedEntries = encryptEnvVars(body.envVars);
   const resources = withJobStorageFloor(body.resources);
+  // Runs default wait-for-capacity ON: a GPU drought parks-and-retries (no
+  // on-chain cost while waiting) instead of failing fast. Opt out with
+  // waitForCapacity:false. Budget defaults to the shorter run-specific cap.
+  const wantWait = body.waitForCapacity ?? true;
 
   const created = await db.transaction(async (tx) => {
     const [fn] = await tx
@@ -146,8 +150,8 @@ runsRouter.post('/runs', zValidator('json', CreateAndRunBody), async (c) => {
         state: 'pending',
         runKind: 'job',
         maxDurationMs: env.JOB_MAX_DURATION_MS,
-        waitForCapacity: body.waitForCapacity ?? false,
-        maxWaitMs: body.waitForCapacity ? clampMaxWaitMs(body.maxWaitMs, waitPolicyConfig()) : null,
+        waitForCapacity: wantWait,
+        maxWaitMs: wantWait ? clampMaxWaitMs(body.maxWaitMs, runWaitPolicyConfig()) : null,
         // Seed the requested GPU so the run summary shows it before the pipeline
         // runs; the fallback loop updates it per attempt.
         gpuVendor: resources.gpu?.vendor ?? null,
@@ -159,7 +163,7 @@ runsRouter.post('/runs', zValidator('json', CreateAndRunBody), async (c) => {
     return { fn, version, dep };
   });
 
-  await launchRun(created.fn.id, created.version.id, created.dep.id, resources, akashKey, body.waitForCapacity ?? false);
+  await launchRun(created.fn.id, created.version.id, created.dep.id, resources, akashKey, wantWait);
   return c.json(toRunRecord(created.dep), 201);
 });
 
@@ -193,6 +197,9 @@ runsRouter.post('/:id/runs', zValidator('json', CreateRunBody), async (c) => {
 
   // NO 409 guard — concurrent runs are allowed (D6).
   const resources = withJobStorageFloor(version.resources);
+  // Default wait-for-capacity ON (see createAndRun). This also covers the UI's
+  // "Run again" button, which posts no body.
+  const wantWait = body.waitForCapacity ?? true;
   const [dep] = await db
     .insert(deployments)
     .values({
@@ -201,15 +208,15 @@ runsRouter.post('/:id/runs', zValidator('json', CreateRunBody), async (c) => {
       state: 'pending',
       runKind: 'job',
       maxDurationMs: env.JOB_MAX_DURATION_MS,
-      waitForCapacity: body.waitForCapacity ?? false,
-      maxWaitMs: body.waitForCapacity ? clampMaxWaitMs(body.maxWaitMs, waitPolicyConfig()) : null,
+      waitForCapacity: wantWait,
+      maxWaitMs: wantWait ? clampMaxWaitMs(body.maxWaitMs, runWaitPolicyConfig()) : null,
       gpuVendor: resources.gpu?.vendor ?? null,
       gpuModel: resources.gpu?.model ?? null,
     })
     .returning();
   if (!dep) throw new HTTPException(500, { message: 'Failed to record run' });
 
-  await launchRun(fn.id, version.id, dep.id, resources, akashKey, body.waitForCapacity ?? false);
+  await launchRun(fn.id, version.id, dep.id, resources, akashKey, wantWait);
   return c.json(toRunRecord(dep), 201);
 });
 
