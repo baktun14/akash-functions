@@ -99,17 +99,26 @@ export function gpuKey(g: { vendor: string; model: string }): string {
   return `${g.vendor}:${g.model.toLowerCase()}`;
 }
 
-// Pick the next GPU to try in the fallback loop: among models with free
-// capacity we haven't already tried, prefer JOB_GPU_PREFERENCE order (rough
-// capability), then fall back to the model with the most free units. Returns
-// null when nothing untried is available.
+// Datacenter / hopper / ada-class GPUs — kept in sync with the pricing tier in
+// sdl.ts (pricingAmount). The fallback only ever substitutes within this class
+// so a job is never silently dropped onto a small consumer card (rtx3060, t4…).
+function isDatacenterClassGpu(model: string): boolean {
+  return /^(h100|h200|a100|a40|l40|l4|pro6000|rtx6000|rtx5090)/.test(model.toLowerCase());
+}
+
+// Pick the next GPU to try in the fallback loop: among models with free capacity
+// we haven't already tried, prefer JOB_GPU_PREFERENCE order (rough capability),
+// then any other datacenter-class card by most-available. Returns null when no
+// untried DATACENTER-class GPU is available — we never substitute onto a small
+// consumer card.
 export function pickNextGpu(models: GpuModelOption[], tried: Set<string>): GpuSpec | null {
   const avail = models.filter((m) => m.available > 0 && !tried.has(gpuKey(m)));
-  if (avail.length === 0) return null;
   for (const model of JOB_GPU_PREFERENCE) {
     const hit = avail.find((m) => m.model.toLowerCase() === model);
     if (hit) return { vendor: hit.vendor, model: hit.model };
   }
-  const best = avail.slice().sort((a, b) => b.available - a.available)[0]!;
-  return { vendor: best.vendor, model: best.model };
+  const dc = avail
+    .filter((m) => isDatacenterClassGpu(m.model))
+    .sort((a, b) => b.available - a.available);
+  return dc[0] ? { vendor: dc[0].vendor, model: dc[0].model } : null;
 }
