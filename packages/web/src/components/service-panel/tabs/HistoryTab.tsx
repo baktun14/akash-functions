@@ -11,20 +11,12 @@ import { useEffect, useState, type ReactElement } from 'react';
 import type { FunctionRecord, FunctionVersionDetail, FunctionVersionSummary } from '@shared/types';
 import { useLayout } from '../../../App';
 import { api } from '../../../lib/api';
+import { primaryEntryPath } from '../../../lib/entryPath';
 import { Icon } from '../../icons';
 import { AsyncButton } from '../../ui/AsyncButton';
 import { CodeEditor } from '../../builder/CodeEditor';
 
 type Props = { svc: FunctionRecord };
-
-const PRIMARY_PATH_CANDIDATES = ['src/index.ts', 'src/index.tsx', 'index.ts', 'index.tsx'];
-
-function pickPrimaryPath(source: Record<string, string>): string {
-  for (const candidate of PRIMARY_PATH_CANDIDATES) {
-    if (candidate in source) return candidate;
-  }
-  return Object.keys(source)[0] ?? 'src/index.ts';
-}
 
 function relativeTime(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -132,7 +124,11 @@ export function HistoryTab({ svc }: Props): ReactElement {
     }
   };
 
-  const selectedPrimaryPath = selected ? pickPrimaryPath(selected.source) : 'src/index.ts';
+  const selectedPrimaryPath = selected
+    ? primaryEntryPath(svc.kind, selected.source)
+    : svc.kind === 'python-job'
+      ? 'main.py'
+      : 'src/index.ts';
 
   return (
     <div>
