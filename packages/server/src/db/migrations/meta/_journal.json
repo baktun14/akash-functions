@@ -85,6 +85,13 @@
       "when": 1780108027955,
       "tag": "0011_panoramic_cannonball",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1780194260770,
+      "tag": "0012_last_ma_gnuci",
+      "breakpoints": true
     }
   ]
 }

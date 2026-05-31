@@ -19,9 +19,12 @@ import { deployments, type DeploymentRow, functionVersions } from '../db/schema'
 import { env } from '../env';
 import { log } from '../lib/log';
 import { signRunner } from '../lib/signing';
+import { countDseqsForDeployment } from './dseq-audit';
 import { getAvailableGpuModels, pickNextGpu } from './gpu-inventory';
 import { evictWalletKeyIfIdle, getWalletKey, walletForDeployment } from './key-cache';
+import { isBootStalledBurst, isBurstCapExceeded } from './leak-policy';
 import { closeDseqBestEffort, startDeployPipeline } from './pipeline';
+import { requestTeardown } from './teardown';
 import { buildSdl } from './sdl';
 import {
   clampMaxWaitMs,
@@ -132,6 +135,21 @@ async function driveOne(row: DeploymentRow): Promise<boolean> {
     await failWaitingRow(
       row.id,
       `Delayed start timed out — no capacity became available within ${Math.round(cap / 3.6e6)}h.`
+    );
+    const wallet = await walletForDeployment(row.id);
+    if (wallet) await evictWalletKeyIfIdle(wallet);
+    return false;
+  }
+
+  // 1b. Runaway backstop — a single run may only mint so many on-chain
+  //     deployments across its whole wait window (audit-log count). Without this
+  //     a regression in the close/reclaim path can pile up paid deployments (the
+  //     leak that motivated it hit ~48). Needs no key.
+  const burstCount = await countDseqsForDeployment(row.id);
+  if (isBurstCapExceeded(burstCount, env.WAIT_FOR_CAPACITY_MAX_BURSTS)) {
+    await failWaitingRow(
+      row.id,
+      `Delayed start gave up after ${burstCount} capacity attempts — no usable capacity became available.`
     );
     const wallet = await walletForDeployment(row.id);
     if (wallet) await evictWalletKeyIfIdle(wallet);
@@ -266,6 +284,50 @@ export async function superviseStuckBurst(row: DeploymentRow): Promise<void> {
   const now = new Date();
   const wallet = await walletForDeployment(row.id);
   const key = wallet ? await getWalletKey(wallet) : null;
+
+  // Boot-failure discrimination (the leak's primary generator). A burst that
+  // reached `leased` but whose runner never heartbeat got capacity and then
+  // failed to boot (crash-loop / image-pull failure). Re-bursting it to "find
+  // capacity" is futile — the image is still broken — and is exactly what minted
+  // dozens of paid GPU deployments. Fail it fast with a durable verdict instead.
+  // (A burst still in pending/bidding never got capacity → genuine no-capacity →
+  // falls through to the reclaim path below.)
+  if (isBootStalledBurst({ state: row.state, runnerSeenAt: row.runnerSeenAt })) {
+    const verdict =
+      'Container never became ready — likely a crash-loop or image-pull failure.';
+    if (row.runKind === 'job') {
+      // Mirror the reconciler's failJob: record the run outcome and hand the
+      // lease to the teardown driver (which closes it and stamps the audit log).
+      // Re-assert the observed state so we never clobber — or tear down — a burst
+      // that advanced to running between the reconciler's SELECT and here.
+      const failed = await db
+        .update(deployments)
+        .set({
+          runOutcome: row.runOutcome ?? 'failed',
+          errorMessage: row.errorMessage ?? verdict,
+          finishedAt: row.finishedAt ?? now,
+          teardownState: row.teardownState ?? 'requested',
+        })
+        .where(and(eq(deployments.id, row.id), eq(deployments.state, row.state)))
+        .returning({ id: deployments.id });
+      if (failed.length === 0) return; // raced to running/closed — leave it alone
+      await requestTeardown(row.id);
+    } else {
+      // Service: close the dangling lease and fail the row.
+      if (key && row.dseq) await closeDseqBestEffort(key, row.dseq);
+      await db
+        .update(deployments)
+        .set({ state: 'failed', errorMessage: row.errorMessage ?? verdict, dseq: null })
+        .where(and(eq(deployments.id, row.id), eq(deployments.state, row.state)));
+    }
+    if (wallet) await evictWalletKeyIfIdle(wallet);
+    log.warn('waiting-driver: leased burst never booted → fail-fast (no re-burst)', {
+      deploymentId: row.id,
+      runKind: row.runKind,
+    });
+    return;
+  }
+
   // Reclaim escrow from the hung burst's deployment (best-effort; needs the key).
   if (key && row.dseq) await closeDseqBestEffort(key, row.dseq);
 
