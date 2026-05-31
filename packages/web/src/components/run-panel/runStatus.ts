@@ -5,7 +5,7 @@
 // so relying on state would clobber the real result. runOutcome (written by
 // /complete or cancel) is authoritative once present.
 
-import type { DeploymentState, FunctionRecord, RunOutcome } from '@shared/types';
+import type { DeploymentState, FunctionRecord, RunOutcome, RunRecord } from '@shared/types';
 
 export type RunPillTone = 'running' | 'ok' | 'error' | 'neutral';
 
@@ -236,4 +236,21 @@ export function timeAgo(iso: string | undefined, now: number): string {
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+// Optimistic row update when a job is re-run from the RunPanel. Clears the
+// previous terminal outcome/exit so the list pill stops showing the old result,
+// points the row at the new run, and sets a transient status — which both reads
+// as Running/Waiting in the list AND flips useFunctions back to fast polling.
+// The caller's refresh() then reconciles authoritative fields (timestamps,
+// ordering). Without this, the list keeps the stale pill until a manual refresh.
+export function applyRerun(svc: FunctionRecord, run: RunRecord): FunctionRecord {
+  return {
+    ...svc,
+    status: run.state === 'waiting' ? 'waiting' : 'pending',
+    runOutcome: undefined,
+    exitCode: undefined,
+    deploymentId: run.runId,
+    latestDeploymentId: run.runId,
+  };
 }

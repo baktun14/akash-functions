@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { FunctionRecord } from '@shared/types';
+import type { FunctionRecord, RunRecord } from '@shared/types';
 import {
   jobTone,
   timeAgo,
   jobMatchesOutcome,
   sortJobsByRecency,
+  applyRerun,
 } from './runStatus';
 
 // Minimal python-job record for status helpers. Only the fields the helpers
@@ -130,5 +131,41 @@ describe('sortJobsByRecency', () => {
     const input = [older, newer];
     sortJobsByRecency(input);
     expect(input.map((s) => s.id)).toEqual(['older', 'newer']);
+  });
+});
+
+function run(partial: Partial<RunRecord>): RunRecord {
+  return {
+    runId: 'r1',
+    functionId: 'j1',
+    versionId: 'v1',
+    state: 'pending',
+    createdAt: '2026-05-31T00:00:00.000Z',
+    ...partial,
+  };
+}
+
+describe('applyRerun', () => {
+  it('clears the previous terminal outcome and exit code so the pill stops showing the old result', () => {
+    const next = applyRerun(job({ runOutcome: 'failed', exitCode: 137 }), run({ runId: 'r2' }));
+    expect(next.runOutcome).toBeUndefined();
+    expect(next.exitCode).toBeUndefined();
+  });
+  it('marks the row pending for a normal new run', () => {
+    expect(applyRerun(job({ status: 'idle' }), run({ state: 'pending' })).status).toBe('pending');
+  });
+  it('marks the row waiting when the rerun parks in wait-for-capacity', () => {
+    expect(applyRerun(job({ status: 'idle' }), run({ state: 'waiting' })).status).toBe('waiting');
+  });
+  it('points the row at the new run id', () => {
+    const next = applyRerun(job({ latestDeploymentId: 'old' }), run({ runId: 'r2' }));
+    expect(next.latestDeploymentId).toBe('r2');
+    expect(next.deploymentId).toBe('r2');
+  });
+  it('preserves identity fields', () => {
+    const next = applyRerun(job({ id: 'keep', name: 'my-job' }), run({}));
+    expect(next.id).toBe('keep');
+    expect(next.name).toBe('my-job');
+    expect(next.kind).toBe('python-job');
   });
 });

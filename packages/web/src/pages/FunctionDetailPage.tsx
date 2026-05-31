@@ -1,8 +1,9 @@
 import { type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { FunctionRecord } from '@shared/types';
+import type { FunctionRecord, RunRecord } from '@shared/types';
 import { ServicePanel } from '../components/service-panel/ServicePanel';
 import { RunPanel } from '../components/run-panel/RunPanel';
+import { applyRerun } from '../components/run-panel/runStatus';
 import { useLayout } from '../App';
 import { api } from '../lib/api';
 import { sessionDeploys } from '../lib/sessionDeploys';
@@ -21,6 +22,17 @@ export function FunctionDetailPage(): ReactElement {
     sessionDeploys.mark(next.id);
     refresh().catch(() => undefined);
     navigate(`/functions/${next.id}`);
+  };
+
+  // "Run again" from the RunPanel: optimistically reflect the new run on the
+  // shared list row (clear the old outcome, mark it in-flight) so the Jobs list
+  // updates immediately, then refresh for authoritative state. No navigation —
+  // the user stays in the RunPanel watching the new run stream.
+  const handleRunStarted = (run: RunRecord) => {
+    if (!id) return;
+    setLocal((cur) => cur.map((s) => (s.id === id ? applyRerun(s, run) : s)));
+    sessionDeploys.mark(id);
+    refresh().catch(() => undefined);
   };
 
   // Close deployment = tear down the Akash lease but keep the function record
@@ -122,6 +134,7 @@ export function FunctionDetailPage(): ReactElement {
         onCloseDeployment={handleCloseDeployment}
         onDelete={handleDelete}
         onRename={handleRename}
+        onRunStarted={handleRunStarted}
       />
     );
   }
