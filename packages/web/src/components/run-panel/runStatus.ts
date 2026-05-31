@@ -24,6 +24,23 @@ const TONE_COLOR: Record<RunPillTone, string> = {
   neutral: 'var(--fg-subtle, #777)',
 };
 
+// Common process exit codes worth naming. 128+N = killed by signal N.
+const EXIT_LABELS: Record<number, string> = {
+  137: 'Out of memory',   // 128 + 9  (SIGKILL — usually OOM-killed)
+  143: 'Terminated',      // 128 + 15 (SIGTERM)
+  139: 'Segfault',        // 128 + 11 (SIGSEGV)
+  130: 'Interrupted',     // 128 + 2  (SIGINT / Ctrl-C)
+  127: 'Command not found',
+};
+
+// Failure pill text: name the code when we recognize it, keep the number for
+// the long tail. e.g. 137 -> "Out of memory (137)", 1 -> "Failed · Exit 1".
+export function failureLabel(exitCode: number | undefined): string {
+  const code = exitCode ?? 1;
+  const named = EXIT_LABELS[code];
+  return named ? `${named} (${code})` : `Failed · Exit ${code}`;
+}
+
 // 'waiting' (wait-for-capacity) is active — keep the Cancel button + poll on so
 // the user can stop a wait, and the pill keeps shimmering.
 const ACTIVE_STATES: DeploymentState[] = ['pending', 'bidding', 'leased', 'running', 'waiting'];
@@ -41,11 +58,11 @@ export function computeRunPill(
 ): RunPill {
   // Outcome is authoritative once written (survives lease close).
   if (outcome === 'succeeded') {
-    return { label: `Succeeded · Exit ${exitCode ?? 0}`, tone: 'ok', color: TONE_COLOR.ok, active: false };
+    return { label: 'Succeeded', tone: 'ok', color: TONE_COLOR.ok, active: false };
   }
   if (outcome === 'failed') {
     return {
-      label: `Failed · Exit ${exitCode ?? 1}`,
+      label: failureLabel(exitCode),
       tone: 'error',
       color: TONE_COLOR.error,
       active: false,

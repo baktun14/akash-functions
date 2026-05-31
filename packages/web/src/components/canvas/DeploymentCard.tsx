@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { FunctionRecord, RunOutcome, ServiceStatus } from '@shared/types';
 import { ensureHttpScheme } from '../../lib/url';
+import { failureLabel } from '../run-panel/runStatus';
 import { FnLogo, StatusDot } from '../icons';
 
 type Props = {
@@ -22,10 +23,10 @@ const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
 function jobTone(svc: FunctionRecord): { color: string; label: string } {
   const outcome: RunOutcome | undefined = svc.runOutcome;
   if (outcome === 'succeeded') {
-    return { color: 'var(--ok)', label: `Succeeded · Exit ${svc.exitCode ?? 0}` };
+    return { color: 'var(--ok)', label: 'Succeeded' };
   }
   if (outcome === 'failed') {
-    return { color: 'var(--err, #e5484d)', label: `Failed · Exit ${svc.exitCode ?? 1}` };
+    return { color: 'var(--err, #e5484d)', label: failureLabel(svc.exitCode) };
   }
   if (outcome === 'canceled') {
     return { color: 'var(--fg-subtle, #777)', label: 'Canceled' };

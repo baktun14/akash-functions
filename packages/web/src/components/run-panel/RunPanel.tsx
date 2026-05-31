@@ -111,22 +111,32 @@ export function RunPanel({
   const active = isRunActive(merged.state, merged.runOutcome);
   const pill = computeRunPill(merged.state, merged.runOutcome, merged.exitCode);
 
+  // Poll while ANY run is still in motion — not just the selected one. The
+  // header pill updates live from the stream, but the Runs list rows render
+  // from the raw `runs` records, which refresh only via loadRuns(). Gating the
+  // poll on the selected run alone killed it the instant the stream reported
+  // the outcome, stranding the just-finished list row on a spinner until a
+  // manual refresh. Polling until the list itself shows all-terminal lets it
+  // self-heal within one interval.
+  const anyActive =
+    active || runs.some((r) => isRunActive(r.state, r.runOutcome));
+
   // Reset stream-derived overrides when switching runs.
   useEffect(() => {
     setStreamUpdate(null);
   }, [selectedRunId]);
 
-  // Poll the run list + tick the clock while the shown run is active, so the
-  // summary row's live duration advances and a finished run gets its terminal
-  // record reflected even if the stream's `end` was missed.
+  // Poll the run list + tick the clock while any run is active, so the summary
+  // row's live duration advances and a finished run gets its terminal record
+  // reflected even if the stream's `end` was missed.
   useEffect(() => {
-    if (!active) return;
+    if (!anyActive) return;
     const t = setInterval(() => {
       setNow(Date.now());
       void loadRuns();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(t);
-  }, [active, loadRuns]);
+  }, [anyActive, loadRuns]);
 
   useEffect(() => {
     setEditingName(svc.name);
