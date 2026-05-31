@@ -42,6 +42,10 @@ const POLL_INTERVAL_MS = 2000;
 type Props = {
   svc: FunctionRecord;
   session: Session;
+  /** Bumped by the host when a run is created outside this panel (the builder's
+   *  "Save & run"). On change we refetch and jump to the newest run, so it shows
+   *  without a manual page refresh. */
+  reloadSignal?: number;
   onClose: () => void;
   onCloseDeployment?: () => void;
   onDelete?: () => void;
@@ -51,6 +55,7 @@ type Props = {
 export function RunPanel({
   svc,
   session,
+  reloadSignal,
   onClose,
   onCloseDeployment,
   onDelete,
@@ -125,6 +130,35 @@ export function RunPanel({
   useEffect(() => {
     setStreamUpdate(null);
   }, [selectedRunId]);
+
+  // Pull in a run started outside this panel — e.g. the builder's "Save & run",
+  // which bumps reloadSignal. The panel otherwise only loads on mount and polls
+  // while a run is active, so a freshly-created run wouldn't appear without a
+  // manual refresh. On a bump, refetch and jump to the newest run's logs.
+  const reloadedFor = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadedFor.current === reloadSignal) return; // mount / unrelated render
+    reloadedFor.current = reloadSignal;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await api.listRuns(svc.id);
+        if (cancelled) return;
+        setRuns(list);
+        const newest = list[0]?.runId;
+        if (newest && newest !== selectedRunId) {
+          setStreamUpdate(null);
+          setSelectedRunId(newest);
+          setTab('Logs');
+        }
+      } catch {
+        /* ignore — the active-run poll / next mount will catch up */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadSignal, svc.id, selectedRunId]);
 
   // Poll the run list + tick the clock while any run is active, so the summary
   // row's live duration advances and a finished run gets its terminal record

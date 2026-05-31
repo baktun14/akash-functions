@@ -20,6 +20,7 @@ import type {
   FunctionVersionDetail,
   PresetId,
   ResourceRequest,
+  RunRecord,
   Session,
   ToastMsg,
   WaitForCapacityRequest,
@@ -195,6 +196,27 @@ function Layout({
     refresh().catch(() => undefined);
   };
 
+  // python-job editor "Save & run": a fresh run of the new version was started.
+  // Bumping versionRev signals the mounted RunPanel to reload its run list and
+  // jump to the new run, so the user sees it stream without a manual refresh.
+  const handleEditorSavedAndRun = (_versionId: string, run: RunRecord) => {
+    setEditorTarget(null);
+    setVersionRev((r) => r + 1);
+    if (editorTarget) {
+      setLocal((cur) =>
+        cur.map((s) =>
+          s.id === editorTarget.fnId
+            ? { ...s, deploymentId: run.runId, latestDeploymentId: run.runId, status: 'pending' }
+            : s
+        )
+      );
+      sessionDeploys.mark(editorTarget.fnId);
+    }
+    setToast({ kind: 'ok', text: 'Saved & running new version…' });
+    setTimeout(() => setToast(null), 3500);
+    refresh().catch(() => undefined);
+  };
+
   const handleDeploy = async (
     sample: CodeSample,
     customResources?: ResourceRequest,
@@ -357,6 +379,7 @@ function Layout({
                 onClose={() => setEditorTarget(null)}
                 onSaved={handleEditorSaved}
                 onSavedAndDeployed={handleEditorSavedAndDeployed}
+                onSavedAndRun={handleEditorSavedAndRun}
                 agentSlot={editorHostsAgent ? agentPanelEl : null}
                 agentOpen={agentOpen}
                 onOpenAgent={() => setAgentOpen(true)}

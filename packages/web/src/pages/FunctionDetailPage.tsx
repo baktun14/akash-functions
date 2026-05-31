@@ -9,7 +9,7 @@ import { sessionDeploys } from '../lib/sessionDeploys';
 
 export function FunctionDetailPage(): ReactElement {
   const { id } = useParams<{ id: string }>();
-  const { services, session, setLocal, refresh } = useLayout();
+  const { services, session, setLocal, refresh, versionRev } = useLayout();
   const navigate = useNavigate();
 
   const svc = services.find((s) => s.id === id);
@@ -117,6 +117,7 @@ export function FunctionDetailPage(): ReactElement {
         key={svc.id}
         svc={svc}
         session={session}
+        reloadSignal={versionRev}
         onClose={() => navigate('/functions')}
         onCloseDeployment={handleCloseDeployment}
         onDelete={handleDelete}
