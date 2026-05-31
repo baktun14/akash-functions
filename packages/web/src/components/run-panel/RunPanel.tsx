@@ -28,7 +28,6 @@ import {
   computeRunPill,
   estimateCostUsd,
   formatDuration,
-  gpuHourlyUsd,
   isRunActive,
   phaseLabel,
   runDurationMs,
@@ -384,7 +383,7 @@ export function RunPanel({
         </div>
 
         {/* Run-summary row — GPU / provider / duration / exit / est. cost. */}
-        <RunSummary run={selectedRun} merged={merged} />
+        <RunSummary run={selectedRun} runs={runs} merged={merged} />
 
         {failed && merged.errorMessage && (
           <FailureBanner message={merged.errorMessage} />
@@ -532,13 +531,26 @@ function FailureBanner({ message }: { message: string }) {
 
 function RunSummary({
   run,
+  runs,
   merged,
 }: {
   run: RunRecord | null;
+  runs: RunRecord[];
   merged: { state: DeploymentState; runOutcome?: RunOutcome; exitCode?: number };
 }) {
-  const durationMs = runDurationMs(run?.startedAt, run?.finishedAt, Date.now());
-  const gpuModel = run?.gpu?.model;
+  const now = Date.now();
+  const durationMs = runDurationMs(run?.startedAt, run?.finishedAt, now);
+  // Cost (est.) is the cumulative total across ALL runs — each run can use a
+  // different GPU/rate, and active runs tick live via runDurationMs's `now` fallback.
+  let totalCostUsd = 0;
+  let billableRuns = 0;
+  for (const r of runs) {
+    const d = runDurationMs(r.startedAt, r.finishedAt, now);
+    if (d != null) {
+      totalCostUsd += estimateCostUsd(d, r.gpu?.model);
+      billableRuns += 1;
+    }
+  }
   const gpuLabel = run?.gpu
     ? `${run.gpu.vendor.toUpperCase()} ${run.gpu.model.toUpperCase()}`
     : '—';
@@ -574,8 +586,8 @@ function RunSummary({
       <SummaryItem
         icon="coin"
         label="Cost (est.)"
-        value={durationMs != null ? `$${estimateCostUsd(durationMs, gpuModel).toFixed(3)}` : '—'}
-        hint={`est. @ $${gpuHourlyUsd(gpuModel)}/hr`}
+        value={billableRuns > 0 ? `$${totalCostUsd.toFixed(3)}` : '—'}
+        hint={`total · ${billableRuns} run${billableRuns === 1 ? '' : 's'}`}
       />
       {run?.dseq && (
         <a
