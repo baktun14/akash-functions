@@ -311,6 +311,7 @@ export function RunPanel({
                 {selectedRun?.gpu ? ` · ${selectedRun.gpu.vendor.toUpperCase()} ${selectedRun.gpu.model.toUpperCase()}` : ''}…
               </div>
             )}
+            {active && selectedRun?.health === 'unhealthy' && <UnhealthyBadge />}
           </div>
           {active && (
             <AsyncButton
@@ -433,6 +434,33 @@ function StatusPill({ pill }: { pill: ReturnType<typeof computeRunPill> }) {
   );
 }
 
+// Live warning while a run is leased but its container never became ready past
+// the boot grace (server-derived run.health === 'unhealthy'). Surfaces a likely
+// crash-loop / image-pull failure early — well before the reconciler's boot
+// timeout writes the durable verdict — and is visible even when Logs is empty.
+function UnhealthyBadge() {
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        marginTop: 6,
+        padding: '4px 10px',
+        background: 'rgba(240, 160, 0, 0.10)',
+        border: '1px solid rgba(240, 160, 0, 0.40)',
+        borderRadius: 8,
+        fontSize: 12,
+        color: 'var(--warn, #f0a000)',
+      }}
+    >
+      <Icon name="info" size={12} color="var(--warn, #f0a000)" />
+      Container hasn’t become ready — likely a crash-loop or image-pull failure. Still
+      retrying until the boot timeout.
+    </div>
+  );
+}
+
 function FailureBanner({ message }: { message: string }) {
   return (
     <div
@@ -505,6 +533,32 @@ function RunSummary({
         value={durationMs != null ? `$${estimateCostUsd(durationMs, gpuModel).toFixed(3)}` : '—'}
         hint={`est. @ $${gpuHourlyUsd(gpuModel)}/hr`}
       />
+      {run?.dseq && (
+        <a
+          href={`https://console.akash.network/deployments/${run.dseq}`}
+          target="_blank"
+          rel="noreferrer"
+          title={`View deployment on Akash Console (dseq ${run.dseq})`}
+          style={{
+            marginLeft: 'auto',
+            alignSelf: 'center',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 10px',
+            fontSize: 12,
+            background: 'var(--bg-elev-3)',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            color: 'var(--fg)',
+            textDecoration: 'none',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          View on Akash Console
+          <Icon name="external" size={11} color="var(--fg-muted)" />
+        </a>
+      )}
     </div>
   );
 }

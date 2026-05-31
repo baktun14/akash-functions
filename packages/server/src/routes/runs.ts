@@ -28,6 +28,7 @@ import type {
 } from '@shared/types';
 import { closeDseqBestEffort, createAndAcquireLease, finishJobDeploy, startDeployPipeline } from '../akash/pipeline';
 import { recordDseqCreated } from '../akash/dseq-audit';
+import { computeRunHealth, RUN_HEALTH_GRACE_MS } from './run-health';
 import { buildSdl } from '../akash/sdl';
 import { buildMultiGroupGpuCandidates, getAvailableGpuModels, gpuKey, pickNextGpu } from '../akash/gpu-inventory';
 import { groupBidsByCandidate, multiGroupPollOutcome, selectGpuWinner, type GpuWinnerAttempt } from '../akash/bid-select';
@@ -807,6 +808,16 @@ function toRunRecord(dep: typeof deployments.$inferSelect): RunRecord {
     versionId: dep.versionId,
     state: dep.state as DeploymentState,
     runOutcome: (dep.runOutcome as RunOutcome | null) ?? undefined,
+    health: computeRunHealth({
+      runOutcome: dep.runOutcome,
+      state: dep.state,
+      runnerSeenAt: dep.runnerSeenAt,
+      // "how long leased without a heartbeat" — the current burst's anchor for a
+      // wait-for-capacity row, else the row's creation time.
+      anchor: dep.burstStartedAt ?? dep.createdAt,
+      now: new Date(),
+      graceMs: RUN_HEALTH_GRACE_MS,
+    }),
     exitCode: dep.exitCode ?? undefined,
     provider: dep.provider ?? undefined,
     dseq: dep.dseq ?? undefined,
