@@ -252,12 +252,21 @@ export type DeploymentRecord = {
 
 // One execution of a job-function, as the client sees it. `runId` === the
 // deployment row id.
+// Live health of a non-terminal run, derived server-side from state + heartbeat
+// (see packages/server/src/routes/run-health.ts). Absent when the run is healthy
+// or terminal. 'starting' = leased, pulling image (normal); 'unhealthy' = leased
+// but the container never became ready past the boot grace (crash-loop / image
+// pull failure).
+export type RunHealth = 'starting' | 'unhealthy';
+
 export type RunRecord = {
   runId: string;
   functionId: string;
   versionId: string;
   state: DeploymentState;
   runOutcome?: RunOutcome;
+  /** Live provisioning-health signal for the badge; absent when healthy/terminal. */
+  health?: RunHealth;
   exitCode?: number;
   provider?: string;
   dseq?: string;
