@@ -41,6 +41,7 @@ import { db } from '../db/client';
 import { deployments, type DeploymentRow } from '../db/schema';
 import { env } from '../env';
 import { log } from '../lib/log';
+import { sweepOrphanDseqs } from './dseq-audit';
 import { recordProviderFailure, recordProviderSuccess } from './provider-health';
 import { requestTeardown } from './teardown';
 import { driveWaitingRows, superviseStuckBurst, waitPolicyConfig } from './waiting-driver';
@@ -95,6 +96,14 @@ async function reconcileOnce(): Promise<void> {
 
   // Wait-for-capacity: retry parked `waiting` rows (oldest-first, capped bursts).
   await driveWaitingRows();
+
+  // Leak safety net: close any audit-logged deployment that's still open on-chain
+  // but orphaned (parent run terminal, or a superseded re-burst). Keyless —
+  // resolves each row's cached wallet key; rows with no cached key wait for the
+  // authed drain pass on GET /api/functions.
+  await sweepOrphanDseqs().catch((err) =>
+    log.warn('reconciler: sweepOrphanDseqs failed', { err: String(err) })
+  );
 }
 
 async function reconcileRow(row: DeploymentRow): Promise<void> {

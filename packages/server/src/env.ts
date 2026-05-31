@@ -115,6 +115,14 @@ const Schema = z.object({
   // still-running burst is never reclaimed (which would double-create), and stay
   // below JOB_BOOT_TIMEOUT_MS.
   WAIT_FOR_CAPACITY_BURST_TIMEOUT_MS: z.coerce.number().default(5 * 60_000), // 5m
+  // Runaway backstop: the hard ceiling on how many on-chain deployments a single
+  // run may mint across its whole wait window (initial launch + every reclaim
+  // re-burst, counted from the deployment_dseqs audit log). This is NOT a tight
+  // bound on a legitimate multi-hour wait — the per-burst GPU inventory gate and
+  // the "don't re-burst a boot-stalled lease" rule are what keep the steady-state
+  // count low — it's a last-resort guard against a pile-up if some path
+  // regresses. Generous on purpose; the leak that motivated it hit ~48.
+  WAIT_FOR_CAPACITY_MAX_BURSTS: z.coerce.number().int().positive().default(25),
 });
 
 export const env = Schema.parse(process.env);
