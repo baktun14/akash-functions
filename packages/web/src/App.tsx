@@ -348,6 +348,7 @@ function Layout({
                 functionName={
                   services.find((s) => s.id === editorTarget.fnId)?.name ?? 'function'
                 }
+                kind={services.find((s) => s.id === editorTarget.fnId)?.kind ?? 'function'}
                 initialDetail={editorTarget.detail}
                 hasActiveDeployment={
                   services.find((s) => s.id === editorTarget.fnId)?.status === 'online' ||
