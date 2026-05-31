@@ -9,8 +9,9 @@
 // during the propagation window.
 
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
-import type { DeploymentRecord, FunctionVersionDetail } from '@shared/types';
-import { api, pickEntryPath } from '../../lib/api';
+import type { DeploymentRecord, FunctionKind, FunctionVersionDetail } from '@shared/types';
+import { api } from '../../lib/api';
+import { primaryEntryPath, rebuildSourceMap } from '../../lib/entryPath';
 import { detectStartupIssue } from '../../lib/codeChecks';
 import { Icon } from '../icons';
 import { AsyncButton } from '../ui/AsyncButton';
@@ -21,6 +22,10 @@ import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
 type Props = {
   functionId: string;
   functionName: string;
+  /** Function kind — decides the entry filename on save. Python jobs run
+   *  main.py; TS services run src/index.ts(x). Getting this wrong drops the
+   *  entry file and the runner can't find the program. */
+  kind: FunctionKind;
   initialDetail: FunctionVersionDetail;
   hasActiveDeployment: boolean;
   onClose: () => void;
@@ -39,21 +44,13 @@ type Props = {
   onAgentFix?: (prompt: string) => void;
 };
 
-const PRIMARY_PATH_CANDIDATES = ['src/index.ts', 'src/index.tsx', 'index.ts', 'index.tsx'];
-
 // Matches the runner's default poll cadence + small buffer for the swap.
 const PUSH_LIVE_WINDOW_MS = 12_000;
-
-function pickPrimaryPath(source: Record<string, string>): string {
-  for (const candidate of PRIMARY_PATH_CANDIDATES) {
-    if (candidate in source) return candidate;
-  }
-  return Object.keys(source)[0] ?? 'src/index.ts';
-}
 
 export function FunctionEditor({
   functionId,
   functionName,
+  kind,
   initialDetail,
   hasActiveDeployment,
   onClose,
@@ -64,7 +61,10 @@ export function FunctionEditor({
   onOpenAgent,
   onAgentFix,
 }: Props): ReactElement {
-  const primaryPath = useMemo(() => pickPrimaryPath(initialDetail.source), [initialDetail.source]);
+  const primaryPath = useMemo(
+    () => primaryEntryPath(kind, initialDetail.source),
+    [kind, initialDetail.source]
+  );
   const initialPrimaryValue = initialDetail.source[primaryPath] ?? '';
   const [source, setSource] = useState<string>(initialPrimaryValue);
   const [message, setMessage] = useState<string>('');
@@ -104,15 +104,12 @@ export function FunctionEditor({
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Route to .tsx when source contains JSX; .ts otherwise. Drop the prior
-  // entry key when the extension flips so we don't ship both index.ts and
-  // index.tsx (the runner's pickEntry would resolve to whichever sorts first).
-  const buildSourceMap = (): Record<string, string> => {
-    const target = pickEntryPath(source);
-    const rest = { ...initialDetail.source };
-    delete rest[primaryPath];
-    return { ...rest, [target]: source };
-  };
+  // Write the edit back under the correct entry filename for the kind: TS
+  // services flip .ts<->.tsx by JSX; python jobs keep a runner-probed .py entry
+  // (and a version mis-saved under a TS path heals back to main.py). The old
+  // primary key is dropped so we never ship two entries. See ./entryPath.
+  const buildSourceMap = (): Record<string, string> =>
+    rebuildSourceMap(kind, initialDetail.source, primaryPath, source);
 
   const handleSave = async () => {
     if (inflight) return;

@@ -8,20 +8,12 @@ import { useEffect, useState, type ReactElement } from 'react';
 import type { FunctionRecord, FunctionVersionDetail } from '@shared/types';
 import { useLayout } from '../../../App';
 import { api } from '../../../lib/api';
+import { primaryEntryPath } from '../../../lib/entryPath';
 import { Icon } from '../../icons';
 import { AsyncButton } from '../../ui/AsyncButton';
 import { CodeEditor } from '../../builder/CodeEditor';
 
 type Props = { svc: FunctionRecord };
-
-const PRIMARY_PATH_CANDIDATES = ['src/index.ts', 'src/index.tsx', 'index.ts', 'index.tsx'];
-
-function pickPrimaryPath(source: Record<string, string>): string {
-  for (const candidate of PRIMARY_PATH_CANDIDATES) {
-    if (candidate in source) return candidate;
-  }
-  return Object.keys(source)[0] ?? 'src/index.ts';
-}
 
 function relativeTime(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -64,7 +56,12 @@ export function SourceCodeTab({ svc }: Props): ReactElement {
     };
   }, [svc.id, versionRev]);
 
-  const primaryPath = detail ? pickPrimaryPath(detail.source) : 'src/index.ts';
+  const isJob = svc.kind === 'python-job';
+  const primaryPath = detail
+    ? primaryEntryPath(svc.kind, detail.source)
+    : isJob
+      ? 'main.py'
+      : 'src/index.ts';
   const primarySource = detail?.source[primaryPath] ?? '';
 
   return (
@@ -86,7 +83,9 @@ export function SourceCodeTab({ svc }: Props): ReactElement {
         <span className="mono" style={{ fontSize: 12, color: 'var(--fg)' }}>
           {primaryPath}
         </span>
-        <span style={{ color: 'var(--fg-subtle)', fontSize: 12 }}>· Bun v1.3 runtime · read-only</span>
+        <span style={{ color: 'var(--fg-subtle)', fontSize: 12 }}>
+          · {isJob ? 'Python 3.11 · CUDA' : 'Bun v1.3 runtime'} · read-only
+        </span>
         {detail && (
           <span
             className="mono"
@@ -169,15 +168,27 @@ export function SourceCodeTab({ svc }: Props): ReactElement {
         }}
       >
         <Icon name="info" size={13} />
-        Bundled with{' '}
-        <span className="mono" style={{ color: 'var(--fg)' }}>
-          bun build --target=bun
-        </span>
-        , served by{' '}
-        <span className="mono" style={{ color: 'var(--fg)' }}>
-          Bun.serve
-        </span>
-        .
+        {isJob ? (
+          <span>
+            Runs{' '}
+            <span className="mono" style={{ color: 'var(--fg)' }}>
+              python3 -u main.py
+            </span>{' '}
+            to completion on a GPU, then tears down.
+          </span>
+        ) : (
+          <span>
+            Bundled with{' '}
+            <span className="mono" style={{ color: 'var(--fg)' }}>
+              bun build --target=bun
+            </span>
+            , served by{' '}
+            <span className="mono" style={{ color: 'var(--fg)' }}>
+              Bun.serve
+            </span>
+            .
+          </span>
+        )}
       </div>
     </div>
   );

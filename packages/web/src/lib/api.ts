@@ -41,6 +41,7 @@ import {
   removeKey,
   writeJSON,
 } from './storage';
+import { pickEntryPath } from './entryPath';
 
 export type UpdateCodeResult = {
   id: string;
@@ -158,15 +159,9 @@ export function tokensToSource(code: TokenLine[]): string {
   return code.map((line) => line.map((tok) => tok[1]).join('')).join('\n');
 }
 
-// Detects JSX content via an unambiguous closing-tag (or self-closing) pattern.
-// TS generics like `Promise<T>` lack `</T>` and never carry attributes, so they
-// don't match. Used to route the entry to .tsx when JSX is present, since Bun
-// rejects JSX inside .ts files.
-const JSX_TAG = /<\/[A-Za-z][\w-]*\s*>|<[A-Za-z][\w-]*[^<>]*\/>/;
-
-export function pickEntryPath(code: string): 'src/index.tsx' | 'src/index.ts' {
-  return JSX_TAG.test(code) ? 'src/index.tsx' : 'src/index.ts';
-}
+// pickEntryPath + the rest of the source-map entry contract now live in
+// ./entryPath (one tested home). Re-exported for existing importers.
+export { pickEntryPath } from './entryPath';
 
 // Builds the path → contents map sent to the deploy endpoint. The server
 // derives the route list from this source on every deployment fetch, so the
