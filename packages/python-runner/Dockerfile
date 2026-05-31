@@ -39,9 +39,14 @@ COPY --from=oven/bun:1.3 /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /app
 
 # Byte-identical supervisor, copied from the standard runner package. These
-# paths are relative to the REPO ROOT build context (see header).
+# paths are relative to the REPO ROOT build context (see header). boot.ts
+# dynamically imports ./boot-job when EXECUTION_KIND=job, so boot-job.ts MUST
+# be copied alongside it or the job-mode supervisor crash-loops on
+# `Cannot find module './boot-job'` (boot-job.ts imports only Node builtins +
+# named exports from ./boot — no other sibling deps to bring in).
 COPY packages/runner/boot.ts /boot/boot.ts
 COPY packages/runner/preload.ts /boot/preload.ts
+COPY packages/runner/boot-job.ts /boot/boot-job.ts
 
 # Optional GPU-probe entrypoint helper. boot-job.ts may invoke python directly;
 # this wrapper exists as the GPU_UNAVAILABLE sentinel mechanism (exit 89).
