@@ -9,7 +9,7 @@
 // during the propagation window.
 
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
-import type { DeploymentRecord, FunctionKind, FunctionVersionDetail } from '@shared/types';
+import type { DeploymentRecord, FunctionKind, FunctionVersionDetail, RunRecord } from '@shared/types';
 import { api } from '../../lib/api';
 import { primaryEntryPath, rebuildSourceMap } from '../../lib/entryPath';
 import { detectStartupIssue } from '../../lib/codeChecks';
@@ -31,6 +31,10 @@ type Props = {
   onClose: () => void;
   onSaved: (newVersionId: string) => void;
   onSavedAndDeployed: (newVersionId: string, deployment: DeploymentRecord) => void;
+  /** python-job only: save a new version then start a run of it (createRun).
+   *  Services hot-reload via onSavedAndDeployed instead; jobs are immutable and
+   *  must spin a fresh run, so /deploy (service-shaped) is wrong for them. */
+  onSavedAndRun?: (newVersionId: string, run: RunRecord) => void;
   /** Agent chat panel — when present, switches the editor to a 3-column grid. */
   agentSlot?: ReactNode;
   /** Whether the agent panel is currently open. Controls whether the in-editor
@@ -56,6 +60,7 @@ export function FunctionEditor({
   onClose,
   onSaved,
   onSavedAndDeployed,
+  onSavedAndRun,
   agentSlot,
   agentOpen,
   onOpenAgent,
@@ -149,6 +154,28 @@ export function FunctionEditor({
       });
       const dep = await api.deployVersion(functionId);
       onSavedAndDeployed(result.id, dep);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setInflight(null);
+    }
+  };
+
+  // python-job path: save a new version, then start a RUN of it (run-to-
+  // completion on a GPU). NOT deployVersion — /deploy is service-shaped (no
+  // executionKind=job, no GPU groups, startDeployPipeline not launchRun), so it
+  // would spin a broken service deployment of the Python image.
+  const handleSaveAndRun = async () => {
+    if (inflight || !onSavedAndRun) return;
+    setInflight('deploy');
+    setError(null);
+    try {
+      const result = await api.updateCode(functionId, {
+        source: buildSourceMap(),
+        message: message.trim() || undefined,
+      });
+      const run = await api.createRun(functionId);
+      onSavedAndRun(result.id, run);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -353,7 +380,37 @@ export function FunctionEditor({
             >
               Cancel
             </button>
-            {hasActiveDeployment ? (
+            {kind === 'python-job' ? (
+              // Jobs are immutable and run to completion — no hot-reload. Save a
+              // version (draft) or save + start a fresh run of it.
+              <>
+                <AsyncButton
+                  className="btn btn-subtle"
+                  onClick={handleSave}
+                  disabled={!!inflight || !dirty}
+                  loading={inflight === 'save'}
+                  loadingText="Saving…"
+                  spinnerSize={12}
+                  style={{ width: '100%', justifyContent: 'center', opacity: !dirty ? 0.5 : 1 }}
+                >
+                  <Icon name="check" size={12} />
+                  Save
+                </AsyncButton>
+                <AsyncButton
+                  className="btn btn-primary"
+                  onClick={handleSaveAndRun}
+                  disabled={!!inflight}
+                  loading={inflight === 'deploy'}
+                  loadingText="Starting…"
+                  spinnerSize={12}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                  title="Save a new version and run it to completion on a GPU."
+                >
+                  <Icon name="play" size={12} color="#0A0A0F" />
+                  Save & run
+                </AsyncButton>
+              </>
+            ) : hasActiveDeployment ? (
               <AsyncButton
                 className="btn btn-primary"
                 onClick={handleSave}
