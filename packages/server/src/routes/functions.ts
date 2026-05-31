@@ -20,6 +20,7 @@ import { ConsoleApiError, consoleApi } from '../akash/console-client';
 import { startDeployPipeline } from '../akash/pipeline';
 import { evictWalletKeyIfIdle } from '../akash/key-cache';
 import { drainPendingTeardowns } from '../akash/teardown';
+import { markDseqClosed, sweepOrphanDseqs } from '../akash/dseq-audit';
 import { rebuildAndUpdateSdl } from '../akash/rebind';
 import { buildSdl } from '../akash/sdl';
 import { db } from '../db/client';
@@ -130,6 +131,14 @@ functionsRouter.get('/', async (c) => {
   // teardown_state='requested' using THIS request's fresh Console key — covers
   // the rotated-cached-key case. Fire-and-forget.
   void drainPendingTeardowns(akashKey);
+
+  // Orphan-dseq sweep backstop (mirror of the teardown drain's dual path):
+  // close any leaked deployment our audit log recorded but never confirmed
+  // closed, using this request's fresh key. The reconciler runs the same sweep
+  // autonomously with the cached key; this covers the rotated-key case.
+  void sweepOrphanDseqs(akashKey).catch((err) =>
+    log.warn('sweepOrphanDseqs (authed drain) failed', { err: String(err) })
+  );
 
   // Fire-and-forget: cross-check on-chain state for any deployment we still
   // believe is live/leased. The reconciler can't do this (no apiKey outside
@@ -950,6 +959,7 @@ async function closeAllActiveDeployments(
     if (dep.dseq) {
       try {
         await consoleApi.closeDeployment(akashKey, dep.dseq);
+        await markDseqClosed(dep.dseq);
       } catch (err) {
         log.warn('console-api closeDeployment failed; marking row closed anyway', {
           err: String(err),

@@ -16,6 +16,7 @@ import { deployments } from '../db/schema';
 import { env } from '../env';
 import { log } from '../lib/log';
 import { ConsoleApiError, consoleApi, type Bid, type Lease } from './console-client';
+import { markDseqClosed, recordDseqCreated } from './dseq-audit';
 import { getBlocklistedProviders, recordProviderFailure } from './provider-health';
 import { isRunnerFresh, probeIngress, RUNNER_HEALTH_PATH, toFetchUrl } from './reconciler';
 import { enterWaitingOrFail } from './waiting-driver';
@@ -49,6 +50,9 @@ export async function closeDseqBestEffort(
   for (let i = 0; i < 2; i++) {
     try {
       await consoleApi.closeDeployment(akashKey, dseq);
+      // Stamp the audit log ONLY on a confirmed close, so a failed close leaves
+      // the row open for the orphan sweep to retry.
+      await markDseqClosed(dseq);
       return;
     } catch (err) {
       log.warn('closeDseqBestEffort: closeDeployment failed', { dseq, attempt: i, err: String(err) });
@@ -105,6 +109,9 @@ export async function createAndAcquireLease({
     });
     dseq = created.dseq;
     const { manifest } = created;
+    // Audit-log the dseq the instant it exists on-chain — before bid/lease/close
+    // — so the orphan sweep can always find it even if this row is later nulled.
+    await recordDseqCreated(deploymentId, dseq);
     await setState('bidding', { dseq });
     log.info('deployment created', { deploymentId, dseq, txHash: created.signTx.transactionHash });
 

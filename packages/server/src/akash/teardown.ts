@@ -17,6 +17,7 @@ import { deployments } from '../db/schema';
 import { env } from '../env';
 import { log } from '../lib/log';
 import { consoleApi } from './console-client';
+import { markDseqClosed } from './dseq-audit';
 import { evictWalletKeyIfIdle, getWalletKey, walletForDeployment } from './key-cache';
 
 // Mark a run as needing teardown and kick the driver. Idempotent: a row already
@@ -79,6 +80,7 @@ export async function runTeardown(
 
   try {
     await consoleApi.closeDeployment(akashKey, claimed.dseq);
+    await markDseqClosed(claimed.dseq);
     await finalizeClosed(deploymentId, claimed.closedAt);
     await maybeEvict(deploymentId);
     return 'done';
@@ -158,6 +160,7 @@ export async function cancelRunLease(deploymentId: string, akashKey: string): Pr
   if (dep.dseq) {
     try {
       await consoleApi.closeDeployment(akashKey, dep.dseq);
+      await markDseqClosed(dep.dseq);
     } catch (err) {
       log.warn('cancel: closeDeployment failed; marking row closed anyway', {
         err: String(err),

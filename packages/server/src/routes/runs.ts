@@ -27,6 +27,7 @@ import type {
   RunRecord,
 } from '@shared/types';
 import { closeDseqBestEffort, createAndAcquireLease, finishJobDeploy, startDeployPipeline } from '../akash/pipeline';
+import { recordDseqCreated } from '../akash/dseq-audit';
 import { computeRunHealth, RUN_HEALTH_GRACE_MS } from './run-health';
 import { buildSdl } from '../akash/sdl';
 import { buildMultiGroupGpuCandidates, getAvailableGpuModels, gpuKey, pickNextGpu } from '../akash/gpu-inventory';
@@ -633,6 +634,10 @@ export async function runGpuMultiGroup(args: {
     });
   if (!created) return;
   const { dseq, manifest } = created;
+  // Audit-log the dseq the instant it exists on-chain (before persisting it on
+  // the row), so the orphan sweep can always find it even if this row is later
+  // nulled by a reclaim-to-`waiting`.
+  await recordDseqCreated(deploymentId, dseq);
   // Persist dseq immediately so the reconciler can sweep this row if we crash
   // mid-poll (boot-timeout → teardown, or → waiting under wait-for-capacity).
   await db.update(deployments).set({ dseq }).where(eq(deployments.id, deploymentId));

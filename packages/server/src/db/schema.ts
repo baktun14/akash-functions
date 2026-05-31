@@ -198,6 +198,39 @@ export const deployments = pgTable('deployments', {
   closedAt: timestamp('closed_at', { withTimezone: true }),
 });
 
+// Append-only audit log of every on-chain deployment (dseq) the app has
+// created, with the timestamp it was confirmed closed. This is the leak's
+// safety net: `deployments.dseq` is a SINGLE column that gets nulled on every
+// reclaim-to-`waiting`, so once a wait-for-capacity run re-bursts, the prior
+// dseq is no longer findable from the deployments row. This table is NEVER
+// nulled — a row is inserted the moment `createDeployment` returns a dseq, and
+// `closedAt` is stamped ONLY after a close is confirmed on-chain. It gives us
+// (a) a provably-app-created allowlist for the shared-wallet orphan sweep, and
+// (b) the per-run burst count (the runaway backstop reads count(*) here).
+export const deploymentDseqs = pgTable(
+  'deployment_dseqs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    deploymentId: uuid('deployment_id')
+      .notNull()
+      .references(() => deployments.id, { onDelete: 'cascade' }),
+    dseq: text('dseq').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    // Stamped only after `closeDeployment` is confirmed (or the deployment is
+    // observed already gone from chain). Null → still open as far as we know →
+    // a sweep candidate once the parent run is terminal.
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+  },
+  (table) => ({
+    // One audit row per on-chain dseq; createDeployment returns a unique dseq so
+    // a re-burst can't collide, and this makes recordDseqCreated idempotent.
+    dseqUq: uniqueIndex('deployment_dseqs_dseq_uq').on(table.dseq),
+    // Sweep scans open rows (closedAt IS NULL); burst-cap counts by deployment.
+    deploymentIdx: index('deployment_dseqs_deployment_idx').on(table.deploymentId),
+    openIdx: index('deployment_dseqs_closed_at_idx').on(table.closedAt),
+  })
+);
+
 // User-defined environment variables, encrypted at rest with AES-256-GCM.
 // Decoupled from function_versions so a user can add/edit/remove variables
 // without creating a code version. The runner picks up changes via the
@@ -331,3 +364,5 @@ export type WalletConsoleKeyRow = typeof walletConsoleKeys.$inferSelect;
 export type WalletConsoleKeyInsert = typeof walletConsoleKeys.$inferInsert;
 export type RunLogRow = typeof runLogs.$inferSelect;
 export type RunLogInsert = typeof runLogs.$inferInsert;
+export type DeploymentDseqRow = typeof deploymentDseqs.$inferSelect;
+export type DeploymentDseqInsert = typeof deploymentDseqs.$inferInsert;
