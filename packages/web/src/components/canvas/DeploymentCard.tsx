@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
-import type { FunctionRecord, RunOutcome, ServiceStatus } from '@shared/types';
+import type { FunctionRecord, ServiceStatus } from '@shared/types';
 import { ensureHttpScheme } from '../../lib/url';
-import { failureLabel } from '../run-panel/runStatus';
+import { jobTone } from '../run-panel/runStatus';
 import { FnLogo, StatusDot } from '../icons';
 
 type Props = {
@@ -16,32 +16,6 @@ const STATUS_TONE: Record<ServiceStatus, { color: string; label: string }> = {
   offline:  { color: 'var(--err, #e5484d)',      label: 'Failed' },
   idle:     { color: 'var(--fg-subtle, #777)',   label: 'Not deployed' },
 };
-
-// Python-job cards surface the latest run's outcome (runOutcome + exitCode),
-// falling back to the lease status while the run is still in flight. No ingress
-// URL, no runner-outdated nudge — those are service-only concepts (D6).
-function jobTone(svc: FunctionRecord): { color: string; label: string } {
-  const outcome: RunOutcome | undefined = svc.runOutcome;
-  if (outcome === 'succeeded') {
-    return { color: 'var(--ok)', label: 'Succeeded' };
-  }
-  if (outcome === 'failed') {
-    return { color: 'var(--err, #e5484d)', label: failureLabel(svc.exitCode) };
-  }
-  if (outcome === 'canceled') {
-    return { color: 'var(--fg-subtle, #777)', label: 'Canceled' };
-  }
-  if (svc.status === 'offline') {
-    return { color: 'var(--err, #e5484d)', label: 'Failed' };
-  }
-  if (svc.status === 'waiting') {
-    return { color: 'var(--warn, #f5a524)', label: 'Waiting for GPU' };
-  }
-  if (svc.status === 'pending' || svc.status === 'online') {
-    return { color: 'var(--warn, #f5a524)', label: 'Running' };
-  }
-  return { color: 'var(--fg-subtle, #777)', label: 'Finished' };
-}
 
 export function DeploymentCard({ svc }: Props) {
   const isJob = svc.kind === 'python-job';

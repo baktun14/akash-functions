@@ -34,6 +34,9 @@ import { useRegisterActiveEditor } from '../agent/ActiveEditorContext';
 
 type Props = {
   initialPreset?: PresetId | null;
+  /** Restricts the preset picker to this subset — service presets for "New
+   *  function", python-only for "New job". undefined = all presets. */
+  presets?: PresetId[];
   /** Seed for the editor when opening the builder from the agent chat. Falls
    *  back to the preset's template source when absent. */
   initialSource?: string | null;
@@ -133,6 +136,7 @@ function toResourceRequest(form: ResourceForm): ResourceRequest {
 
 export function FunctionBuilder({
   initialPreset,
+  presets,
   initialSource,
   onClose,
   onDeploy,
@@ -411,7 +415,7 @@ export function FunctionBuilder({
             Templates
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {PRESETS.map((p) => (
+            {PRESETS.filter((p) => !presets || presets.includes(p.id)).map((p) => (
               <button
                 key={p.id}
                 onClick={() => onSelectPreset(p.id)}

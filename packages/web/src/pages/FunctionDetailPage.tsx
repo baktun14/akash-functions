@@ -73,7 +73,7 @@ export function FunctionDetailPage(): ReactElement {
       await api.remove(id);
       setLocal((cur) => cur.filter((s) => s.id !== id));
       sessionDeploys.clear(id);
-      navigate('/functions');
+      navigate(svc?.kind === 'python-job' ? '/jobs' : '/functions');
     } catch (err) {
       alert(`Failed to delete function: ${(err as Error).message}`);
     }
@@ -118,7 +118,7 @@ export function FunctionDetailPage(): ReactElement {
         svc={svc}
         session={session}
         reloadSignal={versionRev}
-        onClose={() => navigate('/functions')}
+        onClose={() => navigate('/jobs')}
         onCloseDeployment={handleCloseDeployment}
         onDelete={handleDelete}
         onRename={handleRename}

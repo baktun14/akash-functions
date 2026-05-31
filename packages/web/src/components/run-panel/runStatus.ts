@@ -5,7 +5,7 @@
 // so relying on state would clobber the real result. runOutcome (written by
 // /complete or cancel) is authoritative once present.
 
-import type { DeploymentState, RunOutcome } from '@shared/types';
+import type { DeploymentState, FunctionRecord, RunOutcome } from '@shared/types';
 
 export type RunPillTone = 'running' | 'ok' | 'error' | 'neutral';
 
@@ -156,4 +156,84 @@ export function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+// ── python-job LIST helpers (function-record level) ──
+//
+// These operate on the FunctionRecord list rows (not deployment rows) and back
+// the Jobs section's list + outcome filter. They mirror computeRunPill's
+// outcome-over-state precedence (D4) so a row's pill and its filter bucket can
+// never disagree.
+
+// Pill for a job ROW: the latest run's outcome (runOutcome + exitCode), falling
+// back to the lease status while the run is still in flight. No ingress URL, no
+// runner-outdated nudge — those are service-only concepts (D6).
+export function jobTone(svc: FunctionRecord): { color: string; label: string } {
+  const outcome: RunOutcome | undefined = svc.runOutcome;
+  if (outcome === 'succeeded') {
+    return { color: 'var(--ok)', label: 'Succeeded' };
+  }
+  if (outcome === 'failed') {
+    return { color: 'var(--err, #e5484d)', label: failureLabel(svc.exitCode) };
+  }
+  if (outcome === 'canceled') {
+    return { color: 'var(--fg-subtle, #777)', label: 'Canceled' };
+  }
+  if (svc.status === 'offline') {
+    return { color: 'var(--err, #e5484d)', label: 'Failed' };
+  }
+  if (svc.status === 'waiting') {
+    return { color: 'var(--warn, #f5a524)', label: 'Waiting for GPU' };
+  }
+  if (svc.status === 'pending' || svc.status === 'online') {
+    return { color: 'var(--warn, #f5a524)', label: 'Running' };
+  }
+  return { color: 'var(--fg-subtle, #777)', label: 'Finished' };
+}
+
+export type JobOutcomeFilter = 'all' | 'running' | 'succeeded' | 'failed';
+
+// Does a job row belong under the given outcome filter? Mirrors jobTone's
+// branches so the filter and the displayed pill never disagree. A canceled run
+// only surfaces under "all".
+export function jobMatchesOutcome(svc: FunctionRecord, filter: JobOutcomeFilter): boolean {
+  if (filter === 'all') return true;
+  const outcome = svc.runOutcome;
+  if (filter === 'succeeded') return outcome === 'succeeded';
+  if (filter === 'failed') return outcome === 'failed' || (!outcome && svc.status === 'offline');
+  // 'running' — no terminal outcome yet and the lease is still in motion.
+  return (
+    !outcome &&
+    (svc.status === 'pending' || svc.status === 'online' || svc.status === 'waiting')
+  );
+}
+
+// Recency key for a job row: updatedAt, falling back to createdAt; 0 when
+// neither is present (sorts such rows last).
+function recencyTs(svc: FunctionRecord): number {
+  const iso = svc.updatedAt ?? svc.createdAt;
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+// Most-recent first. Returns a new array — never mutates the input.
+export function sortJobsByRecency(jobs: FunctionRecord[]): FunctionRecord[] {
+  return jobs.slice().sort((a, b) => recencyTs(b) - recencyTs(a));
+}
+
+// Compact relative time for the jobs list "Last run" column. `now` (ms) is
+// injected to stay deterministic and match runDurationMs's style. Future
+// timestamps clamp to "just now"; a missing/unparseable value renders an em dash.
+export function timeAgo(iso: string | undefined, now: number): string {
+  if (!iso) return '—';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  const sec = Math.floor(Math.max(0, now - t) / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
 }
