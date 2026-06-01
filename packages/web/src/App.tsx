@@ -37,13 +37,14 @@ import { ActiveEditorProvider } from './components/agent/ActiveEditorContext';
 import { AgentPanel } from './components/agent/AgentPanel';
 import { ApiKeysPage } from './pages/ApiKeysPage';
 import { FunctionsPage } from './pages/FunctionsPage';
+import { JobsPage } from './pages/JobsPage';
 import { FunctionDetailPage } from './pages/FunctionDetailPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 import { useFunctions } from './lib/useFunctions';
 import { sessionDeploys } from './lib/sessionDeploys';
 import { api } from './lib/api';
 
-type OpenBuilderOpts = { preset?: PresetId | null; initialSource?: string | null };
+type OpenBuilderOpts = { preset?: PresetId | null; initialSource?: string | null; presets?: PresetId[] };
 
 type LayoutContext = {
   session: Session;
@@ -83,6 +84,8 @@ export default function App(): ReactElement {
         <Route path="/" element={<Navigate to="/functions" replace />} />
         <Route path="/functions" element={<FunctionsPage />} />
         <Route path="/functions/:id" element={<FunctionDetailPage />} />
+        <Route path="/jobs" element={<JobsPage />} />
+        <Route path="/jobs/:id" element={<FunctionDetailPage />} />
         <Route path="/templates" element={<TemplatesPageRoute />} />
         <Route path="/logs" element={<PlaceholderPage label="Logs" />} />
         <Route path="/keys" element={<ApiKeysPage />} />
@@ -110,6 +113,9 @@ function Layout({
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderPreset, setBuilderPreset] = useState<PresetId | null>(null);
   const [builderInitialSource, setBuilderInitialSource] = useState<string | null>(null);
+  // Restricts the builder's preset picker (e.g. service presets for "New
+  // function", python-only for "New job"). undefined = all presets allowed.
+  const [builderPresets, setBuilderPresets] = useState<PresetId[] | undefined>(undefined);
   const [editorTarget, setEditorTarget] = useState<
     { fnId: string; detail: FunctionVersionDetail } | null
   >(null);
@@ -142,6 +148,7 @@ function Layout({
   const openBuilder = (preset: PresetId | null = null, opts?: OpenBuilderOpts) => {
     setBuilderPreset(opts?.preset ?? preset);
     setBuilderInitialSource(opts?.initialSource ?? null);
+    setBuilderPresets(opts?.presets);
     setBuilderOpen(true);
   };
 
@@ -150,6 +157,7 @@ function Layout({
   const openBuilderWithSource = (code: string) => {
     setBuilderPreset(null);
     setBuilderInitialSource(code);
+    setBuilderPresets(undefined);
     setBuilderOpen(true);
   };
 
@@ -270,7 +278,9 @@ function Layout({
         text: body.waitForCapacity ? `Waiting for a GPU for ${body.name}…` : `Running ${body.name}…`,
       });
       setTimeout(() => setToast(null), 3500);
-      navigate(`/functions/${svc.id}`);
+      // Land inside the Jobs section so the sidebar highlights Jobs and the new
+      // run shows up under Jobs (not Functions).
+      navigate(`/jobs/${svc.id}`);
       refresh().catch(() => undefined);
     } catch (err) {
       setBuilderOpen(false);
@@ -355,6 +365,7 @@ function Layout({
             {builderOpen && (
               <FunctionBuilder
                 initialPreset={builderPreset}
+                presets={builderPresets}
                 initialSource={builderInitialSource}
                 onClose={() => setBuilderOpen(false)}
                 onDeploy={handleDeploy}
@@ -399,9 +410,10 @@ function TemplatesPageRoute(): ReactElement {
   return <TemplatesPage onUseTemplate={(t) => openBuilder(t.preset)} />;
 }
 
-type SidebarId = 'deployments' | 'templates' | 'logs' | 'keys' | 'usage' | 'docs' | 'support';
+type SidebarId = 'deployments' | 'jobs' | 'templates' | 'logs' | 'keys' | 'usage' | 'docs' | 'support';
 
 function pathToSidebarId(pathname: string): SidebarId {
+  if (pathname.startsWith('/jobs')) return 'jobs';
   if (pathname.startsWith('/templates')) return 'templates';
   if (pathname.startsWith('/logs')) return 'logs';
   if (pathname.startsWith('/keys')) return 'keys';

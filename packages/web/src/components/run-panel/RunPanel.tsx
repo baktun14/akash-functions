@@ -49,6 +49,10 @@ type Props = {
   onCloseDeployment?: () => void;
   onDelete?: () => void;
   onRename?: (name: string) => void | Promise<void>;
+  /** Fired when "Run again" starts a fresh run, so the host can update the
+   *  shared function list (clear the old outcome, mark it in-flight) without
+   *  waiting for the next poll. */
+  onRunStarted?: (run: RunRecord) => void;
 };
 
 export function RunPanel({
@@ -59,6 +63,7 @@ export function RunPanel({
   onCloseDeployment,
   onDelete,
   onRename,
+  onRunStarted,
 }: Props): ReactElement {
   const [tab, setTab] = useState<TabName>('Logs');
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -227,6 +232,9 @@ export function RunPanel({
       setRuns((cur) => [run, ...cur]);
       setSelectedRunId(run.runId);
       setTab('Logs');
+      // Propagate to the shared list so the Jobs list pill reflects the new run
+      // immediately, instead of showing the previous outcome until a refresh.
+      onRunStarted?.(run);
       await loadRuns();
     } catch (err) {
       alert(`Failed to start a new run: ${(err as Error).message}`);

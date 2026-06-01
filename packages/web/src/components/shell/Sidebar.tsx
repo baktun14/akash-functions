@@ -3,12 +3,13 @@
 import type { ReactElement } from 'react';
 import { AkashSign, Icon } from '../icons';
 
-type ViewId = 'deployments' | 'templates' | 'logs' | 'keys' | 'usage' | 'docs' | 'support';
+type ViewId = 'deployments' | 'jobs' | 'templates' | 'logs' | 'keys' | 'usage' | 'docs' | 'support';
 
 type NavItem = { id: ViewId; label: string; icon: string };
 
 const MAIN: NavItem[] = [
   { id: 'deployments', label: 'Functions',  icon: 'fn' },
+  { id: 'jobs',        label: 'Jobs',       icon: 'bolt' },
   { id: 'templates',   label: 'Templates',  icon: 'fileLines' },
   { id: 'logs',        label: 'Logs',       icon: 'activity' },
   { id: 'keys',        label: 'API keys',   icon: 'keys' },
